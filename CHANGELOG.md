@@ -136,6 +136,34 @@ rather than run a process that claims to be a VRRP router while sending nothing.
   sharing an octet with the interval. The decoder ignores a non-zero reserved
   nibble, as the RFC requires of a receiver.
 
+### Fixed, by running it on Linux
+
+The Netlink backend had never been compiled, because it is `cfg`'d out on
+macOS. Compiling it in a container found **thirteen errors** and then two real
+bugs that no amount of reading would have found:
+
+- The `Connection` future that drives the Netlink socket was being dropped
+  instead of spawned. Every request then failed with "not acknowledged", while
+  every type still lined up. Only a live socket shows this.
+- A by-name interface lookup that matches nothing arrives as `ERANGE`, not as an
+  empty dump, so "no such interface" was surfacing as a transport error.
+
+Also corrected: the `rtnetlink` feature is `tokio_socket`, not `tokio`, and
+`Handle` takes no type parameter. Both were written from a wrong assumption.
+
+### Added
+
+- `scripts/linux-tests.sh`: the whole gate in a container with `CAP_NET_ADMIN`,
+  which is how the Linux-only code gets compiled and executed from a Mac.
+- Seven Netlink tests against a real kernel, behind the `netlink-tests` feature,
+  each creating its own dummy interface. They assert `I-19` directly: a
+  successful add means the kernel state changed, read back from the kernel.
+- `NetlinkBackend::create_dummy` and `remove_dummy`, compiled only with
+  `netlink-tests`, because the namespace harness needs them and the daemon does
+  not.
+- A link and address subscription, which is how a node learns an interface went
+  away.
+
 ### Not delivered, and why
 
 - **The raw VRRP socket.** It needs `SOCK_RAW` for IP protocol 112, and reading a

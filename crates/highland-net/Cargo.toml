@@ -18,6 +18,9 @@ default = []
 # `cfg(target_os = "linux")` regardless, so the crate still builds elsewhere with
 # an `UnsupportedBackend`.
 netlink = []
+# Runs the Netlink tests against a real kernel. Off by default because they need
+# `CAP_NET_ADMIN` and a Linux host; see crates/highland-net/tests/netlink.rs.
+netlink-tests = []
 
 # The Netlink stack is Linux-only. `rtnetlink` pulls in `netlink-sys`, which
 # references `libc::PF_NETLINK`, `libc::SOCK_CLOEXEC`, and `libc::sockaddr_nl`
@@ -25,11 +28,15 @@ netlink = []
 # `cargo test --workspace` on macOS. See docs/adr/ADR-0003-netlink-library.md.
 
 [dependencies]
+futures-util.workspace = true
 highland-vrrp.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rtnetlink = { version = "0.23", features = ["tokio"] }
+# The feature is named `tokio_socket`, not `tokio`, and it is the one that
+# selects the asynchronous socket type. Verified against the crate's own
+# `Cargo.toml` rather than assumed.
+rtnetlink = { version = "0.23", features = ["tokio_socket"] }
 # `Type::RAW` and an arbitrary IP protocol number both need the `all` feature:
 # VRRP is IP protocol 112, which has no constant.
 socket2 = { version = "0.6", features = ["all"] }
@@ -40,7 +47,8 @@ tokio = { workspace = true, features = ["net", "io-util", "rt", "time"] }
 tokio = { workspace = true, features = ["net", "io-util", "rt", "time"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+futures-util.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true

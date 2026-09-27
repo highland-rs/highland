@@ -16,7 +16,7 @@
 //!
 //! The Netlink implementation is selected by `cfg(target_os = "linux")`, not by
 //! a feature, because `rtnetlink` cannot compile elsewhere at all. Every other
-//! platform gets [`UnsupportedBackend`], whose operations return
+//! platform gets `UnsupportedBackend`, whose operations return
 //! [`NetError::Unsupported`], so the executor and its tests run everywhere.
 //!
 //! The library choice and the reason for the platform gate are recorded in
@@ -52,7 +52,7 @@ pub use vrrp::{
 };
 
 #[cfg(target_os = "linux")]
-pub use netlink::NetlinkBackend;
+pub use netlink::{LinkEvent, NetlinkBackend};
 
 #[cfg(not(target_os = "linux"))]
 pub use unsupported::UnsupportedBackend;

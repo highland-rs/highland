@@ -85,6 +85,26 @@ Gratuitous ARP needs an `AF_PACKET` socket, whose `sockaddr_ll` has no safe
 `NetError::Unsupported`. The state machine already treats a gratuitous-update
 failure as non-fatal, so nothing else changes.
 
+## Verified, not assumed
+
+Everything above was checked against the crate rather than believed, and two of
+the results changed the decision:
+
+1. The feature is named `tokio_socket`, not `tokio`. `tokio` selects
+   `async-global-executor`, which would have dragged a second runtime into a
+   workspace that has not chosen one yet (`B-01`).
+2. `netlink-sys` does not compile off Linux, which is why the dependency is
+   target-gated rather than feature-gated. Verified by building the workspace
+   for Linux in a container and for macOS on the host.
+
+The backend's shape also came out of the API rather than out of expectation:
+`Handle` takes no type parameter and cannot be constructed directly, requests
+carry their own `execute()`, a name filter that matches nothing comes back as
+`ERANGE` rather than an empty dump, and — the one that matters — the
+`Connection` returned alongside the handle is the future that drives the socket.
+Dropping it without a task leaves a socket that accepts every request and answers
+none of them. None of that is visible in the type signatures.
+
 ## Consequences
 
 - `highland-net` gains a Linux-only dependency edge, and a second dependency for

@@ -104,6 +104,41 @@ script rather than a namespace and a root shell, and they run in milliseconds.
 What a scripted kernel cannot prove is that Linux behaves as the backend expects.
 That is the namespace suite's job, and it is the reason both exist.
 
+## Linux-only checks
+
+`highland-net`'s Netlink backend is selected by `cfg(target_os = "linux")`, so on
+a Mac it is never compiled. That is a real hazard: the first time the module was
+compiled for Linux it did not build, and once it built it had a bug that only a
+live socket could reveal — the Netlink `Connection` future was being dropped
+instead of driven, so every request failed with "not acknowledged" while the
+types all lined up.
+
+`scripts/linux-tests.sh` is the answer. It runs the whole gate in a container
+with `CAP_NET_ADMIN`:
+
+```console
+$ scripts/linux-tests.sh            # format, clippy, test, rustdoc, Netlink tests
+$ scripts/linux-tests.sh --no-net   # everything except the privileged tests
+```
+
+It is a container rather than a VM because the only requirement is a Linux
+kernel with the right capabilities, and the container's network namespace is
+already isolated. The source is mounted read-only and cargo and target live in
+named volumes, so a run leaves nothing behind.
+
+The Netlink tests create their own dummy interface, so the suite is
+self-contained and two runs cannot collide:
+
+| Test | What it establishes |
+|---|---|
+| `a_created_interface_resolves_and_reports_no_carrier` | Interface lookup, and that a device with no carrier does not read as usable (`I-15`) |
+| `an_interface_that_does_not_exist_is_reported` | A name filter matching nothing is "not found", whatever errno the kernel chose |
+| `an_address_is_added_confirmed_and_removed` | `I-19` for IPv4 and IPv6: the read-back, not the acknowledgment, is the confirmation |
+| `several_addresses_coexist_and_are_listed_in_order` | Several VIPs on one interface |
+| `adding_an_address_twice_is_idempotent` | A retry cannot fault an instance that already owns the address |
+| `removing_an_address_that_is_not_there_is_idempotent` | A repeated release cannot fault |
+| `the_link_subscription_reports_an_address_change` | A subscription that installs and then never delivers would leave a node holding an address on a link that had gone away |
+
 ## Network-namespace tests
 
 These arrive with Milestone 4. The harness will build:

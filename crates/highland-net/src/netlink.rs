@@ -13,28 +13,49 @@
 //! returning `Ok` therefore means the address is present in the kernel, which is
 //! what `I-19` requires and what the state machine's ownership handshake depends
 //! on.
+//!
+//! # Link state
+//!
+//! Link state comes from `IFLA_OPERSTATE` rather than from `IFF_UP`. The
+//! operational state is the one that answers the question VRRP actually cares
+//! about: an interface can be administratively up with no carrier, and taking
+//! ownership of an address on a link that cannot carry a packet is exactly the
+//! failure `I-15` exists to prevent.
 
 use std::io;
 use std::net::IpAddr;
 
-use rtnetlink::{
-    AddressAddReq, AddressDeleteReq, AddressListOptions, Handle, LinkGetOptions,
-    LinkSubscribeOptions, NetlinkSocketError,
-};
-use tokio::net::UnixDatagram as NetlinkSocket;
+use futures_util::StreamExt as _;
+
+use rtnetlink::packet_core::NetlinkPayload;
+use rtnetlink::packet_route::RouteNetlinkMessage;
+use rtnetlink::packet_route::address::AddressAttribute;
+use rtnetlink::packet_route::link::{LinkAttribute, LinkMessage};
+use rtnetlink::{Error as RtnetlinkError, Handle};
 
 use crate::backend::NetworkBackend;
 use crate::error::{NetError, Result};
 use crate::types::{Interface, InterfaceId, IpCidr, LinkState};
 
-/// The address protocol used for addresses this project adds, so a diagnostic
-/// can tell where a VIP came from. `RTPROT_BOOT` is 3.
-const ADDRESS_PROTOCOL: u8 = 3;
+/// Something the kernel told us changed.
+///
+/// The daemon does not need the whole message: it needs to know that a link or
+/// an address moved, and then it re-reads the state it cares about. That keeps
+/// this crate's types out of the daemon's, and keeps a subscription from becoming
+/// a second, divergent source of truth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LinkEvent {
+    /// A link attribute changed.
+    Link,
+    /// An address changed.
+    Address,
+}
 
 /// A [`NetworkBackend`] over Netlink.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NetlinkBackend {
-    handle: Handle<NetlinkSocketError>,
+    handle: Handle,
 }
 
 impl NetlinkBackend {
@@ -45,56 +66,33 @@ impl NetlinkBackend {
     /// Returns [`NetError::Io`] when a Netlink socket cannot be created, which
     /// needs `CAP_NET_ADMIN` for the operations this backend performs.
     pub fn open() -> Result<Self> {
-        let socket = NetlinkSocket::unbound().map_err(|source| NetError::Io {
-            operation: "opening a netlink socket",
-            source,
-        })?;
-        Ok(Self {
-            handle: Handle::new(socket),
-        })
+        let (connection, handle, _messages) =
+            rtnetlink::new_connection().map_err(|source| NetError::Io {
+                operation: "opening a netlink socket",
+                source,
+            })?;
+
+        // The connection is the future that drives the socket, and the handle is
+        // only a channel to it. Dropping the connection without a task polling it
+        // leaves a socket that accepts every request and answers none of them, so
+        // every lookup fails with "not acknowledged". This is not visible from
+        // the types; only a real kernel shows it.
+        tokio::spawn(connection);
+
+        Ok(Self { handle })
     }
 
     /// Creates a backend over an existing handle.
     #[must_use]
-    pub fn from_handle(handle: Handle<NetlinkSocketError>) -> Self {
+    pub fn from_handle(handle: Handle) -> Self {
         Self { handle }
     }
 
-    /// Returns the underlying handle, for the subscription the daemon drives.
+    /// Returns the underlying handle, for a caller that needs a request this
+    /// backend does not wrap.
     #[must_use]
-    pub fn handle(&self) -> &Handle<NetlinkSocketError> {
+    pub fn handle(&self) -> &Handle {
         &self.handle
-    }
-
-    /// Subscribes to link and address changes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`NetError::Io`] when the subscription cannot be installed.
-    pub async fn subscribe(&self) -> Result<()> {
-        let mut request = LinkSubscribeOptions::new()
-            .set_link_flags(true)
-            .set_address_flags(true)
-            .set_route_flags(false)
-            .set_neigh_flags(false);
-        self.handle
-            .link()
-            .request(&mut request)
-            .await
-            .map_err(|error| NetError::Io {
-                operation: "subscribing to link changes",
-                source: io_from(error),
-            })
-    }
-
-    /// Returns the addresses currently configured on an interface.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`NetError::Io`] when Netlink does not answer.
-    pub async fn addresses_on(&self, name: &str) -> Result<Vec<IpCidr>> {
-        let interface = self.interface(name).await?;
-        self.addresses_on_index(interface.id).await
     }
 
     /// Returns the addresses configured on an interface index.
@@ -103,19 +101,15 @@ impl NetlinkBackend {
     ///
     /// Returns [`NetError::Io`] when Netlink does not answer.
     pub async fn addresses_on_index(&self, index: InterfaceId) -> Result<Vec<IpCidr>> {
-        let mut request = AddressListOptions::new().set_index(index.get());
-        let mut messages = self
+        let request = self
             .handle
             .address()
-            .request_iter(&mut request)
-            .await
-            .map_err(|error| NetError::Io {
-                operation: "listing addresses",
-                source: io_from(error),
-            })?;
+            .get()
+            .set_link_index_filter(u32::try_from(index.get()).unwrap_or(0));
+        let mut stream = request.execute();
 
         let mut addresses = Vec::new();
-        while let Some(message) = messages.next().await {
+        while let Some(message) = stream.next().await {
             let message = message.map_err(|error| NetError::Io {
                 operation: "listing addresses",
                 source: io_from(error),
@@ -127,6 +121,16 @@ impl NetlinkBackend {
         Ok(addresses)
     }
 
+    /// Returns the addresses configured on an interface, by name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::InterfaceNotFound`] when no such interface exists.
+    pub async fn addresses_on(&self, name: &str) -> Result<Vec<IpCidr>> {
+        let interface = self.interface(name).await?;
+        self.addresses_on_index(interface.id).await
+    }
+
     /// Returns `true` when `address` is present, read back from the kernel.
     ///
     /// # Errors
@@ -136,7 +140,168 @@ impl NetlinkBackend {
         Ok(self.addresses_on(name).await?.contains(address))
     }
 
-    /// Returns `true` when an interface other than `interface` holds `address`.
+    /// Looks an interface up by index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Io`] when Netlink does not answer.
+    pub async fn interface_by_index(&self, index: InterfaceId) -> Result<Interface> {
+        let request = self
+            .handle
+            .link()
+            .get()
+            .match_index(u32::try_from(index.get()).unwrap_or(0));
+        let mut stream = request.execute();
+
+        let Some(message) = stream.next().await else {
+            return Err(NetError::Io {
+                operation: "looking up an interface",
+                source: io::Error::other("no interface with that index"),
+            });
+        };
+        let message = message.map_err(|error| NetError::Io {
+            operation: "looking up an interface",
+            source: io_from(error),
+        })?;
+        let name = link_name(&message).unwrap_or_else(|| format!("index {}", index.get()));
+        let state = link_state(&message);
+        let mtu = link_mtu(&message);
+        let addresses = self.addresses_on_index(index).await?;
+        Ok(Interface {
+            id: index,
+            name,
+            state,
+            addresses,
+            mtu,
+        })
+    }
+
+    /// Subscribes to link and address changes.
+    ///
+    /// The subscription is what lets the daemon notice that an interface went
+    /// away, which is how a node learns it is no longer able to hold ownership
+    /// (`I-15`). It is installed on its own connection because a Netlink socket
+    /// is either a request socket or a multicast group socket, not both.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Io`] when the group socket cannot be opened.
+    pub fn subscribe_link_and_address(
+        &self,
+    ) -> impl std::future::Future<Output = Result<tokio::sync::mpsc::UnboundedReceiver<LinkEvent>>> + Send
+    {
+        let answer = self.answer_subscribe_link_and_address();
+        std::future::ready(answer)
+    }
+
+    #[allow(
+        clippy::unused_self,
+        reason = "the socket belongs to the connection, not the handle"
+    )]
+    fn answer_subscribe_link_and_address(
+        &self,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LinkEvent>> {
+        use rtnetlink::MulticastGroup;
+
+        let (connection, _handle, mut messages) = rtnetlink::new_multicast_connection(&[
+            MulticastGroup::Link,
+            MulticastGroup::Ipv4Ifaddr,
+            MulticastGroup::Ipv6Ifaddr,
+        ])
+        .map_err(|source| NetError::Io {
+            operation: "subscribing to link changes",
+            source,
+        })?;
+
+        // The connection is the future that polls the socket. Without a task
+        // driving it, the subscription installs successfully and then never
+        // delivers anything, which is the worst shape of bug to have here.
+        tokio::spawn(connection);
+
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some((message, _address)) = messages.next().await {
+                // `NetlinkPayload` is either the parsed message, an ACK, a
+                // parse error, or the end of a multi-part reply. Only the
+                // message is interesting here.
+                let NetlinkPayload::InnerMessage(payload) = message.payload else {
+                    continue;
+                };
+                let event = match payload {
+                    RouteNetlinkMessage::NewLink(_)
+                    | RouteNetlinkMessage::DelLink(_)
+                    | RouteNetlinkMessage::SetLink(_) => LinkEvent::Link,
+                    RouteNetlinkMessage::NewAddress(_) | RouteNetlinkMessage::DelAddress(_) => {
+                        LinkEvent::Address
+                    }
+                    _ => continue,
+                };
+                if sender.send(event).is_err() {
+                    return;
+                }
+            }
+        });
+        Ok(receiver)
+    }
+
+    /// Creates a dummy interface with `name`.
+    ///
+    /// A dummy device is a real netdevice that accepts addresses but carries no
+    /// traffic, which makes it the right fixture for a test or a namespace
+    /// harness: it gives an instance a real interface to bind to without
+    /// needing a peer, a cable, or a second namespace.
+    ///
+    /// This exists for the test harness and the namespace suite, not for the
+    /// daemon, which never creates interfaces. It is therefore only compiled
+    /// with `netlink-tests`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Io`] when the kernel refuses, typically because the
+    /// name is taken or `CAP_NET_ADMIN` is missing.
+    #[cfg(feature = "netlink-tests")]
+    pub async fn create_dummy(&self, name: &str) -> Result<()> {
+        use rtnetlink::LinkDummy;
+
+        self.handle
+            .link()
+            .add(LinkDummy::new(name).build())
+            .execute()
+            .await
+            .map_err(|error| NetError::Io {
+                operation: "creating a dummy interface",
+                source: io_from(error),
+            })?;
+        Ok(())
+    }
+
+    /// Removes an interface by name.
+    ///
+    /// The counterpart of [`NetlinkBackend::create_dummy`], and the same
+    /// caveat applies: this is harness support, not daemon behavior.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Io`] when the kernel refuses.
+    #[cfg(feature = "netlink-tests")]
+    pub async fn remove_dummy(&self, name: &str) -> Result<()> {
+        let Ok(interface) = self.interface(name).await else {
+            return Ok(());
+        };
+        self.handle
+            .link()
+            .del(u32::try_from(interface.id.get()).unwrap_or(0))
+            .execute()
+            .await
+            .map_err(|error| NetError::Io {
+                operation: "removing a dummy interface",
+                source: io_from(error),
+            })?;
+        Ok(())
+    }
+
+    /// Returns the name of an interface other than `interface` already holding
+    /// `address`, if any.
     ///
     /// # Errors
     ///
@@ -146,40 +311,23 @@ impl NetlinkBackend {
         interface: &Interface,
         address: IpCidr,
     ) -> Result<Option<String>> {
-        let mut request = LinkGetOptions::new();
-        let mut messages = self
-            .handle
-            .link()
-            .request_iter(&mut request)
-            .await
-            .map_err(|error| NetError::Io {
-                operation: "listing interfaces",
-                source: io_from(error),
-            })?;
+        let mut stream = self.handle.link().get().execute();
 
-        while let Some(message) = messages.next().await {
+        while let Some(message) = stream.next().await {
             let message = message.map_err(|error| NetError::Io {
                 operation: "listing interfaces",
                 source: io_from(error),
             })?;
-            let Some(index) = message.header.index else {
-                continue;
-            };
-            if index == interface.id.get() {
+            if i32::try_from(message.header.index).unwrap_or(-1) == interface.id.get() {
                 continue;
             }
-            let Ok(id) = InterfaceId::new(index) else {
+            let Ok(id) = InterfaceId::new(i32::try_from(message.header.index).unwrap_or(-1)) else {
                 continue;
             };
-            for found in self.addresses_on_index(id).await? {
-                if found == address {
-                    return Ok(Some(
-                        message
-                            .header
-                            .name
-                            .unwrap_or_else(|| format!("index {index}")),
-                    ));
-                }
+            if self.addresses_on_index(id).await?.contains(&address) {
+                return Ok(Some(
+                    link_name(&message).unwrap_or_else(|| format!("index {}", id.get())),
+                ));
             }
         }
         Ok(None)
@@ -188,58 +336,33 @@ impl NetlinkBackend {
 
 impl NetworkBackend for NetlinkBackend {
     async fn interface(&self, name: &str) -> Result<Interface> {
-        let mut request = LinkGetOptions::new().set_name_filter(name.to_owned().into());
-        let mut messages = self
-            .handle
-            .link()
-            .request_iter(&mut request)
-            .await
-            .map_err(|error| NetError::Io {
-                operation: "looking up an interface",
-                source: io_from(error),
-            })?;
+        let request = self.handle.link().get().match_name(name.to_owned());
+        let mut stream = request.execute();
 
-        let Some(message) = messages.next().await else {
+        // A name filter that matches nothing comes back as an errno, not as an
+        // empty dump: Linux answers `ERANGE` for a dump it filtered to zero
+        // rows. "No such interface" is the answer this call is asking for, so
+        // whatever the kernel said, an absent interface is `InterfaceNotFound`
+        // rather than a transport failure.
+        let Some(Ok(message)) = stream.next().await else {
             return Err(NetError::InterfaceNotFound {
                 name: name.to_owned(),
             });
         };
-        let message = message.map_err(|error| NetError::Io {
-            operation: "looking up an interface",
-            source: io_from(error),
-        })?;
-        let Some(index) = message.header.index else {
-            return Err(NetError::InterfaceNotFound {
-                name: name.to_owned(),
-            });
-        };
-        let id = InterfaceId::new(index).map_err(|error| NetError::Io {
-            operation: "reading an interface index",
-            source: io::Error::other(error.to_string()),
-        })?;
-
-        let up = message.header.flags.contains(rtnetlink::LinkFlags::UP);
-        let operational = message.link.as_ref().and_then(|link| link.oper_state);
-        let state = if !up {
-            LinkState::Down
-        } else {
-            match operational {
-                Some(rtnetlink::OperState::Up) => LinkState::Up,
-                Some(rtnetlink::OperState::Unknown) | None => LinkState::Unknown,
-                Some(_) => LinkState::NoCarrier,
-            }
-        };
+        let id = InterfaceId::new(i32::try_from(message.header.index).unwrap_or(-1)).map_err(
+            |error| NetError::Io {
+                operation: "reading an interface index",
+                source: io::Error::other(error.to_string()),
+            },
+        )?;
 
         let addresses = self.addresses_on_index(id).await?;
-        let mtu = message.link.as_ref().and_then(|link| link.mtu);
-        let reported = message.header.name.unwrap_or_else(|| name.to_owned());
-
         Ok(Interface {
             id,
-            name: reported,
-            state,
+            name: link_name(&message).unwrap_or_else(|| name.to_owned()),
+            state: link_state(&message),
             addresses,
-            mtu,
+            mtu: link_mtu(&message),
         })
     }
 
@@ -255,21 +378,13 @@ impl NetworkBackend for NetlinkBackend {
             });
         }
 
-        let request = AddressAddReq {
-            index: interface.get(),
-            address: address.address(),
-            prefix_len: address.prefix_len(),
-            scope: None,
-            index_spec: None,
-            flags: 0,
-            valid_lft: None,
-            preferred_lft: None,
-            protocol: Some(ADDRESS_PROTOCOL),
-            peer: None,
-        };
+        let index = u32::try_from(interface.get()).unwrap_or(0);
+        // The kernel's reply is the acknowledgment. The read-back below is the
+        // confirmation, and it is the one that matters.
         self.handle
             .address()
-            .add(request)
+            .add(index, address.address(), address.prefix_len())
+            .execute()
             .await
             .map_err(|error| NetError::AddAddress {
                 interface: current.name.clone(),
@@ -292,16 +407,25 @@ impl NetworkBackend for NetlinkBackend {
         if !current.addresses.contains(&address) {
             return Ok(());
         }
-        let request = AddressDeleteReq {
-            index: interface.get(),
-            address: address.address(),
-            prefix_len: address.prefix_len(),
-            peer: None,
-            flags: 0,
+
+        let index = u32::try_from(interface.get()).unwrap_or(0);
+        // The builder is generic over the address family, so each family gets
+        // its own construction rather than a shared one.
+        let message = match address.address() {
+            IpAddr::V4(v4) => rtnetlink::AddressMessageBuilder::<std::net::Ipv4Addr>::new()
+                .address(v4, address.prefix_len())
+                .index(index)
+                .build(),
+            IpAddr::V6(v6) => rtnetlink::AddressMessageBuilder::<std::net::Ipv6Addr>::new()
+                .address(v6, address.prefix_len())
+                .index(index)
+                .build(),
         };
+
         self.handle
             .address()
-            .delete(request)
+            .del(message)
+            .execute()
             .await
             .map_err(|error| NetError::RemoveAddress {
                 interface: current.name.clone(),
@@ -319,97 +443,114 @@ impl NetworkBackend for NetlinkBackend {
         Ok(())
     }
 
-    async fn send_gratuitous_update(
+    /// The trait is async because Netlink is; this implementation refuses
+    /// immediately, so its future is already complete.
+    fn send_gratuitous_update(
         &self,
         _interface: InterfaceId,
         _address: IpAddr,
-    ) -> Result<()> {
-        // Gratuitous ARP needs an AF_PACKET socket, whose `sockaddr_ll` has no
-        // safe representation. It arrives in Milestone 4; the state machine
-        // treats the failure as non-fatal, so nothing else changes meanwhile.
-        Err(NetError::Unsupported {
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        let answer = Err(NetError::Unsupported {
             operation: "gratuitous ARP",
-        })
-    }
-}
-
-impl NetlinkBackend {
-    /// Looks an interface up by index, which is how the executor addresses it.
-    async fn interface_by_index(&self, index: InterfaceId) -> Result<Interface> {
-        let mut request = LinkGetOptions::new().set_index(index.get());
-        let mut messages = self
-            .handle
-            .link()
-            .request_iter(&mut request)
-            .await
-            .map_err(|error| NetError::Io {
-                operation: "looking up an interface",
-                source: io_from(error),
-            })?;
-
-        let Some(message) = messages.next().await else {
-            return Err(NetError::Io {
-                operation: "looking up an interface",
-                source: io::Error::other("no interface with that index"),
-            });
-        };
-        let message = message.map_err(|error| NetError::Io {
-            operation: "looking up an interface",
-            source: io_from(error),
-        })?;
-        let name = message
-            .header
-            .name
-            .unwrap_or_else(|| format!("index {}", index.get()));
-        let up = message.header.flags.contains(rtnetlink::LinkFlags::UP);
-        let operational = message.link.as_ref().and_then(|link| link.oper_state);
-        let state = if !up {
-            LinkState::Down
-        } else {
-            match operational {
-                Some(rtnetlink::OperState::Up) => LinkState::Up,
-                Some(rtnetlink::OperState::Unknown) | None => LinkState::Unknown,
-                Some(_) => LinkState::NoCarrier,
-            }
-        };
-        let addresses = self.addresses_on_index(index).await?;
-        let mtu = message.link.as_ref().and_then(|link| link.mtu);
-        Ok(Interface {
-            id: index,
-            name,
-            state,
-            addresses,
-            mtu,
-        })
+        });
+        std::future::ready(answer)
     }
 }
 
 /// Extracts the address and prefix length a Netlink address message carries.
+///
+/// The local address is preferred over the peer address, because an address
+/// added with a peer has both, and only the local one is the interface's.
 fn address_from_message(
-    message: &rtnetlink::netlink_packet_route::address::AddressMessage,
+    message: &rtnetlink::packet_route::address::AddressMessage,
 ) -> Option<(IpAddr, u8)> {
-    let prefix_len = message.address.prefix_len;
-    if let Some(local) = message.address.local
-        && !local.is_unspecified()
-    {
-        return Some((*local, prefix_len));
-    }
-    message.address.address.map(|address| (address, prefix_len))
+    let prefix_len = message.header.prefix_len;
+    let local = message
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            AddressAttribute::Local(address) => Some(*address),
+            _ => None,
+        });
+    local
+        .or_else(|| {
+            message
+                .attributes
+                .iter()
+                .find_map(|attribute| match attribute {
+                    AddressAttribute::Address(address) => Some(*address),
+                    _ => None,
+                })
+        })
+        .map(|address| (address, prefix_len))
+}
+
+/// Reads the interface name out of a link message.
+fn link_name(message: &LinkMessage) -> Option<String> {
+    message
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            LinkAttribute::IfName(name) => Some(name.clone()),
+            _ => None,
+        })
+}
+
+/// Reads the MTU out of a link message.
+fn link_mtu(message: &LinkMessage) -> Option<u32> {
+    message
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            LinkAttribute::Mtu(mtu) => Some(*mtu),
+            _ => None,
+        })
+}
+
+/// Maps `IFLA_OPERSTATE` onto the states VRRP distinguishes.
+fn link_state(message: &LinkMessage) -> LinkState {
+    use rtnetlink::packet_route::link::State as OperState;
+
+    message
+        .attributes
+        .iter()
+        .find_map(|attribute| match attribute {
+            LinkAttribute::OperState(state) => Some(match state {
+                OperState::Up => LinkState::Up,
+                OperState::Down | OperState::LowerLayerDown | OperState::Dormant => {
+                    LinkState::NoCarrier
+                }
+                OperState::NotPresent => LinkState::Down,
+                // Unknown, testing, and anything a future kernel adds: not
+                // usable, and never silently treated as up.
+                _ => LinkState::Unknown,
+            }),
+            _ => None,
+        })
+        .unwrap_or(LinkState::Unknown)
 }
 
 /// Converts a Netlink failure into an operating-system error.
 ///
-/// Netlink reports failures as a negative `errno`, so the value is exactly the
+/// Netlink reports failures as a negative `errno`, which is exactly the
 /// `io::Error` a syscall would have produced. Keeping a real `io::Error` in the
 /// `NetError` variants is what lets an operator read a permission failure as a
 /// permission failure (`R-23`).
-fn io_from(error: NetlinkSocketError) -> io::Error {
+fn io_from(error: RtnetlinkError) -> io::Error {
     match error {
-        NetlinkSocketError::SocketError(source) => source,
-        NetlinkSocketError::NetlinkError(source) => io::Error::other(source.to_string()),
-        NetlinkSocketError::InvalidRouteMessage => {
-            io::Error::other("the kernel returned an unparseable netlink message")
+        RtnetlinkError::NetlinkError(message) => {
+            // A netlink NACK carries the kernel's `errno`, which is what an
+            // operator needs: EADDRNOTAVAIL, EPERM, EEXADDR.
+            match message.code.map(i32::from) {
+                Some(code) if code < 0 => io::Error::from_raw_os_error(-code),
+                Some(code) => io::Error::other(format!("netlink error {code}")),
+                None => io::Error::other("the kernel reported an error with no code"),
+            }
         }
+        RtnetlinkError::RequestFailed => {
+            io::Error::other("the netlink request was not acknowledged")
+        }
+        other => io::Error::other(other.to_string()),
     }
 }
 
@@ -418,13 +559,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_netlink_failure_keeps_its_cause() {
-        let error = io_from(NetlinkSocketError::InvalidRouteMessage);
-        assert!(error.to_string().contains("unparseable"));
+    fn a_netlink_error_keeps_its_cause() {
+        let error = io_from(RtnetlinkError::RequestFailed);
+        assert!(error.to_string().contains("not acknowledged"));
     }
 
     #[test]
-    fn the_address_protocol_is_the_boot_protocol() {
-        assert_eq!(ADDRESS_PROTOCOL, 3);
+    fn a_link_without_attributes_is_unknown_rather_than_up() {
+        // The safe default matters: an unparseable link must not look usable.
+        let message = LinkMessage::default();
+        assert_eq!(link_state(&message), LinkState::Unknown);
+        assert_eq!(link_name(&message), None);
+        assert_eq!(link_mtu(&message), None);
     }
 }

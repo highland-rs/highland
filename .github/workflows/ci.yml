@@ -119,8 +119,21 @@ jobs:
           name: fuzz-artifact-${{ matrix.target }}
           path: fuzz/artifacts
 
-  # Network-namespace tests need root and a purpose-built topology. They are
-  # enabled by the `netns-tests` feature once Milestone 4 lands the harness
+  netlink:
+    name: netlink against a real kernel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The Netlink backend is `cfg(target_os = "linux")`, so the matrix job
+      # above compiles it but does not run it. This job needs CAP_NET_ADMIN to
+      # create the dummy interface the tests use.
+      - name: netlink tests
+        run: sudo -E env "PATH=$PATH" cargo test -p highland-net --features netlink-tests
+
+  # Network-namespace tests need a purpose-built topology on both sides. They
+  # are enabled by the `netns-tests` feature once Milestone 4 lands the harness
   # (SPEC.md, `R-01`).
   netns:
     name: network namespaces

@@ -64,6 +64,13 @@ pub enum CoreError {
         target: Role,
     },
 
+    /// A role name could not be parsed.
+    #[error("{role:?} is not a role name; expected init, backup, master, fault, or disabled")]
+    UnknownRole {
+        /// The rejected text.
+        role: String,
+    },
+
     /// An action referenced a timer that the instance does not own.
     #[error("timer {timer} is not owned by instance {instance}")]
     UnknownTimer {

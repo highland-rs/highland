@@ -323,11 +323,19 @@ highland/
 ├── docs/
 │   ├── SPEC.md
 │   ├── architecture.md
-│   ├── configuration.md
-│   ├── operations.md
-│   ├── threat-model.md
-│   ├── compatibility.md
 │   ├── testing.md
+│   ├── user/
+│   │   ├── index.md
+│   │   ├── getting-started.md
+│   │   ├── installation.md
+│   │   ├── configuration.md
+│   │   ├── health-checks.md
+│   │   ├── cli.md
+│   │   ├── operations.md
+│   │   ├── troubleshooting.md
+│   │   ├── upgrading.md
+│   │   ├── compatibility.md
+│   │   └── threat-model.md
 │   └── adr/
 │       ├── ADR-0001-record-architecture-decisions.md
 │       ├── ADR-0002-async-runtime.md
@@ -900,6 +908,12 @@ VRID, priority, source address, and the interval the peer claims. The state
 machine never sees a wire type, which is what keeps `highland-core` independent of
 `highland-vrrp` (§9.2).
 
+Success is reported, not assumed. A machine that was told only about failures
+would have to enter `MASTER` optimistically, which is precisely the shape that
+lets a node advertise an address it does not hold. Reporting both outcomes makes
+`I-04` structural: there is no path from `BACKUP` to `MASTER` and to an
+advertisement except through `ActionSucceeded { kind: AddAddresses }`.
+
 - `R-09` Every `Operator*` event MUST originate from an authenticated control request, MUST
   be recorded in the audit log, and MUST carry the requesting peer credential.
 - `R-10` `OperatorForceTransitionRequested` MUST be rejected unless the daemon was started
@@ -947,7 +961,7 @@ path.
 | `ArmTimer` | Timer registered for the instance | Internal error; instance enters `FAULT` |
 | `SendAdvertisement` | Packet written | Counted, logged; after 3 consecutive failures in 10s, `FAULT` |
 | `AddVirtualAddresses` | Addresses confirmed present in the kernel | `FAULT`, hold-down, bounded retry (§11.5) |
-| `RemoveVirtualAddresses` | Addresses confirmed absent | `FAULT`; VIP removal is retried with backoff; ownership is not re-entered |
+| `RemoveVirtualAddresses` | Addresses confirmed absent | The role stays `MASTER` with advertising stopped, because the addresses are still present and `I-14` forbids a non-master role from owning them. Removal is retried with backoff, and the role changes only once removal is confirmed |
 | `SendGratuitousUpdates` | Packets written | Logged; ownership is not affected |
 | `SetEffectivePriority` | Priority recorded | Internal error |
 
@@ -1066,6 +1080,9 @@ Applied in order, deterministically, when effective priorities are equal:
   send a priority-0 advertisement in any other circumstance.
 
 ### 12.5 Preemption `[I]`
+
+Taking ownership after the preemption delay expires carries the transition reason
+`preemption_delay_elapsed`.
 
 - A `BACKUP` with `preempt = true` that receives an advertisement with a strictly lower
   effective priority starts the preemption-delay timer.
@@ -1295,13 +1312,14 @@ stable as events gain detail.
 
 `reason` is a closed enum, because operators and dashboards depend on its
 spelling. The set is `startup`, `interface_up`, `interface_down`,
-`master_down_timeout`, `higher_priority_peer_advertisement`, `health_ineligible`,
-`operator_relinquish`, `operator_force_transition`, `configuration_reloaded`,
-`hold_down_expired`, `ownership_failed`, and `shutdown`. Each one is documented in
-`docs/operations.md` with what an operator should check when it appears.
+`master_down_timeout`, `higher_priority_peer_advertisement`,
+`preemption_delay_elapsed`, `health_ineligible`, `operator_relinquish`,
+`operator_force_transition`, `configuration_reloaded`, `hold_down_expired`,
+`ownership_failed`, and `shutdown`. Each one is documented in
+`docs/user/operations.md` with what an operator should check when it appears.
 
 - `R-17` The set of `reason` values is a closed, documented enum. Any new reason MUST be
-  added to `docs/operations.md` in the same change.
+  added to `docs/user/operations.md` in the same change.
 - `R-18` The event stream MUST be replayable from an in-memory ring buffer of at least 4096
   entries (`L-08`) and MUST be streamable as JSON lines.
 
@@ -1694,7 +1712,7 @@ WantedBy=multi-user.target
 
 - `R-30` `SIGHUP` MUST trigger the reload path of §10.5, with identical semantics to the
   control-socket `reload` operation.
-- `R-31` The unit file is a starting point. `docs/operations.md` MUST explain capability
+- `R-31` The unit file is a starting point. `docs/user/operations.md` MUST explain capability
   and namespace requirements, and MUST state that `Before=keepalived.service` is only
   correct when co-running is intended.
 - `R-32` The daemon MUST work with no systemd present, including under OpenRC or a bare
@@ -1747,10 +1765,17 @@ before writing it.
 |---|---|
 | `README.md` | What it is, scope tier, install, quick start, links |
 | `docs/architecture.md` | Crate graph, state machine, tie-break rules, reason enum |
-| `docs/configuration.md` | Every key, every `V-nn`, a valid example per scope tier |
-| `docs/operations.md` | Network and firewall requirements, capabilities, split-brain behavior, capture diagnosis, VIP conflict diagnosis, every `reason` value, upgrade and rollback |
-| `docs/threat-model.md` | `S-nn` coverage, privilege boundary, out-of-scope threats |
-| `docs/compatibility.md` | Protocol compatibility claims and their limits, Keepalived mapping |
+| `docs/user/index.md` | The entry point: what works today, and a routing table to everything else |
+| `docs/user/getting-started.md` | Requirements, build, first configuration, two-node setup, running, reloading |
+| `docs/user/installation.md` | Install paths, systemd, OpenRC, containers, permissions, uninstall |
+| `docs/user/configuration.md` | Every key, every `V-nn`, a valid example per scope tier |
+| `docs/user/health-checks.md` | Check types, weights, choosing a failure policy, avoiding flapping |
+| `docs/user/cli.md` | Every subcommand, its flags, its defaults, and its current state |
+| `docs/user/operations.md` | Network and firewall requirements, capabilities, split-brain behavior, capture diagnosis, VIP conflict diagnosis, every `reason` value, runbook |
+| `docs/user/troubleshooting.md` | Symptom-first: from what is observed to its cause |
+| `docs/user/upgrading.md` | Rolling upgrade, what a reload can and cannot change, rollback |
+| `docs/user/threat-model.md` | `S-nn` coverage, privilege boundary, out-of-scope threats |
+| `docs/user/compatibility.md` | Protocol compatibility claims and their limits, Keepalived mapping |
 | `docs/testing.md` | How to run each test tier, netns prerequisites, fuzz workflow |
 | `docs/adr/*` | Runtime choice, Netlink library choice, serialization format |
 | `SECURITY.md` | Reporting path and supported versions |
@@ -1802,8 +1827,20 @@ default branch.
 Roles, events, timers, priority logic, tie-break, preemption, health aggregation, fake
 clock, property tests. No Linux networking.
 
-Exit (`M-02`): every `I-nn` in §11 and §19 is covered by at least one test; the crate
-compiles and tests with no runtime dependency.
+Exit (`M-02`): every `I-nn` in §11 and §19 is covered by at least one test, and
+`highland-core` compiles and tests with no runtime dependency. Three of those
+invariants are only partly owned by the state machine, and the milestone records
+which part is tested here and which part is tested later:
+
+| Invariant | Owned by | Tested in |
+|---|---|---|
+| `I-19` confirmation means read-back | the executor | Milestone 1 tests the state machine's share: `ActionSucceeded` is the only path to ownership. Milestone 3 tests the read-back itself |
+| `I-09` a rejected reload changes nothing | the reload planner | Milestone 1 tests the generation guard (`I-12`); Milestone 4 tests the whole-reload behaviour |
+| `I-39` a malformed packet never terminates the daemon | the decoder | Milestone 2, with the fuzz targets |
+
+A coverage audit is a review step, not a claim: `crates/highland-core/tests/`
+names each invariant it enforces in a test name, so an invariant without a test
+is visible in a diff.
 
 ### Milestone 2 — VRRP packet implementation
 
@@ -1857,7 +1894,7 @@ Exit (`M-08`): `R-21` through `R-29` hold; metric label cardinality is bounded b
 Keepalived interoperability, chaos tests, security review, resource limits, capability
 documentation, packaging.
 
-Exit (`M-09`): every `L-nn` is asserted by a test; `docs/threat-model.md` covers every
+Exit (`M-09`): every `L-nn` is asserted by a test; `docs/user/threat-model.md` covers every
 `S-nn`; compatibility tests pass in both directions.
 
 ### Milestone 9 — 1.0 candidate `[1]`
@@ -2125,6 +2162,11 @@ resolution, so a later change can be traced.
 | A-30 | §8 places tests at the workspace root, where cargo cannot compile them | Integration tests live in `crates/<crate>/tests/`; `tests/` holds shared fixtures |
 | A-31 | §16.1 and §16.3 showed a free-form JSON shape with top-level fields, which no typed model can produce | The event and status shapes are defined as typed messages with a fixed field set and a scalar value union; the examples match them |
 | A-32 | §9 listed `highland-net` as depending on the core but not on the protocol crate, although address ownership and advertisement sending need the codec | `highland-net` may depend on `highland-vrrp`; the edge appears when Milestone 3 lands |
+| A-33 | §11.2 had no way for the machine to learn that an action had **succeeded**, so a takeover had to be optimistic and `I-04` was a matter of action ordering | Added `Event::ActionSucceeded`. Ownership is now confirmed before `MASTER` is entered, which makes the invariant structural |
+| A-34 | §11.4 sent a failed `RemoveVirtualAddresses` to `FAULT`, which contradicts `I-14`: the addresses are still present, so a non-master role would own them | A failed removal keeps the role at `MASTER` with advertising stopped, and retries with backoff; the role changes once removal is confirmed |
+| A-35 | Preemption and administrative interface management had no transition reason and no event | Added `preemption_delay_elapsed` to §16.1.1 and `Event::InterfaceBroughtUp`, so an interface may be brought down again only once the instance is not `MASTER` |
+| A-36 | `M-02` demanded that every `I-nn` in §11 and §19 be tested, which is not possible for invariants a later milestone owns | The exit criterion now names the three partly-owned invariants and the milestone that finishes each |
+| A-37 | §8 and §25 listed the operator documents at the top of `docs/`, which made them sit beside developer documents and spread one topic across several files | End-user documentation is consolidated under `docs/user/`, with an index as its entry point. The specification points there |
 
 ## Appendix B — Open Questions
 

@@ -15,10 +15,9 @@ impl InterfaceId {
     ///
     /// # Errors
     ///
-    /// Returns [`InvalidInterfaceIndex`] when `index` is negative, because the
+    /// Returns [`NegativeInterfaceIndex`] when `index` is negative, because the
     /// kernel reserves negative indices.
     ///
-    /// [`InvalidInterfaceIndex`]: NetError
     pub fn new(index: i32) -> Result<Self, NegativeInterfaceIndex> {
         if index < 0 {
             return Err(NegativeInterfaceIndex { index });
@@ -137,7 +136,7 @@ impl IpCidr {
     ///
     /// # Errors
     ///
-    /// Returns [`net::AddrParseError`] when the text is malformed, and
+    /// Returns [`AddrParseError`] when the text is malformed, and
     /// returns a [`PrefixLenError`] when the prefix length is not valid for
     /// the address family.
     pub fn parse(text: &str) -> Result<Self, AddrParseError> {

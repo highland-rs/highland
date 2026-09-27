@@ -1,17 +1,19 @@
 // Rust guideline compliant 2026-09-27
 
-//! The per-instance VRRP state machine.
+//! The domain types of the state machine: roles, events, actions, and the
+//! configuration subset the machine depends on.
 //!
-//! The state machine is synchronous, deterministic, and performs no I/O. It
-//! consumes [`Event`] values and returns [`Action`] values for an executor to
-//! apply (SPEC.md, §11). All durations come from a [`Clock`].
+//! The machine itself is in [`crate::machine`]. This module holds only types, so
+//! that a reader can see the vocabulary without reading the logic.
 
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
-use crate::clock::Clock;
 use crate::error::CoreError;
+use crate::health::HealthPolicyConfig;
+use crate::health::HealthSummary;
+use crate::timer::RetryPolicy;
 
 /// The role an instance occupies.
 ///
@@ -57,6 +59,24 @@ impl Role {
         }
     }
 
+    /// Parses a role name, as accepted by `highland force-transition --role`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoreError::UnknownRole`] when `text` is not a role name.
+    pub fn parse(text: &str) -> Result<Self, CoreError> {
+        match text.to_ascii_lowercase().as_str() {
+            "init" => Ok(Role::Init),
+            "backup" => Ok(Role::Backup),
+            "master" => Ok(Role::Master),
+            "fault" => Ok(Role::Fault),
+            "disabled" => Ok(Role::Disabled),
+            other => Err(CoreError::UnknownRole {
+                role: other.to_owned(),
+            }),
+        }
+    }
+
     /// Returns `true` when the role owns VIPs.
     #[must_use]
     pub fn owns_virtual_addresses(self) -> bool {
@@ -67,6 +87,12 @@ impl Role {
     #[must_use]
     pub fn advertises(self) -> bool {
         matches!(self, Role::Master)
+    }
+
+    /// Returns `true` when the role participates in election.
+    #[must_use]
+    pub fn participates(self) -> bool {
+        matches!(self, Role::Init | Role::Backup | Role::Master)
     }
 }
 
@@ -105,6 +131,9 @@ impl fmt::Display for TimerId {
         })
     }
 }
+
+/// The clock-resolution allowance defined by RFC 5798.
+pub const SKEW_TIME: Duration = Duration::from_millis(10);
 
 /// A monotonically increasing configuration revision identifier.
 ///
@@ -157,11 +186,10 @@ pub struct PeerAdvertisement {
 }
 
 impl PeerAdvertisement {
-    /// Returns `true` when `self` outranks `other` under the protocol's
-    /// priority comparison (higher priority wins; equal priority does not).
+    /// Returns `true` when this advertisement announces a relinquish.
     #[must_use]
-    pub fn outranks(&self, other: &Self) -> bool {
-        self.priority > other.priority
+    pub fn is_relinquish(&self) -> bool {
+        self.priority == 0
     }
 }
 
@@ -182,6 +210,8 @@ pub enum TransitionReason {
     MasterDownTimeout,
     /// A higher-priority peer advertised, so this `MASTER` stepped down.
     HigherPriorityPeerAdvertisement,
+    /// The preemption delay expired, so a higher-priority `BACKUP` took over.
+    Preemption,
     /// Health policy made the instance ineligible.
     HealthIneligible,
     /// An operator requested relinquishment.
@@ -200,7 +230,7 @@ pub enum TransitionReason {
 
 impl fmt::Display for TransitionReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let text = match self {
+        f.write_str(match self {
             TransitionReason::Startup => "startup",
             TransitionReason::InterfaceUp => "interface_up",
             TransitionReason::InterfaceDown => "interface_down",
@@ -208,6 +238,7 @@ impl fmt::Display for TransitionReason {
             TransitionReason::HigherPriorityPeerAdvertisement => {
                 "higher_priority_peer_advertisement"
             }
+            TransitionReason::Preemption => "preemption_delay_elapsed",
             TransitionReason::HealthIneligible => "health_ineligible",
             TransitionReason::OperatorRelinquish => "operator_relinquish",
             TransitionReason::OperatorForceTransition => "operator_force_transition",
@@ -215,43 +246,27 @@ impl fmt::Display for TransitionReason {
             TransitionReason::HoldDownExpired => "hold_down_expired",
             TransitionReason::OwnershipFailed => "ownership_failed",
             TransitionReason::Shutdown => "shutdown",
-        };
-        f.write_str(text)
+        })
     }
 }
 
-/// An input to the state machine.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A log level used by [`Action::Log`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
-pub enum Event {
-    /// The daemon started, or the instance was created by a reload.
-    Startup,
-    /// The startup-delay timer expired.
-    StartupDelayElapsed,
-    /// The instance's interface became usable.
-    InterfaceUp,
-    /// The instance's interface became unusable.
-    InterfaceDown,
-    /// A valid advertisement arrived from a configured peer.
-    AdvertisementReceived(PeerAdvertisement),
-    /// The master-down timer expired without a valid advertisement.
-    AdvertisementTimeout,
-    /// A timer owned by this instance expired.
-    TimerExpired(TimerId),
-    /// The executor failed to apply one of the machine's actions.
-    ActionFailed {
-        /// The action that failed.
-        kind: ActionKind,
-        /// A description of the failure.
-        error: String,
-    },
-    /// An operator asked the instance to relinquish ownership.
-    OperatorRelinquishRequested,
-    /// The process is shutting down.
-    ShutdownRequested,
+pub enum LogLevel {
+    /// A condition that prevented an intended action.
+    Error,
+    /// A recoverable condition the operator should know about.
+    Warn,
+    /// Detail useful for diagnosis.
+    Debug,
 }
 
-/// The kind of an [`Action`], used when reporting a failure back to the machine.
+/// The kind of an [`Action`], used when reporting an outcome back to the
+/// machine.
+///
+/// The classification is deliberately coarser than [`Action`]: adding an action
+/// must not require a new outcome path in the executor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ActionKind {
@@ -271,16 +286,77 @@ pub enum ActionKind {
     EnterRole,
     /// Emit an event.
     EmitEvent,
-    /// Schedule a bounded retry.
-    ScheduleRetry,
-    /// Write a log record.
+    /// Write a log line.
     Log,
+}
+
+/// An input to the state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Event {
+    /// The daemon started, or the instance was created by a reload.
+    Startup,
+    /// The startup-delay timer expired.
+    StartupDelayElapsed,
+    /// The instance's interface became usable.
+    InterfaceUp,
+    /// The instance's interface became unusable.
+    InterfaceDown,
+    /// The instance lost carrier while administratively up.
+    CarrierLost,
+    /// A valid advertisement arrived from a configured peer.
+    AdvertisementReceived(PeerAdvertisement),
+    /// The master-down timer expired without a valid advertisement.
+    AdvertisementTimeout,
+    /// The instance's aggregate health changed.
+    HealthChanged(HealthSummary),
+    /// A timer owned by this instance expired.
+    TimerExpired(TimerId),
+    /// The executor applied an action successfully.
+    ///
+    /// Success is reported, not assumed: a node enters `MASTER` only after its
+    /// addresses are confirmed present, which is what makes `I-04` structural
+    /// rather than a matter of ordering.
+    ActionSucceeded {
+        /// The action that succeeded.
+        kind: ActionKind,
+    },
+    /// The executor failed to apply one of the machine's actions.
+    ActionFailed {
+        /// The action that failed.
+        kind: ActionKind,
+        /// A description of the failure.
+        error: String,
+    },
+    /// An operator asked the instance to relinquish ownership.
+    OperatorRelinquishRequested,
+    /// An operator paused the instance.
+    OperatorPauseRequested,
+    /// An operator resumed the instance.
+    OperatorResumeRequested,
+    /// An operator forced a transition. Requires a daemon flag (`R-10`).
+    OperatorForceTransitionRequested {
+        /// The role to force.
+        target: Role,
+        /// Why, for the audit record.
+        reason: String,
+    },
+    /// The interface was administratively brought up by an operator.
+    InterfaceBroughtUp,
+    /// A new configuration generation was accepted.
+    ConfigurationReloaded {
+        /// The generation that is now active.
+        generation: Generation,
+    },
+    /// The process is shutting down.
+    ShutdownRequested,
 }
 
 /// A side effect the machine requests from an executor.
 ///
 /// Actions are requests, not completed facts. The executor applies them and
-/// reports outcomes as [`Event::ActionFailed`] (SPEC.md, `R-11`).
+/// reports outcomes as [`Event::ActionSucceeded`] or [`Event::ActionFailed`]
+/// (SPEC.md, `R-11`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Action {
@@ -288,7 +364,7 @@ pub enum Action {
     ArmTimer {
         /// The timer to arm.
         timer: TimerId,
-        /// The absolute deadline, in [`Clock::now`] units.
+        /// The absolute deadline, in [`crate::clock::Clock::now`] units.
         deadline: Duration,
     },
     /// Cancel a timer. Cancellation is idempotent (`I-29`).
@@ -297,8 +373,11 @@ pub enum Action {
         timer: TimerId,
     },
     /// Transmit an advertisement announcing `priority`.
+    ///
+    /// A priority of `0` is only ever emitted on a relinquish path (§12.4), and
+    /// never as a normal advertisement (`I-27`).
     SendAdvertisement {
-        /// The priority to announce. Never `0` (SPEC.md, `I-27`).
+        /// The priority to announce.
         priority: u8,
     },
     /// Add the configured VIPs and confirm them by read-back.
@@ -321,7 +400,7 @@ pub enum Action {
     },
     /// Emit an event to the observability layer.
     EmitEvent {
-        /// The event name, from the closed set in `docs/operations.md`.
+        /// The event name, from the closed set in `docs/user/operations.md`.
         name: &'static str,
     },
     /// Record a log line.
@@ -331,15 +410,6 @@ pub enum Action {
         /// The message text.
         message: String,
     },
-}
-
-/// A log level used by [`Action::Log`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LogLevel {
-    /// Recoverable condition the operator should know about.
-    Warn,
-    /// Detail useful for diagnosis.
-    Debug,
 }
 
 impl Action {
@@ -363,7 +433,9 @@ impl Action {
 /// The configuration subset the state machine depends on.
 ///
 /// Values are expected to have been validated by `highland-config`; the state
-/// machine does not re-validate them (SPEC.md, `V-01` through `V-04`).
+/// machine does not re-validate them (SPEC.md, `V-01` through `V-04`). That
+/// split keeps the machine free of configuration parsing, and it is why
+/// `InstanceStateMachine::new` is infallible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceConfig {
     /// The instance name, used in events and metrics.
@@ -380,6 +452,16 @@ pub struct InstanceConfig {
     pub preempt: bool,
     /// The delay before a higher-priority `BACKUP` preempts.
     pub preempt_delay: Duration,
+    /// The refusal period after a fault.
+    pub hold_down: Duration,
+    /// The backoff policy applied to a failed action.
+    pub retry: RetryPolicy,
+    /// The health policy and its parameters.
+    pub health: HealthPolicyConfig,
+    /// The primary IPv4 address of the interface, used for tie-breaking.
+    pub primary_ipv4: Option<Ipv4Addr>,
+    /// The primary IPv6 address of the interface, used for tie-breaking.
+    pub primary_ipv6: Option<Ipv6Addr>,
 }
 
 impl Default for InstanceConfig {
@@ -397,178 +479,13 @@ impl Default for InstanceConfig {
             startup_delay: Duration::ZERO,
             preempt: true,
             preempt_delay: Duration::ZERO,
+            hold_down: Duration::from_secs(10),
+            retry: RetryPolicy::default(),
+            health: HealthPolicyConfig::default(),
+            primary_ipv4: None,
+            primary_ipv6: None,
         }
     }
-}
-
-/// The per-instance state machine.
-///
-/// # Examples
-///
-/// ```
-/// use highland_core::clock::ManualClock;
-/// use highland_core::state::{Action, Event, InstanceConfig, InstanceStateMachine, Role, TimerId};
-/// use std::time::Duration;
-///
-/// let clock = ManualClock::new();
-/// let config = InstanceConfig {
-///     name: "api".to_owned(),
-///     vrid: 42,
-///     priority: 150,
-///     ..InstanceConfig::default()
-/// };
-///
-/// let mut machine = InstanceStateMachine::new(config, clock);
-/// let actions = machine.handle(Event::Startup);
-///
-/// assert_eq!(machine.role(), Role::Backup);
-/// assert!(actions.contains(&Action::ArmTimer {
-///     timer: TimerId::MasterDown,
-///     deadline: Duration::from_millis(3010),
-/// }));
-/// ```
-#[derive(Debug)]
-pub struct InstanceStateMachine<C> {
-    config: InstanceConfig,
-    clock: C,
-    role: Role,
-    generation: Generation,
-    effective_priority: u8,
-    armed: Vec<(TimerId, Duration)>,
-}
-
-impl<C> InstanceStateMachine<C>
-where
-    C: Clock,
-{
-    /// Creates a machine in [`Role::Init`] for `config`.
-    #[must_use]
-    pub fn new(config: InstanceConfig, clock: C) -> Self {
-        Self {
-            effective_priority: config.priority,
-            config,
-            clock,
-            role: Role::Init,
-            generation: Generation::initial(),
-            armed: Vec::new(),
-        }
-    }
-
-    /// Returns the instance configuration.
-    #[must_use]
-    pub fn config(&self) -> &InstanceConfig {
-        &self.config
-    }
-
-    /// Returns the current role.
-    #[must_use]
-    pub fn role(&self) -> Role {
-        self.role
-    }
-
-    /// Returns the current effective priority.
-    #[must_use]
-    pub fn effective_priority(&self) -> u8 {
-        self.effective_priority
-    }
-
-    /// Returns the active configuration generation.
-    #[must_use]
-    pub fn generation(&self) -> Generation {
-        self.generation
-    }
-
-    /// Returns the deadline of an armed timer, if it is armed.
-    #[must_use]
-    pub fn deadline_of(&self, timer: TimerId) -> Option<Duration> {
-        self.armed
-            .iter()
-            .find(|(id, _)| *id == timer)
-            .map(|(_, at)| *at)
-    }
-
-    /// Returns `true` when `timer` is armed and its deadline has passed.
-    #[must_use]
-    pub fn is_due(&self, timer: TimerId) -> bool {
-        self.deadline_of(timer)
-            .is_some_and(|deadline| self.clock.remaining_until(deadline).is_zero())
-    }
-
-    /// Handles one event and returns the actions the executor must apply.
-    ///
-    /// The machine performs no I/O, so this function is total and deterministic
-    /// for a given clock reading and event sequence (SPEC.md, `R-26`).
-    /// Handles one event and returns the actions the executor must apply.
-    ///
-    /// The machine performs no I/O, so this function is total and deterministic
-    /// for a given clock reading and event sequence (SPEC.md, `R-26`).
-    // The event is taken by value because it is consumed by the match below;
-    // taking a reference would only move the decision to the caller.
-    #[allow(clippy::needless_pass_by_value)]
-    pub fn handle(&mut self, event: Event) -> Vec<Action> {
-        match event {
-            Event::Startup | Event::InterfaceUp => self.begin_startup(),
-            Event::StartupDelayElapsed => self.enter_election(),
-            _ => Vec::new(),
-        }
-    }
-
-    /// Arms the startup delay, or enters election immediately when there is
-    /// none.
-    fn begin_startup(&mut self) -> Vec<Action> {
-        if !matches!(self.role, Role::Init | Role::Fault) {
-            return Vec::new();
-        }
-        if !self.config.startup_delay.is_zero() {
-            return vec![Action::ArmTimer {
-                timer: TimerId::StartupDelay,
-                deadline: self.clock.now() + self.config.startup_delay,
-            }];
-        }
-        self.enter_election()
-    }
-
-    fn enter_election(&mut self) -> Vec<Action> {
-        if !matches!(self.role, Role::Init | Role::Fault) {
-            return Vec::new();
-        }
-
-        let deadline =
-            self.clock.now() + master_down_interval_saturating(&self.config.advertisement_interval);
-        self.armed.retain(|(id, _)| *id != TimerId::MasterDown);
-        self.armed.push((TimerId::MasterDown, deadline));
-        self.role = Role::Backup;
-
-        vec![
-            Action::SetEffectivePriority {
-                priority: self.effective_priority,
-            },
-            Action::EnterRole {
-                role: Role::Backup,
-                reason: TransitionReason::Startup,
-            },
-            Action::ArmTimer {
-                timer: TimerId::MasterDown,
-                deadline,
-            },
-            Action::EmitEvent {
-                name: "role_transition",
-            },
-        ]
-    }
-}
-
-/// Returns `3 * adver_int + Skew_Time`, saturating instead of overflowing.
-///
-/// The state machine uses this form because the advertisement interval has
-/// already been validated to `10ms..=2550ms` by `V-04`, which makes saturation
-/// unreachable; [`master_down_interval`] returns an error for callers that
-/// have not validated their input.
-fn master_down_interval_saturating(advert_interval: &Duration) -> Duration {
-    /// The clock-resolution allowance defined by RFC 5798.
-    const SKEW_TIME: Duration = Duration::from_millis(10);
-
-    advert_interval.saturating_mul(3).saturating_add(SKEW_TIME)
 }
 
 /// Returns `3 * adver_int + Skew_Time`, the `BACKUP` takeover delay.
@@ -587,9 +504,6 @@ fn master_down_interval_saturating(advert_interval: &Duration) -> Duration {
 /// assert_eq!(master_down_interval(&Duration::from_secs(1)).unwrap(), Duration::from_millis(3010));
 /// ```
 pub fn master_down_interval(advert_interval: &Duration) -> Result<Duration, CoreError> {
-    /// The clock-resolution allowance defined by RFC 5798.
-    const SKEW_TIME: Duration = Duration::from_millis(10);
-
     advert_interval
         .checked_mul(3)
         .and_then(|scaled| scaled.checked_add(SKEW_TIME))
@@ -603,81 +517,14 @@ pub fn master_down_interval(advert_interval: &Duration) -> Result<Duration, Core
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clock::ManualClock;
-
-    fn config() -> InstanceConfig {
-        InstanceConfig {
-            name: "api".to_owned(),
-            vrid: 42,
-            priority: 150,
-            ..InstanceConfig::default()
-        }
-    }
 
     #[test]
-    fn a_new_machine_is_init() {
-        let machine = InstanceStateMachine::new(config(), ManualClock::new());
-        assert_eq!(machine.role(), Role::Init);
-        assert_eq!(machine.effective_priority(), 150);
-        assert!(!machine.role().owns_virtual_addresses());
-    }
-
-    #[test]
-    fn startup_enters_backup_and_arms_the_master_down_timer() {
-        let mut machine = InstanceStateMachine::new(config(), ManualClock::new());
-        let actions = machine.handle(Event::Startup);
-
-        assert_eq!(machine.role(), Role::Backup);
-        assert!(actions.iter().any(|a| matches!(
-            a,
-            Action::EnterRole {
-                role: Role::Backup,
-                ..
-            }
-        )));
-        assert_eq!(
-            machine.deadline_of(TimerId::MasterDown),
-            Some(Duration::from_millis(3010))
-        );
-    }
-
-    #[test]
-    fn a_nonzero_startup_delay_defers_entering_election() {
-        let mut config = config();
-        config.startup_delay = Duration::from_secs(5);
-        let mut machine = InstanceStateMachine::new(config, ManualClock::new());
-
-        let actions = machine.handle(Event::Startup);
-        assert_eq!(machine.role(), Role::Init);
-        assert!(actions.contains(&Action::ArmTimer {
-            timer: TimerId::StartupDelay,
-            deadline: Duration::from_secs(5),
-        }));
-
-        machine.clock.advance(Duration::from_secs(5));
-        machine.handle(Event::StartupDelayElapsed);
-        assert_eq!(machine.role(), Role::Backup);
-    }
-
-    #[test]
-    fn startup_is_idempotent_once_the_instance_is_backup() {
-        let mut machine = InstanceStateMachine::new(config(), ManualClock::new());
-        machine.handle(Event::Startup);
-        assert!(machine.handle(Event::Startup).is_empty());
-        assert_eq!(machine.role(), Role::Backup);
-    }
-
-    #[test]
-    fn the_master_down_timer_is_due_only_after_its_deadline() {
-        let clock = ManualClock::new();
-        let mut machine = InstanceStateMachine::new(config(), clock.clone());
-        machine.handle(Event::Startup);
-
-        assert!(!machine.is_due(TimerId::MasterDown));
-        clock.advance(Duration::from_millis(3009));
-        assert!(!machine.is_due(TimerId::MasterDown));
-        clock.advance(Duration::from_millis(1));
-        assert!(machine.is_due(TimerId::MasterDown));
+    fn role_metric_encoding_matches_the_specification() {
+        assert_eq!(Role::Init.as_metric(), 0);
+        assert_eq!(Role::Backup.as_metric(), 1);
+        assert_eq!(Role::Master.as_metric(), 2);
+        assert_eq!(Role::Fault.as_metric(), 3);
+        assert_eq!(Role::Disabled.as_metric(), 4);
     }
 
     #[test]
@@ -695,12 +542,62 @@ mod tests {
     }
 
     #[test]
-    fn role_metric_encoding_matches_the_specification() {
-        assert_eq!(Role::Init.as_metric(), 0);
-        assert_eq!(Role::Backup.as_metric(), 1);
-        assert_eq!(Role::Master.as_metric(), 2);
-        assert_eq!(Role::Fault.as_metric(), 3);
-        assert_eq!(Role::Disabled.as_metric(), 4);
+    fn roles_parse_from_their_command_line_spelling() {
+        for (text, expected) in [
+            ("init", Role::Init),
+            ("BACKUP", Role::Backup),
+            ("master", Role::Master),
+            ("fault", Role::Fault),
+            ("disabled", Role::Disabled),
+        ] {
+            assert_eq!(Role::parse(text), Ok(expected));
+        }
+        assert!(matches!(
+            Role::parse("sideways"),
+            Err(CoreError::UnknownRole { .. })
+        ));
+    }
+
+    #[test]
+    fn participation_is_limited_to_the_three_election_roles() {
+        assert!(Role::Init.participates());
+        assert!(Role::Backup.participates());
+        assert!(Role::Master.participates());
+        assert!(!Role::Fault.participates());
+        assert!(!Role::Disabled.participates());
+    }
+
+    #[test]
+    fn action_kinds_classify_actions() {
+        assert_eq!(Action::AddVirtualAddresses.kind(), ActionKind::AddAddresses);
+        assert_eq!(
+            Action::RemoveVirtualAddresses.kind(),
+            ActionKind::RemoveAddresses
+        );
+        assert_eq!(
+            Action::SendAdvertisement { priority: 150 }.kind(),
+            ActionKind::Advertisement
+        );
+        assert_eq!(
+            Action::CancelTimer {
+                timer: TimerId::Retry
+            }
+            .kind(),
+            ActionKind::Timer
+        );
+    }
+
+    #[test]
+    fn a_relinquish_advertisement_is_recognized() {
+        let mut advertisement = PeerAdvertisement {
+            vrid: 42,
+            priority: 0,
+            source: "192.0.2.11".parse().expect("literal is a valid address"),
+            advert_interval: Duration::from_secs(1),
+        };
+        assert!(advertisement.is_relinquish());
+        advertisement.priority = 150;
+        assert!(!advertisement.is_relinquish());
     }
 
     #[test]
@@ -714,24 +611,6 @@ mod tests {
             Duration::from_millis(7660)
         );
         assert!(master_down_interval(&Duration::MAX).is_err());
-    }
-
-    #[test]
-    fn higher_priority_advertisements_outrank_lower_ones() {
-        let strong = PeerAdvertisement {
-            vrid: 42,
-            priority: 150,
-            source: "192.0.2.11".parse().expect("literal is a valid address"),
-            advert_interval: Duration::from_secs(1),
-        };
-        let weak = PeerAdvertisement {
-            priority: 100,
-            ..strong.clone()
-        };
-
-        assert!(strong.outranks(&weak));
-        assert!(!weak.outranks(&strong));
-        assert!(!strong.outranks(&strong));
     }
 
     #[test]

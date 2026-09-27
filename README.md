@@ -106,7 +106,7 @@ disagree, the table is the bug.
 
 | Crate | Responsibility |
 |---|---|
-| `highland-core` | State machine, election, timers, health arithmetic. No Linux, no runtime |
+| `highland-core` | The state machine, election, timers, and health arithmetic. No Linux, no runtime |
 | `highland-vrrp` | VRRPv3 types, encoding, decoding, validation |
 | `highland-net` | Linux interface, address, and socket operations behind traits |
 | `highland-checks` | Native health checks with thresholds and weights |

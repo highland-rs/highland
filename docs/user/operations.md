@@ -68,6 +68,7 @@ Every role transition carries one of these. This list is the closed set
 | `interface_up` | The interface became usable | Expected after a link event |
 | `interface_down` | The interface became unusable | Check the link, the peer, and the switch |
 | `master_down_timeout` | No advertisement arrived within `3 * adver_int + 10ms` | Packet loss, or the peer died |
+| `preemption_delay_elapsed` | A higher-priority backup took over after its preemption delay | Expected during a rolling restart of a higher-priority node |
 | `higher_priority_peer_advertisement` | A higher-priority peer advertised, so this master stepped down | Expected during preemption |
 | `health_ineligible` | Health policy made the instance ineligible | Inspect the failing check |
 | `operator_relinquish` | An operator asked for relinquish | Intentional |

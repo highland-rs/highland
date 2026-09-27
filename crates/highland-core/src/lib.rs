@@ -16,18 +16,19 @@
 //! The crate is pure Rust domain logic. It MUST NOT open sockets, modify
 //! interfaces, read files, spawn processes, depend on Linux, or log directly
 //! (SPEC.md, §9.1). Time and randomness are reached only through the
-//! [clock](clock) and [`Rng`](clock::Rng) abstractions, so that unit tests are
+//! [`Clock`] and [`Rng`] abstractions, so that unit tests are
 //! deterministic.
 //!
 //! I/O is not performed here. The state machine consumes events and returns
-//! [`Action`](state::Action) values for an executor in `highland-net` to
+//! [`Action`] values for an executor in `highland-net` to
 //! apply; see SPEC.md, §11.
 //!
 //! # Example
 //!
 //! ```
 //! use highland_core::clock::ManualClock;
-//! use highland_core::state::{Action, Event, InstanceConfig, InstanceStateMachine, Role};
+//! use highland_core::machine::InstanceStateMachine;
+//! use highland_core::state::{Action, Event, InstanceConfig, Role, TimerId};
 //! use std::time::Duration;
 //!
 //! let clock = ManualClock::new();
@@ -39,23 +40,36 @@
 //! };
 //!
 //! let mut machine = InstanceStateMachine::new(config, clock.clone());
-//! assert_eq!(machine.role(), Role::Init);
-//!
 //! let actions = machine.handle(Event::Startup);
-//! assert_eq!(machine.role(), Role::Backup);
-//! assert!(actions.iter().any(|a| matches!(a, Action::ArmTimer { .. })));
 //!
-//! // The master-down timer fires once no advertisement has been seen.
-//! clock.advance(Duration::from_secs(3));
-//! assert_eq!(machine.handle(Event::StartupDelayElapsed), vec![]);
+//! assert_eq!(machine.role(), Role::Backup);
+//! assert!(actions.contains(&Action::ArmTimer {
+//!     timer: TimerId::MasterDown,
+//!     deadline: Duration::from_millis(3010),
+//! }));
+//!
+//! // Timers are absolute deadlines, so a test asserts the deadline rather than
+//! // sleeping. Firing one is an explicit event, not a side effect of time.
+//! clock.advance(Duration::from_millis(3010));
+//! assert!(machine.is_due(TimerId::MasterDown));
+//! machine.handle(Event::TimerExpired(TimerId::MasterDown));
 //! ```
 
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
 pub mod clock;
+pub mod election;
 pub mod error;
+pub mod health;
+pub mod machine;
 pub mod state;
+pub mod timer;
 
+pub use clock::{Clock, ManualClock, Rng, SequenceRng, SystemClock};
 pub use error::{CoreError, Result};
-pub use state::{Action, ActionKind, Event, InstanceConfig, InstanceStateMachine, Role, TimerId};
+pub use machine::{InstanceStateMachine, PendingOwnership};
+pub use state::{
+    Action, ActionKind, Event, Generation, InstanceConfig, PeerAdvertisement, Role, TimerId,
+    TransitionReason,
+};

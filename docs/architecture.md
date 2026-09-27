@@ -76,12 +76,50 @@ performs no I/O: it consumes `Event` values and returns `Action` values.
 external event ──▶ InstanceStateMachine::handle ──▶ Vec<Action> ──▶ executor
                           │                            │
                           └── role, reasons             └── outcome
-                                                              │
-                                          Event::ActionFailed ──┘
+                                                    ┌───────┴───────┐
+                                     ActionSucceeded│               │ActionFailed
+                                                    ▼               ▼
+                                          enters MASTER          FAULT or retry
 ```
 
-Executor failures come back as events rather than being logged and dropped
-(`I-45`). That is the whole reason `Action` and `ActionKind` are separate types.
+Both outcomes are reported, not just failures. A machine told only about
+failures would have to enter `MASTER` optimistically, which is exactly the shape
+that lets a node advertise an address it does not hold. Reporting success is what
+makes `I-04` structural: the only route from `BACKUP` to an advertisement runs
+through `Event::ActionSucceeded { kind: AddAddresses }`.
+
+`Action` and `ActionKind` are separate types because the kind is the coarse
+classification used when an outcome comes back. Adding an action must not require
+a new outcome path.
+
+### Where the modules sit
+
+| Module | Owns |
+|---|---|
+| `state` | The vocabulary: `Role`, `Event`, `Action`, `TimerId`, `Generation`, `TransitionReason`, `InstanceConfig` |
+| `machine` | The transitions, and the pending-ownership handshake |
+| `timer` | `TimerSet` and `RetryPolicy` |
+| `health` | The health and effective-priority arithmetic |
+| `election` | The four-step tie-break |
+| `clock` | `Clock`, `ManualClock`, `Rng` |
+
+Separating the vocabulary from the logic is deliberate: a reader can learn what
+the machine can say without first reading what it does.
+
+### Timers
+
+Deadlines are absolute, not relative. A relative delay would make the machine's
+output depend on when the executor applied the previous action, which would
+break determinism (`R-27`). A test therefore asserts a deadline:
+
+```rust
+clock.advance(Duration::from_millis(3010));
+assert!(machine.is_due(TimerId::MasterDown));
+```
+
+Firing is an explicit event, not a side effect of time. A delivered timer event
+for a timer that is not armed is ignored, which is what stops a stale delivery
+from reviving an instance that has stopped participating (`I-30`).
 
 Time enters only through `Clock`. `ManualClock` exists so a test can assert an
 exact deadline:
@@ -171,6 +209,15 @@ Per-instance actors, the executor contract, and the event loop are specified in
 
 A `[F]` feature MUST be behind an explicit default-off flag, and the daemon MUST
 run correctly with every `[F]` feature disabled (`SPEC.md` §3.4).
+
+## What Milestone 1 does not do
+
+- Nothing applies the machine's actions. `highland-net` has the trait, not an
+  implementation, so no address is added and no advertisement is sent.
+- The control socket has a message model, not a listener.
+- Reload planning is not implemented; the state machine only enforces the
+  generation guard (`I-12`), which is the part that protects an instance from a
+  stale configuration.
 
 ## What Milestone 0 deliberately does not do
 

@@ -50,14 +50,41 @@ Specification requirements are testable obligations. The mapping today:
 | Requirement group | Covered by |
 |---|---|
 | `V-01`–`V-32` | `crates/highland-config/tests/validation.rs`, plus the loader tests in `src/loader.rs` |
-| `I-29`, `R-26`, `R-27` (timers, determinism) | `crates/highland-core/src/state.rs` and `src/clock.rs` |
+| `I-01` to `I-04`, `I-14` to `I-16`, `I-20`, `I-21`, `I-23` to `I-33`, `I-35` to `I-45` (state machine and timers) | `crates/highland-core/tests/state_machine.rs`, one test per invariant, and `tests/properties.rs` |
+| `R-26`, `R-27` (determinism, absolute deadlines) | `crates/highland-core/tests/properties.rs` and `src/clock.rs` |
 | `I-05`, `I-06` (decoder never panics, interval round trip) | Milestone 2, with the fuzz targets |
-| `R-11`, `I-45` (executor failure) | Milestone 1 |
+| `I-09` (a rejected reload changes nothing) | Milestone 4; Milestone 1 tests the generation guard only |
+| `I-19` (confirmation means read-back) | Milestone 3 for the read-back; Milestone 1 tests that confirmation is the only path to ownership |
+| `I-39` (a malformed packet never terminates the daemon) | Milestone 2 |
 | `I-12`, `I-26` (stale results) | `crates/highland-checks/src/result.rs` |
 | `L-08` (bounded event history) | `crates/highland-observe/src/ring.rs` |
 | `L-12`, `L-14` (rate limit, request size) | `crates/highland-control/src/rate.rs` and `src/message.rs` |
 | `S-01` (redaction) | `crates/highland-observe/src/redact.rs` |
 | `L-06`, `V-26` (file size and permissions) | `crates/highland-config/src/loader.rs` |
+
+## Property tests
+
+`crates/highland-core/tests/properties.rs` uses `proptest` to assert the
+invariants over randomly generated event sequences, because a state machine
+produces its bugs in unusual orderings rather than in the common one. The
+alphabet covers every transition path: startup, interface events,
+advertisements, health changes, every timer, both executor outcomes, and operator
+actions.
+
+Three properties earn their keep on their own:
+
+- the invariants hold after **every prefix** of any event sequence,
+- the same events produce the same actions, which is what `R-26` promises,
+- no advertisement is ever emitted without confirmed ownership.
+
+Run more cases than CI does before pushing:
+
+```console
+$ PROPTEST_CASES=4096 cargo test -p highland-core --test properties
+```
+
+A failing case is written to `tests/properties.proptest-regressions` and is
+checked in, so a bug found once is tested forever.
 
 ## Network-namespace tests
 

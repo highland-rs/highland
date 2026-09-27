@@ -59,14 +59,14 @@ pub trait NetworkBackend: Send + Sync + std::fmt::Debug {
     ///
     /// # Errors
     ///
-    /// Returns [`NetError::InterfaceNotFound`] when no such interface exists.
+    /// Returns [`crate::NetError::InterfaceNotFound`] when no such interface exists.
     fn interface(&self, name: &str) -> Result<Interface>;
 
     /// Adds an address and confirms it is present.
     ///
     /// # Errors
     ///
-    /// Returns [`NetError::AddAddress`] on failure, including when the
+    /// Returns [`crate::NetError::AddAddress`] on failure, including when the
     /// address already exists on another interface.
     fn add_address(&self, interface: InterfaceId, address: IpCidr) -> Result<()>;
 
@@ -74,7 +74,7 @@ pub trait NetworkBackend: Send + Sync + std::fmt::Debug {
     ///
     /// # Errors
     ///
-    /// Returns [`NetError::RemoveAddress`] on failure.
+    /// Returns [`crate::NetError::RemoveAddress`] on failure.
     fn remove_address(&self, interface: InterfaceId, address: IpCidr) -> Result<()>;
 
     /// Emits a gratuitous ARP for IPv4 or an unsolicited Neighbor Advertisement
@@ -82,7 +82,7 @@ pub trait NetworkBackend: Send + Sync + std::fmt::Debug {
     ///
     /// # Errors
     ///
-    /// Returns [`NetError::SendGratuitousUpdate`] on failure. Failure is
+    /// Returns [`crate::NetError::SendGratuitousUpdate`] on failure. Failure is
     /// logged and counted; it never invalidates ownership (`R-11`).
     fn send_gratuitous_update(&self, interface: InterfaceId, address: IpAddr) -> Result<()>;
 }

@@ -178,6 +178,7 @@ async fn a_packet_that_did_not_travel_with_255_is_discarded() {
             bytes: &arrival.payload,
             source: arrival.source,
             ttl: arrival.ttl,
+            destination: arrival.destination,
         },
         &highland_net::AllowedSources::Peers(highland_net::PeerSet::new([address])),
         address,
@@ -211,6 +212,7 @@ async fn an_advertisement_that_passes_every_check_is_accepted() {
             bytes: &arrival.payload,
             source: arrival.source,
             ttl: arrival.ttl,
+            destination: arrival.destination,
         },
         &highland_net::AllowedSources::Peers(highland_net::PeerSet::new([address])),
         address,
@@ -273,5 +275,132 @@ async fn a_bound_socket_reports_its_interface_and_family() {
             .expect("resolves")
             .state,
         LinkState::NoCarrier
+    );
+}
+
+// ----- IPv6, which had never been run against a kernel ---------------------
+
+/// A dummy interface with two IPv6 addresses, for the IPv6 socket tests.
+///
+/// Two addresses on one interface rather than a pair, because a dummy loops its
+/// own frames back, so a datagram sent from one address to the other is
+/// delivered to a socket on the same device. The pair of namespaces in the
+/// daemon's suite is the test that crosses a real segment; this one is about
+/// whether the socket works at all.
+struct V6Node {
+    backend: NetlinkBackend,
+    name: String,
+    first: std::net::Ipv6Addr,
+    second: std::net::Ipv6Addr,
+}
+
+impl V6Node {
+    async fn new() -> Self {
+        let backend = NetlinkBackend::open().expect("a netlink socket opens");
+        let name = format!(
+            "hl6{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        backend
+            .create_dummy(&name)
+            .await
+            .unwrap_or_else(|error| panic!("could not create {name}: {error}"));
+        let id = backend
+            .interface(&name)
+            .await
+            .unwrap_or_else(|error| panic!("could not resolve {name}: {error}"))
+            .id;
+        let first = "2001:db8:99::1".parse().expect("valid");
+        let second = "2001:db8:99::2".parse().expect("valid");
+        for address in [first, second] {
+            // `nodad`: a tentative address cannot be bound to, so a test that
+            // binds immediately after adding one fails for a reason that has
+            // nothing to do with the socket.
+            let output = std::process::Command::new("ip")
+                .args([
+                    "addr",
+                    "add",
+                    &format!("{address}/64"),
+                    "dev",
+                    &name,
+                    "nodad",
+                ])
+                .output()
+                .expect("ip runs");
+            assert!(
+                output.status.success(),
+                "could not add {address} to {name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let _ = id;
+        Self {
+            backend,
+            name,
+            first,
+            second,
+        }
+    }
+}
+
+impl Drop for V6Node {
+    fn drop(&mut self) {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let backend = self.backend.clone();
+            let name = self.name.clone();
+            handle.spawn(async move {
+                let _ = backend.remove_dummy(&name).await;
+            });
+        }
+    }
+}
+
+/// An IPv6 datagram sent from one address to another arrives, and the hop limit
+/// the kernel reports is 255.
+///
+/// Both halves matter. The send is a raw IPv6 socket bound to a unicast
+/// address, and the hop limit arrives as ancillary data whose *type* is
+/// `IPV6_HOPLIMIT` — not the socket option that switches it on, which is a
+/// different number. Reading the option number instead finds nothing, the hop
+/// limit reads as zero, and every IPv6 advertisement is rejected for a TTL that
+/// was correct all along.
+#[tokio::test]
+async fn an_ipv6_datagram_arrives_with_its_hop_limit() {
+    let node = V6Node::new().await;
+    let sender =
+        highland_net::VrrpSocket::bind(IpFamily::V6, &node.name, std::net::IpAddr::V6(node.first))
+            .expect("an IPv6 socket binds to a unicast address on the interface");
+    let receiver =
+        highland_net::VrrpSocket::bind(IpFamily::V6, &node.name, std::net::IpAddr::V6(node.second))
+            .expect("a second IPv6 socket binds");
+
+    let bytes = Advertisement::new(
+        Vrid::new(42).expect("valid"),
+        Priority::new(150).expect("representable"),
+        MaxAdverInt::from_duration(Duration::from_secs(1)).expect("in range"),
+        vec!["2001:db8:99::100".parse().expect("valid address")],
+    )
+    .expect("valid")
+    .encode_with_checksum(
+        IpFamily::V6,
+        highland_vrrp::ChecksumScope::PseudoHeader {
+            source: std::net::IpAddr::V6(node.first),
+            destination: std::net::IpAddr::V6(node.second),
+        },
+    )
+    .expect("encodes");
+    sender
+        .send_to(&bytes, std::net::IpAddr::V6(node.second))
+        .expect("written");
+
+    let arrival = receiver
+        .receive_timeout(Duration::from_secs(2))
+        .expect("the read does not fail")
+        .expect("the datagram arrives");
+    assert_eq!(arrival.source, node.first, "the kernel reports the sender");
+    assert_eq!(
+        arrival.ttl, 255,
+        "the hop limit is read from ancillary data, and it is what was sent"
     );
 }

@@ -53,7 +53,14 @@ impl SocketTransport {
         source: IpAddr,
         peering: Peering,
     ) -> Result<Self> {
-        let socket = crate::VrrpSocket::bind(family, interface, source)?;
+        // A group transport's socket is bound for receiving, which on IPv4 means
+        // not being bound to the source address at all.
+        let socket = match &peering {
+            Peering::Unicast(_) => crate::VrrpSocket::bind(family, interface, source)?,
+            Peering::Multicast { .. } => {
+                crate::VrrpSocket::bind_for_group(family, interface, source)?
+            }
+        };
         let destinations = match &peering {
             Peering::Unicast(peers) => Destinations::new(peers.of_family(family)),
             Peering::Multicast { group, ttl } => {
@@ -207,12 +214,15 @@ impl SocketTransport {
         };
         let allowed = match &self.peering {
             Peering::Unicast(peers) => crate::vrrp::AllowedSources::Peers(peers.clone()),
-            Peering::Multicast { .. } => crate::vrrp::AllowedSources::Group,
+            Peering::Multicast { group, .. } => {
+                crate::vrrp::AllowedSources::Group { group: *group }
+            }
         };
         let outcome = crate::vrrp::validate(
             Datagram {
                 bytes: &received.payload,
                 source: received.source,
+                destination: received.destination,
                 ttl: received.ttl,
             },
             &allowed,

@@ -176,7 +176,9 @@ Adds:
 
 Highland MUST:
 
-- `G-01` Implement VRRPv3 for IPv4, and for IPv6 by `1.0`.
+- `G-01` Implement VRRPv3 for IPv4 and for IPv6. Met for both families: two
+  namespaces on a bridge elect one master and move the address over IPv4 unicast, IPv4
+  multicast, IPv6 unicast, and IPv6 multicast.
 - `G-02` Support one or more independent VRRP instances.
 - `G-03` Manage virtual IPv4 addresses on Linux interfaces, and IPv6 by `1.0`.
 - `G-04` Support unicast peer mode, and multicast peer mode by `1.0`.
@@ -1182,10 +1184,21 @@ These numbers MUST be asserted in the netns test suite.
    instance already owns.
 3. Add the VIPs.
 4. Read the addresses back to confirm ownership (`I-19`).
-5. Send gratuitous ARP for each IPv4 VIP.
-6. Send unsolicited Neighbor Advertisements for each IPv6 VIP.
-7. Arm the advertisement timer and send the first advertisement.
-8. Emit a `role_transition` event with the resulting effective priority.
+5. An IPv6 VIP is added with `IFA_F_NODAD`. A tentative address cannot be bound to and
+   cannot be used as a source, so for about a second after it is added the node would own
+   an address it cannot send from and cannot announce. The address has just been claimed by
+   an election, so there is nothing left to detect: the question "is anyone else using
+   this" was answered by the protocol.
+6. Send gratuitous ARP for each IPv4 VIP. The frame is an ARP reply whose sender and
+   target protocol addresses are both the VIP, broadcast to the Ethernet broadcast
+   address, and it MUST be written by Highland rather than left to the kernel's
+   per-interface behaviour, which cannot announce one address on an interface carrying
+   several. A failure is logged and counted and does not invalidate ownership (`R-11`).
+7. Send unsolicited Neighbor Advertisements for each IPv6 VIP: the override flag set, the
+   link-layer address option carrying the announcing interface's own hardware address, to
+   the all-nodes multicast group.
+8. Arm the advertisement timer and send the first advertisement.
+9. Emit a `role_transition` event with the resulting effective priority.
 
 If a critical step fails, the node MUST NOT claim `MASTER`; it enters `FAULT` per §11.5
 and emits an actionable error naming the interface, address, and kernel error.
@@ -1963,7 +1976,15 @@ IPv6 VIPs and advertisements, unsolicited Neighbor Advertisements, multicast mod
 families, multiple and mixed-family peers, link and route diagnostics.
 
 Exit (`M-06`): IPv4 and IPv6 multicast and unicast suites pass, and the IPv6 half of `G-01`
-is met.
+is met. All four combinations run as two namespaces on a bridge in
+`crates/highland-daemon/tests/two_node.rs`, each asserting that the group was joined —
+read from the kernel, because a configuration that says `multicast` and a daemon that
+never joined the group look identical in the log — that exactly one node holds the
+address, and that killing the master moves it inside `Master_Down_Interval`.
+
+An instance holds the addresses of one family, as `V-03` requires. A mixed-family *peer*
+list is legal, and is a different thing: peers of the other family are not an
+instance's business, and a test says so.
 
 ### Milestone 6 — Native health checks `[1]`
 

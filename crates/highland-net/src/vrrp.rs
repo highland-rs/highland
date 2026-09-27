@@ -65,6 +65,14 @@ pub enum Rejection {
     WrongVrid,
     /// The rate limit was exceeded.
     RateLimited,
+    /// A datagram arrived at an address other than the group this instance
+    /// joined.
+    WrongGroup {
+        /// The group the instance speaks for.
+        group: IpAddr,
+        /// The address the datagram was actually sent to.
+        arrived: IpAddr,
+    },
 }
 
 impl Rejection {
@@ -82,6 +90,7 @@ impl Rejection {
             Rejection::UnknownPeer => "unknown_peer",
             Rejection::WrongVrid => "wrong_vrid",
             Rejection::RateLimited => "rate_limited",
+            Rejection::WrongGroup { .. } => "wrong_group",
         }
     }
 }
@@ -154,6 +163,13 @@ pub struct Datagram<'a> {
     pub source: IpAddr,
     /// The TTL or hop limit, read from the IP header by the kernel.
     pub ttl: u8,
+    /// The address the datagram was sent to, when the kernel reported it.
+    ///
+    /// `None` when the socket did not ask, which is a real possibility, and the
+    /// destination is the one field a validator cannot invent: an IPv6 checksum
+    /// covers it, and a multicast instance has to know that a packet arrived at
+    /// the group rather than being addressed to this host.
+    pub destination: Option<IpAddr>,
 }
 
 /// Validates a received datagram against the instance it belongs to.
@@ -174,7 +190,12 @@ pub struct Datagram<'a> {
 /// let bytes = highland_net::fixture_advertisement();
 ///
 /// let accepted = validate(
-///     Datagram { bytes: &bytes, source: IpAddr::from([192, 0, 2, 11]), ttl: 255 },
+///     Datagram {
+///         bytes: &bytes,
+///         source: IpAddr::from([192, 0, 2, 11]),
+///         ttl: 255,
+///         destination: None,
+///     },
 ///     &AllowedSources::Peers(peers),
 ///     IpAddr::from([192, 0, 2, 11]),
 ///     42,
@@ -228,10 +249,15 @@ pub enum AllowedSources {
     /// borrow would tie every caller's validation to the lifetime of a
     /// configuration it does not otherwise need.
     Peers(PeerSet),
-    /// Any source that reached the group. In multicast mode the group membership
-    /// *is* the authorisation: a node on the segment that joined the group is a
-    /// node on the segment, and there is no list to be in.
-    Group,
+    /// Any source whose datagram arrived at `group`. In multicast mode the group
+    /// membership *is* the authorisation: a node on the segment that joined the
+    /// group is a node on the segment, and there is no list to be in.
+    Group {
+        /// The group this instance joined, which a datagram must have been sent
+        /// to. Checking it means a unicast advertisement addressed to this host
+        /// is not treated as a group's traffic.
+        group: IpAddr,
+    },
 }
 
 /// Validates one datagram against the protocol and the instance's rules.
@@ -277,10 +303,27 @@ pub fn validate(
     if header.vrid.get() != vrid {
         return Accepted::Rejected(Rejection::WrongVrid);
     }
-    if let AllowedSources::Peers(peers) = allowed
-        && !peers.contains(&datagram.source)
-    {
-        return Accepted::Rejected(Rejection::UnknownPeer);
+    match allowed {
+        AllowedSources::Peers(peers) => {
+            if !peers.contains(&datagram.source) {
+                return Accepted::Rejected(Rejection::UnknownPeer);
+            }
+        }
+        AllowedSources::Group { group } => {
+            // The kernel filters by membership, so anything that got here
+            // reached a group this host joined. Whether it reached *this* group
+            // is checked from the ancillary data, because a socket bound to any
+            // address — which is what an IPv4 group socket has to be — also sees
+            // datagrams addressed to this host.
+            if let Some(arrived) = datagram.destination
+                && arrived != *group
+            {
+                return Accepted::Rejected(Rejection::WrongGroup {
+                    group: *group,
+                    arrived,
+                });
+            }
+        }
     }
 
     let scope = ChecksumScope::for_packet(family, datagram.source, destination);

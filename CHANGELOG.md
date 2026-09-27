@@ -433,26 +433,96 @@ a reload does. A reloadable instance keeps its role, its address, and its timers
 a reload that needs a restart is refused whole, naming the instance and the
 field.
 
+### IPv6 and multicast
+
+Four combinations, each two namespaces on a bridge in
+`crates/highland-daemon/tests/two_node.rs`: IPv4 unicast, IPv4 multicast, IPv6
+unicast, IPv6 multicast. Each asserts that the group was joined — read from the
+kernel, because a configuration that says `multicast` and a daemon that never
+joined the group look identical in the log — that exactly one node holds the
+address, and that killing the master moves it inside `Master_Down_Interval`. This
+is the exit criterion of `M-06`, and it meets the IPv6 half of `G-01`.
+
+Writing those tests found four defects, none of which unit tests could see,
+because none of them is about logic:
+
+- **A raw IPv4 socket bound to a unicast address cannot receive multicast.**
+  The kernel matches the datagram's destination against the address the socket is
+  bound to, so a socket bound to `192.0.2.11` never sees a datagram addressed to
+  `224.0.0.18`. A multicast instance sent advertisements nobody could receive,
+  and failed over on a schedule instead of an election. A group socket now binds
+  to any address, and the source is chosen by the outgoing interface.
+- **The IPv6 hop limit was read from the wrong ancillary message.** The message
+  type is `IPV6_HOPLIMIT`; the socket option that switches the ancillary data on is
+  `IPV6_RECVHOPLIMIT`, a different number. Looking for the option number found
+  nothing, the hop limit read as zero, and every IPv6 advertisement was rejected
+  for a TTL that was correct. IPv4's `IP_TTL` arrives untyped and the same reader
+  is right for it, so the reader was right for one family and silently wrong for
+  the other.
+- **A tentative IPv6 VIP could not be used for about a second.** A tentative
+  address cannot be bound to and cannot be a source, so the node owned an address
+  it could neither send from nor announce. IPv6 VIPs are now added with
+  `IFA_F_NODAD`: the address has just been claimed by an election, so there is
+  nothing left to detect.
+- **The multicast TTL was never set.** `IP_MULTICAST_TTL` and
+  `IPV6_MULTICAST_HOPS` are different socket options from the unicast TTL, and
+  both default to **1**. A VRRP advertisement sent with a hop limit of 1 is
+  discarded by every receiver, and the node is never heard of again. This is the
+  single most likely way to get multicast mode subtly wrong, and it is invisible
+  until the nodes stop agreeing.
+
+The multicast socket also names its outgoing interface, because a group is local
+to one link by definition and a routing table is neither guaranteed to have an
+entry for it nor the right answer when it does.
+
+### Received destinations, and a narrower multicast
+
+`IP_PKTINFO` and `IPV6_PKTINFO` are now read on both families, so a datagram
+carries the address it was sent to. Two things need it and neither could do
+without guessing:
+
+- an IPv6 checksum covers the destination, so the receiver verifies against what
+  the packet actually arrived at rather than what it assumes;
+- a group socket on IPv4 is bound to any address, which means it also sees
+  datagrams addressed to the host itself, so a multicast instance now checks that
+  a datagram really arrived at the group and rejects one addressed to the host.
+
+Advertisements are also built per destination for the first reason. Both ends had
+been guessing: the sender always used the default group even when sending to a
+unicast peer, and the receiver always used the default group even when the
+datagram arrived at its own address. Every IPv6 unicast packet would have failed
+its checksum on arrival.
+
+### The configuration surface
+
+`multicast.group` is optional, because the default is per family
+(`224.0.0.18` and `ff02::12`) and a single default would be the wrong family for
+half the instances — a node that silently joined the wrong group would look
+healthy while hearing nothing. A configured group of the wrong family is refused,
+as is one that is not a multicast address. A multicast instance needs no peer
+list. A mixed-family *peer* list is legal, and a test says so, because it is a
+different thing from a mixed-family address list and used to be confused with it.
+
 ### Not delivered, and why
 
-- **IPv6 and multicast virtual addresses** are Milestone 5. The IPv6
-  announcement is written and its frame is unit-tested, but the daemon speaks
-  unicast IPv4, so it has never been run against a real kernel.
-- **Adding an instance that did not exist before a reload** is classified and
-  reported, and the reload is applied; the instance itself is started at startup
-  only. That is a gap between the planner and the runner, not between the
-  planner and the operator.
+- **Both address families in one instance** is refused rather than supported
+  (`V-03`): an instance speaks one family per socket and one source address, so it
+  would need a second socket, a second source address, and a second
+  advertisement. Two instances, one per family, is the arrangement that works.
 - **Health probes are not scheduled by the daemon.** The check model and the
   policy arithmetic exist and the machine consumes their verdicts, but nothing
   runs probes on a timer yet, so a check cannot yet demote a running node.
 - **Keepalived interoperability** is Milestone 8, and the packet vectors are
-  encoder-produced rather than captured. The IPv4 checksum scope therefore rests
-  on the RFC's silence rather than on observed interoperability.
+  encoder-produced rather than captured. The IPv6 checksum scope — whether
+  interoperability needs the pseudo-header at all — is settled there, against a
+  real implementation rather than against the RFC's wording.
 - **`--yes` is accepted and ignored.** The confirmation prompt is not
   implemented; the exit code is, and a refused command exits non-zero.
-- **Adding a new instance on reload** and **hold-down and retry becoming
-  configurable** are both open questions recorded in `SPEC.md` Appendix B
-  rather than decisions.
+- **Adding an instance that did not exist before a reload** is classified and the
+  reload is applied, but the instance itself is started at startup only. That is
+  a gap between the planner and the runner, not between the planner and the
+  operator.
+- **Hold-down and retry are fixed, not configurable**, as Appendix B records.
 
 ### Known limitations
 
@@ -463,8 +533,8 @@ field.
   balancer belongs in front of the address rather than trusting the address
   alone.
 - The netlink, namespace, and chaos tests need `CAP_NET_ADMIN` and namespaces.
-  They run in three CI jobs on `ubuntu-latest` and in
-  `scripts/linux-tests.sh`, but not in the ordinary test job.
+  They run in CI jobs on `ubuntu-latest` and in `scripts/linux-tests.sh`, but not
+  in the ordinary test job.
 - Several errors in `SPEC.md` §18 are aggregated per crate rather than in one
   `HighlandError`, because the CLI and the daemon do not share a dependency set.
   See `docs/architecture.md`.

@@ -778,9 +778,88 @@ fn plan_for(instance: &InstanceConfig) -> Result<(InstancePlan, Ownership), Stri
 /// sending nothing would be worse than one that declines to run.
 pub const TRANSPORT_AVAILABLE: bool = cfg!(target_os = "linux");
 
+#[test]
+fn a_multicast_instance_speaks_for_the_default_group_of_its_family() {
+    let text = r#"
+schema_version = 1
+[node]
+name = "node-a"
+[[instance]]
+name = "api"
+interface = "eth0"
+vrid = 42
+advertisement_interval = "1s"
+[instance.network]
+mode = "multicast"
+[[instance.vip]]
+address = "2001:db8:10::10/64"
+"#;
+    let config = highland_config::parse(text).expect("the document parses");
+    let (plan, ownership) = plan_for(
+        config
+            .instances
+            .first()
+            .expect("the document has an instance"),
+    )
+    .expect("the instance is expressible");
+
+    assert_eq!(plan.name, "api");
+    assert_eq!(
+        ownership.peering,
+        crate::executor::Peering::Multicast {
+            group: "ff02::12".parse().expect("a valid group"),
+            ttl: 255,
+        },
+        "an unset group is the RFC's default for the instance's family, and for an IPv6 \
+             instance that is not the IPv4 one"
+    );
+    assert!(
+        ownership.peers.is_empty(),
+        "a multicast instance has no peer list: {:?}",
+        ownership.peers
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_unicast_instance_still_carries_its_peer_list() {
+        let config = highland_config::parse(
+            r#"
+schema_version = 1
+[node]
+name = "node-a"
+[[instance]]
+name = "api"
+interface = "eth0"
+vrid = 42
+[instance.network]
+mode = "unicast"
+peers = ["192.0.2.11"]
+[[instance.vip]]
+address = "192.0.2.10/24"
+"#,
+        )
+        .expect("the document parses");
+        let instance = config
+            .instances
+            .first()
+            .expect("the document has an instance");
+
+        let ownership = ownership_for(instance);
+
+        assert_eq!(
+            ownership.peers.len(),
+            1,
+            "the list is what a unicast socket validates against"
+        );
+        assert!(matches!(
+            ownership.peering,
+            crate::executor::Peering::Unicast(_)
+        ));
+    }
 
     const CONFIG: &str = r#"
 schema_version = 1

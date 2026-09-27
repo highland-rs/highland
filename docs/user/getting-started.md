@@ -204,18 +204,17 @@ all implemented and tested. A complete failover, including the announcement that
 tells the segment the address moved, runs in the test suite against two real
 network namespaces.
 
-What is not done is IPv6 and multicast: the daemon speaks unicast IPv4, which is
-what the test suite exercises. The IPv6 announcement is written and unit-tested
-but has not been run against a real kernel, because there is nothing for it to
-announce yet.
+IPv6 and multicast are implemented too: two namespaces on a bridge elect one
+master and move the address over IPv4 or IPv6, unicast or multicast.
 
 | You can do this now | Not yet |
 |---|---|
 | Build and test the project | Fail a VIP over between two real machines |
-| Write and validate a configuration | Run with IPv6 virtual addresses |
-| Encode and decode VRRP advertisements | Use multicast instead of unicast peers |
+| Write and validate a configuration | Hold IPv4 and IPv6 addresses in one instance |
+| Encode and decode VRRP advertisements | Configure hold-down and retry parameters |
 | Add and remove addresses, confirmed by read-back | Keepalived interoperability |
-| Fail a VIP over between two nodes | Configure hold-down and retry parameters |
+| Fail a VIP over between two nodes, unicast or multicast | |
+| Announce a takeover to the segment | |
 | Query a running node over the control socket | |
 | Read the event history, and follow it | |
 | Scrape metrics, reload without dropping the address | |

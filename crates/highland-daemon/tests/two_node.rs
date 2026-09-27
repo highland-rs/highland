@@ -30,8 +30,8 @@ mod support;
 use std::time::Duration;
 
 use support::{
-    A_ADDRESS, B_ADDRESS, BridgeGuard, Node, Observer, VIRTUAL_ADDRESS as VIP, bridge, wait_for,
-    wait_stable,
+    A_ADDRESS, B_ADDRESS, BridgeGuard, Node, Observer, VIRTUAL_ADDRESS, VIRTUAL_ADDRESS as VIP,
+    VIRTUAL_ADDRESS6, bridge, wait_for, wait_stable,
 };
 
 /// `Master_Down_Interval` for a one-second interval at priority 150 (SPEC.md §13.3).
@@ -171,5 +171,232 @@ fn a_takeover_announces_the_address_to_the_segment() {
         "no neighbour was told {VIP} moved: the cache points at {} instead of {new}\n--- survivor ---\n{}",
         observer.neighbour(VIP),
         other.log()
+    );
+}
+
+// ----- multicast, and the other address family ---------------------------
+
+/// A pair of nodes in multicast mode, with the family, the virtual address, and
+/// the peering mode under the test's control.
+///
+/// `vip` is the address they fight over, `prefix` the length for both it and
+/// each node's own address, and `group` the address each must have joined by the
+/// time the election settles.
+fn multicast_pair(
+    namespace: &str,
+    addresses: [&'static str; 2],
+    vip: &'static str,
+    prefix: u8,
+) -> (Node, Node) {
+    let guard = bridge();
+    let name = guard.name.clone();
+    let nodes = (
+        Node::create_full(
+            &format!("{namespace}a"),
+            addresses[0],
+            &name,
+            false,
+            150,
+            vip,
+            prefix,
+            None,
+        ),
+        Node::create_full(
+            &format!("{namespace}b"),
+            addresses[1],
+            &name,
+            false,
+            150,
+            vip,
+            prefix,
+            None,
+        ),
+    );
+    // The guard is forgotten rather than dropped: the bridge has to outlive the
+    // nodes, and dropping it first would take the veth ends with it.
+    std::mem::forget(guard);
+    nodes
+}
+
+/// Asserts that a node has joined the group multicast mode is for.
+///
+/// Read from the kernel, because a configuration that says `multicast` and a
+/// daemon that never joined the group look identical in the log. If the group
+/// was never joined, nothing on the segment is listening and the election below
+/// would pass for the wrong reason: two nodes that hear nothing both time out.
+fn assert_joined(node: &Node, group: &str) {
+    let joined = wait_for(
+        "the multicast group is joined",
+        Duration::from_secs(5),
+        || {
+            node.multicast_groups()
+                .iter()
+                .any(|address| address == group)
+        },
+    );
+    assert!(
+        joined,
+        "{group} was not joined; the interface has {:?}\n--- node ---\n{}",
+        node.multicast_groups(),
+        node.log()
+    );
+}
+
+/// The election, the address, and the failover, in multicast mode over IPv4.
+///
+/// The point is not the election, which the unicast suite already proves. The
+/// point is that the group was joined, that two nodes reaching each other only
+/// through a group elect one master, and that the address still moves inside the
+/// budget.
+#[test]
+fn two_nodes_in_ipv4_multicast_mode_elect_one_master_and_fail_over() {
+    let (mut first, mut second) = multicast_pair("mc", [A_ADDRESS, B_ADDRESS], VIRTUAL_ADDRESS, 24);
+    first.start();
+    second.start();
+
+    assert_joined(&first, "224.0.0.18");
+    assert_joined(&second, "224.0.0.18");
+
+    let elected = wait_stable("one node holds the VIP", Duration::from_secs(2), || {
+        usize::from(first.holds_vip()) + usize::from(second.holds_vip()) == 1
+    });
+    assert!(
+        elected,
+        "multicast mode elected no master: a={:?} b={:?}\n--- a ---\n{}\n--- b ---\n{}",
+        first.addresses(),
+        second.addresses(),
+        first.log(),
+        second.log()
+    );
+
+    // Whichever node won, killing it must hand the address over inside the
+    // budget, and the survivor must be the one holding it.
+    let (master, survivor) = if first.holds_vip() {
+        (&mut first, &second)
+    } else {
+        (&mut second, &first)
+    };
+    master.kill();
+    let moved = wait_for("the VIP moved", MASTER_DOWN_BUDGET, || survivor.holds_vip());
+    assert!(
+        moved,
+        "multicast mode did not fail over\n--- survivor ---\n{}",
+        survivor.log()
+    );
+}
+
+/// The same over IPv6, which is the other half of `G-01`.
+///
+/// IPv6 unicast is the case that had never been run against a kernel, and the
+/// reason it is worth a test of its own: an IPv6 advertisement's checksum covers
+/// the IPv6 pseudo-header, so a sender or receiver that guesses the destination
+/// produces packets that are correct in every field and rejected by the peer.
+#[test]
+fn two_nodes_in_ipv6_unicast_mode_elect_one_master_and_fail_over() {
+    let guard = bridge();
+    let name = guard.name.clone();
+    let (mut first, mut second) = (
+        Node::create_full(
+            "v6a",
+            "2001:db8:a::11",
+            &name,
+            false,
+            150,
+            VIRTUAL_ADDRESS6,
+            64,
+            Some("2001:db8:a::12"),
+        ),
+        Node::create_full(
+            "v6b",
+            "2001:db8:a::12",
+            &name,
+            false,
+            150,
+            VIRTUAL_ADDRESS6,
+            64,
+            Some("2001:db8:a::11"),
+        ),
+    );
+    let _bridge_guard = guard;
+    first.start();
+    second.start();
+
+    let elected = wait_stable("one node holds the VIP", Duration::from_secs(2), || {
+        usize::from(first.holds(VIRTUAL_ADDRESS6)) + usize::from(second.holds(VIRTUAL_ADDRESS6))
+            == 1
+    });
+    assert!(
+        elected,
+        "IPv6 unicast elected no master: a={:?} b={:?}\n--- a ---\n{}\n--- b ---\n{}",
+        first.addresses_of(VIRTUAL_ADDRESS6),
+        second.addresses_of(VIRTUAL_ADDRESS6),
+        first.log(),
+        second.log()
+    );
+
+    let (master, survivor) = if first.holds(VIRTUAL_ADDRESS6) {
+        (&mut first, &second)
+    } else {
+        (&mut second, &first)
+    };
+    let old = master.hardware_address();
+    master.kill();
+    let moved = wait_for("the IPv6 VIP moved", MASTER_DOWN_BUDGET, || {
+        survivor.holds(VIRTUAL_ADDRESS6)
+    });
+    assert!(
+        moved,
+        "the IPv6 address did not move\n--- survivor ---\n{}",
+        survivor.log()
+    );
+    assert_ne!(
+        survivor.hardware_address(),
+        old,
+        "the survivor is a different node, which is the point"
+    );
+}
+
+/// IPv6 over multicast, which needs the group, the hop limit, and the scope that
+/// a link-local destination has to carry.
+#[test]
+fn two_nodes_in_ipv6_multicast_mode_elect_one_master_and_fail_over() {
+    let (mut first, mut second) = multicast_pair(
+        "v6m",
+        ["2001:db8:b::11", "2001:db8:b::12"],
+        VIRTUAL_ADDRESS6,
+        64,
+    );
+    first.start();
+    second.start();
+
+    assert_joined(&first, "ff02::12");
+    assert_joined(&second, "ff02::12");
+
+    let elected = wait_stable("one node holds the VIP", Duration::from_secs(2), || {
+        usize::from(first.holds(VIRTUAL_ADDRESS6)) + usize::from(second.holds(VIRTUAL_ADDRESS6))
+            == 1
+    });
+    assert!(
+        elected,
+        "IPv6 multicast elected no master: a={:?} b={:?}\n--- a ---\n{}\n--- b ---\n{}",
+        first.addresses_of(VIRTUAL_ADDRESS6),
+        second.addresses_of(VIRTUAL_ADDRESS6),
+        first.log(),
+        second.log()
+    );
+
+    let (master, survivor) = if first.holds(VIRTUAL_ADDRESS6) {
+        (&mut first, &second)
+    } else {
+        (&mut second, &first)
+    };
+    master.kill();
+    let moved = wait_for("the IPv6 VIP moved", MASTER_DOWN_BUDGET, || {
+        survivor.holds(VIRTUAL_ADDRESS6)
+    });
+    assert!(
+        moved,
+        "the IPv6 multicast address did not move\n--- survivor ---\n{}",
+        survivor.log()
     );
 }

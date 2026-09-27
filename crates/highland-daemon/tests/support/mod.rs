@@ -22,8 +22,23 @@ use std::time::{Duration, Instant};
 /// The interface inside each namespace, named as an operator would name it.
 pub const INTERFACE: &str = "eth0";
 
+/// The other node's address in the default IPv4 pair.
+///
+/// The pair is the one the failover and chaos suites use, so deriving the peer
+/// from it there keeps those tests symmetric by construction.
+#[must_use]
+pub fn peer_of(address: &str) -> &'static str {
+    if address == A_ADDRESS {
+        B_ADDRESS
+    } else {
+        A_ADDRESS
+    }
+}
+
 /// The address the two nodes fight over, from the RFC 5737 documentation range.
 pub const VIRTUAL_ADDRESS: &str = "192.0.2.100";
+/// The same address, in IPv6, from the RFC 3849 documentation range.
+pub const VIRTUAL_ADDRESS6: &str = "2001:db8::100";
 /// The address node A sends from.
 pub const A_ADDRESS: &str = "192.0.2.11";
 /// The address node B sends from.
@@ -70,6 +85,35 @@ impl Node {
         preempt: bool,
         priority: u8,
     ) -> Self {
+        Self::create_full(
+            namespace,
+            address,
+            bridge,
+            preempt,
+            priority,
+            VIRTUAL_ADDRESS,
+            24,
+            Some(peer_of(address)),
+        )
+    }
+
+    /// As [`Node::create_with_priority`], with the address family, the virtual
+    /// address, and the peering mode under the test's control.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_full(
+        namespace: &str,
+        address: &str,
+        bridge: &str,
+        preempt: bool,
+        priority: u8,
+        vip: &str,
+        prefix: u8,
+        peer: Option<&str>,
+    ) -> Self {
+        // The address and the virtual address share a prefix length, because
+        // they are on the same segment; a test that wanted otherwise would be
+        // building a topology, not a node.
+        let address_prefix = prefix;
         let name = Self::name(namespace);
         run(&["netns", "del", &name], true);
 
@@ -103,20 +147,28 @@ impl Node {
             &["netns", "exec", &name, "ip", "link", "set", "lo", "up"],
             false,
         );
-        run(
-            &[
-                "netns",
-                "exec",
-                &name,
-                "ip",
-                "addr",
-                "add",
-                &format!("{address}/24"),
-                "dev",
-                INTERFACE,
-            ],
-            false,
-        );
+        // `nodad` for IPv6, because a tentative address cannot be bound to: the
+        // kernel refuses a socket whose address is still being checked for
+        // duplicates, so a daemon that starts immediately after an address is
+        // added fails with `EADDRNOTAVAIL` for a while. A deployment that
+        // configures an address statically wants the same thing, and the
+        // alternative — sleeping and hoping — is a flaky test rather than a
+        // fix.
+        let mut address_command = vec![
+            "netns".to_owned(),
+            "exec".to_owned(),
+            name.clone(),
+            "ip".to_owned(),
+            "addr".to_owned(),
+            "add".to_owned(),
+            format!("{address}/{address_prefix}"),
+            "dev".to_owned(),
+            INTERFACE.to_owned(),
+        ];
+        if address.contains(':') {
+            address_command.push("nodad".to_owned());
+        }
+        run_owned(&address_command);
         run(
             &["netns", "exec", &name, "ip", "link", "set", INTERFACE, "up"],
             false,
@@ -124,14 +176,7 @@ impl Node {
 
         let directory = std::env::temp_dir().join(format!("highland-{name}"));
         std::fs::create_dir_all(&directory).expect("the instance directory can be created");
-        let config = configuration(
-            namespace,
-            address,
-            &directory,
-            preempt,
-            VIRTUAL_ADDRESS,
-            priority,
-        );
+        let config = configuration(namespace, &directory, preempt, vip, prefix, priority, peer);
         std::fs::write(directory.join("config.toml"), config)
             .expect("the configuration can be written");
 
@@ -206,34 +251,63 @@ impl Node {
     }
 
     /// Returns the addresses configured on this node's interface.
+    ///
+    /// Both families, because the namespace suites now cover IPv6 and a helper
+    /// that only read `ip -4` would report an empty interface for a node whose
+    /// only address is IPv6 — which reads as "the address never arrived".
     pub fn addresses(&self) -> Vec<IpAddr> {
-        let output = Command::new("ip")
-            .args([
-                "netns",
-                "exec",
-                &self.namespace,
-                "ip",
-                "-4",
-                "-o",
-                "addr",
-                "show",
-                INTERFACE,
-            ])
-            .output()
-            .expect("ip runs");
-        String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .filter_map(|line| line.split_whitespace().nth(3))
-            .filter_map(|text| text.split('/').next())
-            .filter_map(|text| text.parse::<IpAddr>().ok())
+        let mut found = Vec::new();
+        for family in ["-4", "-6"] {
+            let output = Command::new("ip")
+                .args([
+                    "netns",
+                    "exec",
+                    &self.namespace,
+                    "ip",
+                    family,
+                    "-o",
+                    "addr",
+                    "show",
+                    INTERFACE,
+                ])
+                .output()
+                .expect("ip runs");
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                if let Some(address) = line
+                    .split_whitespace()
+                    .nth(3)
+                    .and_then(|text| text.split('/').next())
+                    .and_then(|text| text.parse::<IpAddr>().ok())
+                {
+                    found.push(address);
+                }
+            }
+        }
+        found
+    }
+
+    /// Returns the addresses of this node's family, for a test that is about one
+    /// of them.
+    pub fn addresses_of(&self, vip: &str) -> Vec<IpAddr> {
+        self.addresses()
+            .into_iter()
+            .filter(|address| address.is_ipv6() == vip.contains(':'))
             .collect()
     }
 
-    /// Returns `true` when this node currently holds the VIP.
+    /// Returns `true` when this node currently holds the default VIP.
+    #[must_use]
     pub fn holds_vip(&self) -> bool {
+        self.holds(VIRTUAL_ADDRESS)
+    }
+
+    /// Returns `true` when this node currently holds `vip`, whatever family it
+    /// is.
+    #[must_use]
+    pub fn holds(&self, vip: &str) -> bool {
         self.addresses()
             .iter()
-            .any(|address| address.to_string() == VIRTUAL_ADDRESS)
+            .any(|address| address.to_string() == vip)
     }
 }
 
@@ -279,19 +353,26 @@ pub fn daemon_binary() -> PathBuf {
 /// Writes the configuration a node under test runs, with its single instance
 /// and the address the two nodes fight over.
 #[must_use]
+/// Writes the configuration a node under test runs.
+///
+/// `peer` is the other node's address for a unicast instance and `None` for a
+/// multicast one. It is a parameter rather than derived from the node's own
+/// address because the two nodes in a pair are symmetric by construction, and
+/// deriving it would tie every family to the IPv4 pair the first test happened
+/// to use.
+#[allow(clippy::too_many_arguments)]
 pub fn configuration(
     namespace: &str,
-    address: &'static str,
     directory: &Path,
     preempt: bool,
     vip: &str,
+    prefix: u8,
     priority: u8,
+    peer: Option<&str>,
 ) -> String {
-    // Unicast mode needs a peer, and the only honest peer is the other node.
-    let peer = if address == A_ADDRESS {
-        B_ADDRESS
-    } else {
-        A_ADDRESS
+    let network = match peer {
+        Some(peer) => format!("mode = \"unicast\"\npeers = [\"{peer}\"]"),
+        None => "mode = \"multicast\"".to_owned(),
     };
     format!(
         r#"schema_version = 1
@@ -315,14 +396,14 @@ startup_delay = "0s"
 preempt = {preempt}
 
 [instance.network]
-mode = "unicast"
-peers = ["{peer}"]
+{network}
 
 [[instance.vip]]
-address = "{vip}/24"
+address = "{vip}/{prefix}"
 "#,
         namespace = namespace,
         vip = vip,
+        prefix = prefix,
         priority = priority,
         socket = directory.join("control.sock").display(),
     )
@@ -464,6 +545,49 @@ impl Node {
             Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
             Err(error) => panic!("could not signal the daemon with {number}: {error}"),
         }
+    }
+
+    /// The multicast groups this node's interface has joined.
+    ///
+    /// Read from the kernel rather than from the daemon, because the membership
+    /// is the thing under test: a configuration that says `multicast` and a
+    /// daemon that never joined the group look identical from the log.
+    #[must_use]
+    pub fn multicast_groups(&self) -> Vec<String> {
+        let output = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &self.namespace,
+                "ip",
+                "-o",
+                "maddr",
+                "show",
+                "dev",
+                INTERFACE,
+            ])
+            .output()
+            .expect("ip runs");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut groups = Vec::new();
+        for line in text.lines() {
+            if let Some(rest) = line
+                .split("inet6 ")
+                .nth(1)
+                .map(std::borrow::ToOwned::to_owned)
+                .or_else(|| {
+                    line.split("inet ")
+                        .nth(1)
+                        .map(std::borrow::ToOwned::to_owned)
+                })
+            {
+                let address = rest.split_whitespace().next().unwrap_or_default();
+                if !address.is_empty() {
+                    groups.push(address.to_owned());
+                }
+            }
+        }
+        groups
     }
 
     /// Reports whether this node's link has carrier.

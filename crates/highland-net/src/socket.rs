@@ -24,8 +24,8 @@ use std::os::fd::AsRawFd;
 
 use highland_vrrp::IpFamily;
 use nix::sys::socket::sockopt::{
-    IpAddMembership, IpDropMembership, IpMulticastTtl, Ipv4RecvTtl, Ipv6AddMembership,
-    Ipv6DropMembership, Ipv6MulticastHops, Ipv6RecvHopLimit,
+    IpAddMembership, IpDropMembership, IpMulticastTtl, Ipv4PacketInfo, Ipv4RecvTtl,
+    Ipv6AddMembership, Ipv6DropMembership, Ipv6MulticastHops, Ipv6RecvHopLimit, Ipv6RecvPacketInfo,
 };
 use nix::sys::socket::{MsgFlags, SockaddrIn, SockaddrIn6};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
@@ -65,6 +65,13 @@ pub struct Received {
     pub source: IpAddr,
     /// The TTL or hop limit the kernel saw.
     pub ttl: u8,
+    /// The address the datagram was sent to, when the kernel reported it.
+    ///
+    /// This is the *destination*, not the source, and it matters for two reasons:
+    /// an IPv6 checksum covers it, and a multicast instance must know that a
+    /// packet really arrived at the group rather than being addressed to this
+    /// host directly.
+    pub destination: Option<IpAddr>,
     /// Whether the datagram arrived with its IP header still attached.
     ///
     /// A raw IP socket usually receives the payload with the header stripped and
@@ -112,6 +119,19 @@ impl VrrpSocket {
         interface: &str,
         source: IpAddr,
         ttl: u8,
+    ) -> Result<Self> {
+        Self::bind_internal(family, interface, source, ttl, false)
+    }
+
+    /// Binds the socket, with the TTL and the address it is bound to as
+    /// parameters, because both are load-bearing and neither is a test-only
+    /// knob.
+    fn bind_internal(
+        family: IpFamily,
+        interface: &str,
+        source: IpAddr,
+        ttl: u8,
+        any_address: bool,
     ) -> Result<Self> {
         // The socket is created for one family and bound to one of that
         // family's addresses, so a mismatch is a configuration error rather than
@@ -173,19 +193,40 @@ impl VrrpSocket {
             source: std::io::Error::from_raw_os_error(error as i32),
         })?;
 
-        socket
-            .bind(&match bound_source {
-                SocketAddrV4Bound::V4(address) => {
-                    SockAddr::from(std::net::SocketAddrV4::new(address, 0))
-                }
-                SocketAddrV4Bound::V6(address) => {
-                    SockAddr::from(std::net::SocketAddrV6::new(address, 0, 0, 0))
-                }
-            })
-            .map_err(|source| NetError::Io {
-                operation: "binding a VRRP socket",
-                source,
-            })?;
+        // `IP_PKTINFO` on both families, so a received datagram can say which
+        // address it was sent to. Without it a multicast instance cannot tell a
+        // packet that arrived at the group from one addressed to this host
+        // directly, and an IPv6 checksum cannot be verified.
+        let pktinfo = match family {
+            IpFamily::V4 => nix::sys::socket::setsockopt(&socket, Ipv4PacketInfo, &true),
+            IpFamily::V6 => nix::sys::socket::setsockopt(&socket, Ipv6RecvPacketInfo, &true),
+            _ => {
+                return Err(NetError::Unsupported {
+                    operation: "this address family",
+                });
+            }
+        };
+        pktinfo.map_err(|error| NetError::Io {
+            operation: "asking the kernel for the received destination",
+            source: std::io::Error::from_raw_os_error(error as i32),
+        })?;
+
+        let bound = match (bound_source, any_address) {
+            (SocketAddrV4Bound::V4(_), true) => SockAddr::from(std::net::SocketAddrV4::new(
+                std::net::Ipv4Addr::UNSPECIFIED,
+                0,
+            )),
+            (SocketAddrV4Bound::V4(address), false) => {
+                SockAddr::from(std::net::SocketAddrV4::new(address, 0))
+            }
+            (SocketAddrV4Bound::V6(address), _) => {
+                SockAddr::from(std::net::SocketAddrV6::new(address, 0, 0, 0))
+            }
+        };
+        socket.bind(&bound).map_err(|source| NetError::Io {
+            operation: "binding a VRRP socket",
+            source,
+        })?;
         socket
             .bind_device(Some(interface.as_bytes()))
             .map_err(|source| NetError::Io {
@@ -222,6 +263,13 @@ impl VrrpSocket {
     /// [`NetError::Encode`] when the group is not of this socket's family.
     pub fn join_group(&self, group: IpAddr, ttl: u8) -> Result<()> {
         self.set_multicast_ttl(ttl, "joining a VRRP multicast group")?;
+        // The outgoing interface is named rather than left to the routing table.
+        // A multicast group is local to one link by definition, so a route for
+        // it is neither guaranteed to exist nor the right answer: a host whose
+        // default route points somewhere else would send its advertisements off
+        // the segment they are about, or fail with `ENETUNREACH` on a segment
+        // with no default route at all, which is most virtual networks.
+        self.set_multicast_interface()?;
         match (self.family, group) {
             (IpFamily::V4, IpAddr::V4(address)) => {
                 // The IPv4 membership request names the interface by address, so
@@ -293,6 +341,18 @@ impl VrrpSocket {
         })
     }
 
+    /// Names the interface multicast datagrams leave through.
+    fn set_multicast_interface(&self) -> Result<()> {
+        let result = match self.source {
+            IpAddr::V4(address) => self.socket.set_multicast_if_v4(&address),
+            IpAddr::V6(_) => self.socket.set_multicast_if_v6(self.index),
+        };
+        result.map_err(|source| NetError::Io {
+            operation: "naming the interface for VRRP multicast",
+            source,
+        })
+    }
+
     /// Sets the TTL a multicast datagram is sent with.
     ///
     /// Separate from the unicast TTL at bind time, and one for each family:
@@ -313,6 +373,33 @@ impl VrrpSocket {
             operation,
             source: std::io::Error::from_raw_os_error(error as i32),
         })
+    }
+
+    /// Binds a raw VRRP socket that speaks to a multicast group.
+    ///
+    /// On IPv4 this binds to *any* address rather than the source address, and
+    /// that is not a detail. The kernel matches a raw socket's receive against
+    /// the address the socket is bound to: bind it to `192.0.2.11` and it will
+    /// never see a datagram addressed to `224.0.0.18`, so a multicast instance
+    /// would send advertisements nobody could receive and would fail over on a
+    /// schedule instead of an election. The source address is then chosen by the
+    /// kernel from the outgoing interface, which is the same address either way.
+    ///
+    /// IPv6 keeps the bound address: there the kernel filters by *source* rather
+    /// than by destination, so binding costs nothing and keeps the source of
+    /// every advertisement under the daemon's control rather than the routing
+    /// table's.
+    ///
+    /// # Errors
+    ///
+    /// As [`VrrpSocket::bind`].
+    pub fn bind_for_group(family: IpFamily, interface: &str, source: IpAddr) -> Result<Self> {
+        match (family, source) {
+            (IpFamily::V4, IpAddr::V4(_)) => {
+                Self::bind_internal(family, interface, source, REQUIRED_TTL, true)
+            }
+            _ => Self::bind(family, interface, source),
+        }
     }
 
     /// Returns the family this socket speaks.
@@ -379,7 +466,7 @@ impl VrrpSocket {
 
         // The borrow of `buffer` by the read is released before the payload is
         // copied out, so the caller never sees a buffer tied to the socket.
-        let (length, source, ttl) = match self.family {
+        let (length, source, ttl, destination) = match self.family {
             IpFamily::V4 => {
                 let mut iov = [IoSliceMut::new(&mut buffer)];
                 match nix::sys::socket::recvmsg::<SockaddrIn>(
@@ -392,7 +479,8 @@ impl VrrpSocket {
                         let length = outcome.bytes;
                         let source = address_v4(outcome.address)?;
                         let ttl = hop_limit_v4(&outcome).unwrap_or(0);
-                        (length, source, ttl)
+                        let destination = received_destination_v4(&outcome);
+                        (length, source, ttl, destination)
                     }
                     Err(error) => return Self::nothing_yet(error),
                 }
@@ -409,7 +497,8 @@ impl VrrpSocket {
                         let length = outcome.bytes;
                         let source = address_v6(outcome.address)?;
                         let ttl = hop_limit_v6(&outcome).unwrap_or(0);
-                        (length, source, ttl)
+                        let destination = received_destination_v6(&outcome);
+                        (length, source, ttl, destination)
                     }
                     Err(error) => return Self::nothing_yet(error),
                 }
@@ -424,7 +513,12 @@ impl VrrpSocket {
         };
 
         let length = length.min(buffer.len());
-        Ok(Some(strip_header(&buffer[..length], source, ttl)))
+        Ok(Some(strip_header(
+            &buffer[..length],
+            source,
+            ttl,
+            destination,
+        )))
     }
 
     /// Turns "there was nothing to read" into `Ok(None)`, and anything else
@@ -467,7 +561,14 @@ impl VrrpSocket {
 /// fail every field check for reasons that have nothing to do with the packet's
 /// contents. So the header is recognized and removed here, and its values are
 /// preferred over the ancillary ones when it is present.
-fn strip_header(datagram: &[u8], ancillary_source: IpAddr, ancillary_ttl: u8) -> Received {
+fn strip_header(
+    datagram: &[u8],
+    ancillary_source: IpAddr,
+    ancillary_ttl: u8,
+    destination: Option<IpAddr>,
+) -> Received {
+    // The parameters are the ancillary data's values, which the attached-header
+    // path below replaces with the header's own.
     if let Some(stripped) = strip_ipv4_header(datagram) {
         return stripped;
     }
@@ -475,6 +576,7 @@ fn strip_header(datagram: &[u8], ancillary_source: IpAddr, ancillary_ttl: u8) ->
         payload: datagram.to_vec(),
         source: ancillary_source,
         ttl: ancillary_ttl,
+        destination,
         header_attached: false,
     }
 }
@@ -505,6 +607,9 @@ fn strip_ipv4_header(datagram: &[u8]) -> Option<Received> {
         payload: datagram[header_len..].to_vec(),
         source,
         ttl,
+        // The header carries the destination, which is the ancillary data's job
+        // when there is any.
+        destination: Some(IpAddr::from(<[u8; 4]>::try_from(&datagram[16..20]).ok()?)),
         header_attached: true,
     })
 }
@@ -529,6 +634,54 @@ fn address_v6(address: Option<SockaddrIn6>) -> Result<IpAddr> {
         })
 }
 
+/// Reads the address an IPv4 datagram was sent to, from `IP_PKTINFO`.
+///
+/// The message arrives untyped, as eight octets: an interface index and the
+/// address. They are read as bytes rather than through a cast, because a
+/// family-agnostic control buffer is not a `struct in_pktinfo`, and treating it as
+/// one would be a reinterpretation this crate has no reason to make.
+fn received_destination_v4<S>(outcome: &nix::sys::socket::RecvMsg<'_, '_, S>) -> Option<IpAddr>
+where
+    S: nix::sys::socket::SockaddrLike,
+{
+    use nix::sys::socket::ControlMessageOwned;
+
+    for message in outcome.cmsgs().ok()? {
+        if let ControlMessageOwned::Unknown(unknown) = message
+            && unknown.cmsg_header.cmsg_type == nix::libc::IP_PKTINFO
+            && unknown.data_bytes.len() >= 8
+        {
+            let octets: [u8; 4] = unknown.data_bytes[4..8].try_into().ok()?;
+            return Some(IpAddr::V4(std::net::Ipv4Addr::from(u32::from_ne_bytes(
+                octets,
+            ))));
+        }
+    }
+    None
+}
+
+/// Reads the address an IPv6 datagram was sent to, from `IPV6_PKTINFO`.
+///
+/// Twenty-four octets: an interface index, the address, and the length of that
+/// address. Only the address is wanted here.
+fn received_destination_v6<S>(outcome: &nix::sys::socket::RecvMsg<'_, '_, S>) -> Option<IpAddr>
+where
+    S: nix::sys::socket::SockaddrLike,
+{
+    use nix::sys::socket::ControlMessageOwned;
+
+    for message in outcome.cmsgs().ok()? {
+        if let ControlMessageOwned::Unknown(unknown) = message
+            && unknown.cmsg_header.cmsg_type == nix::libc::IPV6_PKTINFO
+            && unknown.data_bytes.len() >= 20
+        {
+            let octets: [u8; 16] = unknown.data_bytes[4..20].try_into().ok()?;
+            return Some(IpAddr::V6(std::net::Ipv6Addr::from(octets)));
+        }
+    }
+    None
+}
+
 /// Reads the TTL out of the ancillary data of an IPv4 read.
 ///
 /// `IP_RECVTTL` has no variant of its own in `nix`, so it arrives as an unknown
@@ -539,8 +692,24 @@ fn hop_limit_v4(outcome: &nix::sys::socket::RecvMsg<'_, '_, SockaddrIn>) -> Opti
 }
 
 /// Reads the hop limit out of the ancillary data of an IPv6 read.
+///
+/// This one is a typed control message rather than an unknown one, which is the
+/// whole reason IPv6 was not working: the reader looked only at `Unknown`
+/// messages, so a hop limit the kernel had delivered was read as zero, and every
+/// IPv6 advertisement was then rejected for a TTL that was perfectly correct.
+/// IPv4 has the opposite shape — its `IP_TTL` arrives untyped — so the same
+/// reader is right for one family and silently wrong for the other.
 fn hop_limit_v6(outcome: &nix::sys::socket::RecvMsg<'_, '_, SockaddrIn6>) -> Option<u8> {
-    first_unknown_byte(outcome, nix::libc::IPV6_RECVHOPLIMIT)
+    use nix::sys::socket::ControlMessageOwned;
+
+    for message in outcome.cmsgs().ok()? {
+        if let ControlMessageOwned::Ipv6HopLimit(limit) = message
+            && let Ok(limit) = u8::try_from(limit)
+        {
+            return Some(limit);
+        }
+    }
+    None
 }
 
 /// Returns the first byte of the control message of type `cmsg_type`.
@@ -594,7 +763,7 @@ mod tests {
     #[test]
     fn a_datagram_without_a_header_is_left_alone() {
         let payload = fixture_advertisement();
-        let received = strip_header(&payload, "192.0.2.11".parse().expect("valid"), 255);
+        let received = strip_header(&payload, "192.0.2.11".parse().expect("valid"), 255, None);
 
         assert_eq!(received.payload, payload, "a bare payload is not touched");
         assert!(!received.header_attached);
@@ -609,7 +778,7 @@ mod tests {
     fn an_attached_ipv4_header_is_removed_and_its_values_win() {
         let payload = fixture_advertisement();
         let datagram = ipv4_datagram(64, [192, 0, 2, 11], &payload);
-        let received = strip_header(&datagram, "10.0.0.1".parse().expect("valid"), 255);
+        let received = strip_header(&datagram, "10.0.0.1".parse().expect("valid"), 255, None);
 
         assert_eq!(
             received.payload, payload,
@@ -633,7 +802,7 @@ mod tests {
         let mut payload = fixture_advertisement();
         payload[0] = 0x45;
 
-        let received = strip_header(&payload, "192.0.2.11".parse().expect("valid"), 255);
+        let received = strip_header(&payload, "192.0.2.11".parse().expect("valid"), 255, None);
         assert!(
             !received.header_attached,
             "the length and protocol did not match a header"
@@ -647,7 +816,7 @@ mod tests {
         let mut datagram = ipv4_datagram(255, [192, 0, 2, 11], &payload);
         datagram[9] = 17; // UDP
 
-        let received = strip_header(&datagram, "192.0.2.11".parse().expect("valid"), 255);
+        let received = strip_header(&datagram, "192.0.2.11".parse().expect("valid"), 255, None);
         assert!(!received.header_attached, "only a VRRP header is stripped");
         assert_eq!(received.payload, datagram);
     }
@@ -658,7 +827,7 @@ mod tests {
         let mut datagram = ipv4_datagram(255, [192, 0, 2, 11], &payload);
         datagram.truncate(12);
 
-        let received = strip_header(&datagram, "192.0.2.11".parse().expect("valid"), 255);
+        let received = strip_header(&datagram, "192.0.2.11".parse().expect("valid"), 255, None);
         assert!(
             !received.header_attached,
             "a header shorter than 20 octets is not a header"
@@ -667,7 +836,7 @@ mod tests {
 
     #[test]
     fn an_empty_datagram_is_handled() {
-        let received = strip_header(&[], "192.0.2.11".parse().expect("valid"), 255);
+        let received = strip_header(&[], "192.0.2.11".parse().expect("valid"), 255, None);
         assert!(received.payload.is_empty());
         assert!(!received.header_attached);
     }

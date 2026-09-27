@@ -80,8 +80,9 @@ transactional reload are all implemented and tested, and a whole failover —
 including the announcement that tells the segment the address moved — is driven
 end to end between two network namespaces in the test suite.
 
-What is not finished is IPv6 and multicast: the daemon speaks unicast IPv4. That
-is the next milestone, and the documentation marks it wherever it matters.
+IPv6 and multicast are done as well: the same two-node suite runs IPv4 unicast,
+IPv4 multicast, IPv6 unicast, and IPv6 multicast. What is not finished is holding
+both families in one instance, health probes, and Keepalived interoperability.
 
 The documentation describes the finished product, and marks anything that does
 not work yet. The [command reference](cli.md), the

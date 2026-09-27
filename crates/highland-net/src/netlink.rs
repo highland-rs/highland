@@ -30,6 +30,7 @@ use futures_util::StreamExt as _;
 use rtnetlink::packet_core::NetlinkPayload;
 use rtnetlink::packet_route::RouteNetlinkMessage;
 use rtnetlink::packet_route::address::AddressAttribute;
+use rtnetlink::packet_route::address::AddressHeaderFlags;
 use rtnetlink::packet_route::link::{LinkAttribute, LinkMessage};
 use rtnetlink::{Error as RtnetlinkError, Handle};
 
@@ -379,11 +380,32 @@ impl NetworkBackend for NetlinkBackend {
         }
 
         let index = u32::try_from(interface.get()).unwrap_or(0);
+        // `IFA_F_NODAD` for IPv6, and the reason is specific to what an address
+        // here is: a tentative address cannot be bound to and cannot be used as
+        // a source, so for about a second after it is added the node owns an
+        // address it cannot send from and cannot announce. The address has just
+        // been claimed by an election, so there is nothing to detect either — the
+        // question "is anyone else using this" was answered by the protocol, and
+        // answering it again with a solicitation delays the handover it is part
+        // of.
         // The kernel's reply is the acknowledgment. The read-back below is the
         // confirmation, and it is the one that matters.
-        self.handle
+        let mut request = self
+            .handle
             .address()
-            .add(index, address.address(), address.prefix_len())
+            .add(index, address.address(), address.prefix_len());
+        if matches!(address.address(), IpAddr::V6(_)) {
+            // `IFA_F_NODAD`, and the reason is specific to what an address here
+            // is: a tentative address cannot be bound to and cannot be used as a
+            // source, so for about a second after it is added the node owns an
+            // address it cannot send from and cannot announce. The address has
+            // just been claimed by an election, so there is nothing left to
+            // detect — the question "is anyone else using this" was answered by
+            // the protocol — and answering it again with a solicitation delays
+            // the handover it is part of.
+            request.message_mut().header.flags |= AddressHeaderFlags::Nodad;
+        }
+        request
             .execute()
             .await
             .map_err(|error| NetError::AddAddress {

@@ -61,16 +61,16 @@ address family (`V-03`).
 
 | Key | Type | Notes |
 |---|---|---|
-| `address` | CIDR string | Prefix 0 is rejected (`V-13`); the same address may not appear twice or in two instances (`V-12`) |
+| `address` | CIDR string | Prefix 0 is rejected (`V-13`); the same address may not appear twice or in two instances (`V-12`). One instance holds the addresses of one family; mixing them is rejected (`V-03`), because an instance speaks one family per socket and one source address |
 
 ### `[instance.network]`
 
 | Key | Type | Default | Notes |
 |---|---|---|---|
-| `mode` | `unicast`\|`multicast` | `unicast` | `multicast` requires 1.0 |
-| `peers` | array of IP | `[]` | Family is inferred per entry. A VIP family with no peer is rejected (`V-07`). A local address is rejected (`V-08`); a multicast address is rejected (`V-09`); at most 255 (`L-03`) |
-| `multicast.group` | IP | `224.0.0.18` / `ff02::12` | Per family |
-| `multicast.ttl` | integer | `255` | Anything else is rejected (`V-24`) |
+| `mode` | `unicast`\|`multicast` | `unicast` | In `multicast` mode there is no peer list: the group is where the peers are, and the group membership is what authorises a node's advertisements |
+| `peers` | array of IP | `[]` | Family is inferred per entry, and a list may hold both families: peers of the other family are ignored. A VIP family with no peer is rejected in unicast mode (`V-07`). A local address is rejected (`V-08`); a multicast address is rejected (`V-09`); at most 255 (`L-03`) |
+| `multicast.group` | IP | per family | Unset, so the group is `224.0.0.18` for an IPv4 instance and `ff02::12` for an IPv6 one, which is not the same address. A configured group must be a multicast address of the instance's family, or the instance is refused (`V-24`) |
+| `multicast.ttl` | integer | `255` | Anything else is rejected (`V-24`). The multicast TTL is a different socket option from the unicast one and defaults to 1, which every receiver would discard |
 
 ### `[instance.health]`
 

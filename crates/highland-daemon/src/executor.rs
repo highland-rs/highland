@@ -372,16 +372,21 @@ where
             Ok(id) => id,
             Err(event) => return Some(event),
         };
-        let mut failures = Vec::new();
+        // Each failure is reported by name, because "a gratuitous update was
+        // not delivered" tells an operator nothing they can act on, and an
+        // announcement that silently stops happening is a black hole that lasts
+        // until a cache entry ages out.
+        let mut failures: Vec<String> = Vec::new();
         for address in self.addresses().to_vec() {
-            let _ = address;
-            failures.push(
-                self.backend
-                    .send_gratuitous_update(id, address.address())
-                    .await,
-            );
+            if let Err(error) = self
+                .backend
+                .send_gratuitous_update(id, address.address())
+                .await
+            {
+                failures.push(format!("{address}: {error}"));
+            }
         }
-        if failures.iter().all(Result::is_ok) {
+        if failures.is_empty() {
             Some(Event::ActionSucceeded {
                 kind: ActionKind::GratuitousUpdate,
             })
@@ -391,7 +396,7 @@ where
             // record it, but it does not fault.
             Some(Event::ActionFailed {
                 kind: ActionKind::GratuitousUpdate,
-                error: "a gratuitous update was not delivered".to_owned(),
+                error: failures.join("; "),
             })
         }
     }

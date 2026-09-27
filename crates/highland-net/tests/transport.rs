@@ -32,6 +32,7 @@ fn datagram(bytes: &[u8]) -> Datagram<'_> {
         bytes,
         source: peer(),
         ttl: 255,
+        destination: None,
     }
 }
 
@@ -88,6 +89,7 @@ fn a_ttl_other_than_255_is_rejected() {
                 bytes: &bytes,
                 source: peer(),
                 ttl,
+                destination: None,
             },
             &allowed(peers()),
             destination(),
@@ -107,6 +109,7 @@ fn an_advertisement_from_a_stranger_is_rejected() {
             bytes: &bytes,
             source: "192.0.2.99".parse().expect("valid"),
             ttl: 255,
+            destination: None,
         },
         &allowed(peers()),
         destination(),
@@ -337,4 +340,127 @@ fn an_advertisement_is_built_for_the_wire_with_a_scope() {
         highland_vrrp::CHECKSUM_OFFSET,
         scope
     ));
+}
+
+// ----- multicast reception -------------------------------------------------
+
+/// A multicast instance accepts any source, because membership of the group is
+/// the authorisation, and the kernel has already enforced it before the packet
+/// was delivered.
+#[test]
+fn a_group_instance_accepts_a_source_that_is_not_on_any_list() {
+    let bytes = fixture_advertisement();
+    let group = IpAddr::V4(std::net::Ipv4Addr::new(224, 0, 0, 18));
+    let outcome = validate(
+        Datagram {
+            bytes: &bytes,
+            source: "192.0.2.99".parse().expect("valid"),
+            ttl: 255,
+            destination: Some(group),
+        },
+        &AllowedSources::Group { group },
+        group,
+        VRID,
+        Duration::ZERO,
+        None,
+    );
+    assert!(
+        outcome.advertisement().is_some(),
+        "a member of the group is a peer: {outcome:?}"
+    );
+}
+
+/// A datagram that was addressed to this host rather than to the group is not
+/// group traffic, and a multicast instance must not take it.
+///
+/// This is the narrowing that a socket bound to *any* address makes necessary:
+/// an IPv4 group socket cannot be bound to its own unicast address, so it also
+/// sees datagrams sent to the host itself, and nothing else distinguishes them.
+#[test]
+fn a_group_instance_rejects_a_datagram_addressed_to_the_host() {
+    let bytes = fixture_advertisement();
+    let group = IpAddr::V4(std::net::Ipv4Addr::new(224, 0, 0, 18));
+    let outcome = validate(
+        Datagram {
+            bytes: &bytes,
+            source: peer(),
+            ttl: 255,
+            destination: Some(peer()),
+        },
+        &AllowedSources::Group { group },
+        group,
+        VRID,
+        Duration::ZERO,
+        None,
+    );
+    assert!(
+        matches!(outcome.rejection(), Some(Rejection::WrongGroup { .. })),
+        "a datagram for the host is not group traffic: {outcome:?}"
+    );
+}
+
+/// The destination is not decoration: an IPv6 checksum covers it, so a receiver
+/// that validates against the wrong address rejects a perfectly good packet.
+///
+/// This is the check that IPv6 unicast needs and never had, and it is why the
+/// destination travels with the datagram rather than being assumed.
+#[test]
+fn an_ipv6_checksum_is_verified_against_the_address_the_packet_arrived_at() {
+    let source: IpAddr = "2001:db8::11".parse().expect("valid");
+    let group: IpAddr = "ff02::12".parse().expect("valid");
+    let advertisement = Advertisement::new(
+        Vrid::new(VRID).expect("valid"),
+        Priority::new(150).expect("representable"),
+        MaxAdverInt::from_duration(Duration::from_secs(1)).expect("in range"),
+        vec!["2001:db8::100".parse().expect("valid address")],
+    )
+    .expect("valid");
+    let bytes = advertisement
+        .encode_with_checksum(
+            IpFamily::V6,
+            highland_vrrp::ChecksumScope::PseudoHeader {
+                source,
+                destination: group,
+            },
+        )
+        .expect("encodes");
+
+    let accepted = validate(
+        Datagram {
+            bytes: &bytes,
+            source,
+            ttl: 255,
+            destination: Some(group),
+        },
+        &AllowedSources::Group { group },
+        group,
+        VRID,
+        Duration::ZERO,
+        None,
+    );
+    assert!(accepted.advertisement().is_some(), "{accepted:?}");
+
+    // The same bytes, offered to an instance that speaks for a different group.
+    // The group check passes — the datagram really did arrive at the address this
+    // instance joined — and the checksum does not, because the pseudo-header
+    // names an address the bytes were not built for.
+    let elsewhere: IpAddr = "ff02::20".parse().expect("valid");
+    let rejected = validate(
+        Datagram {
+            bytes: &bytes,
+            source,
+            ttl: 255,
+            destination: Some(elsewhere),
+        },
+        &AllowedSources::Group { group: elsewhere },
+        elsewhere,
+        VRID,
+        Duration::ZERO,
+        None,
+    );
+    assert_eq!(
+        rejected.rejection(),
+        Some(Rejection::BadChecksum),
+        "a checksum covers the destination, so the wrong one must not verify"
+    );
 }

@@ -619,3 +619,95 @@ fn the_configured_bound_is_the_bound_the_codec_accepts() {
         "3s is 300 centiseconds"
     );
 }
+
+/// A table that is present but partial must accept the documented defaults.
+///
+/// `#[serde(default)]` on a field in `Config` only applies when the whole table
+/// is absent, so a document with `[logging] level = "debug"` and no `format`
+/// used to be rejected. An operator who wrote one line of configuration was told
+/// a second one was required, for a value that has a default.
+#[test]
+fn a_partial_table_uses_the_documented_defaults() {
+    let text = r#"
+schema_version = 1
+
+[node]
+name = "node-a"
+
+[logging]
+level = "debug"
+
+[metrics]
+enabled = true
+listen = "127.0.0.1:9900"
+
+[control]
+socket = "/run/highland/control.sock"
+
+[[instance]]
+name = "api"
+interface = "eth0"
+vrid = 42
+
+[instance.network]
+mode = "unicast"
+peers = ["192.0.2.11"]
+
+[[instance.vip]]
+address = "192.0.2.10/24"
+"#;
+    let config = load_and_validate(text, &ValidationContext::permissive())
+        .expect("the defaults fill the rest");
+
+    assert_eq!(config.logging.level, "debug");
+    assert_eq!(config.logging.format, "text", "the documented default");
+    assert_eq!(config.logging.redact, Vec::<String>::new());
+    assert_eq!(
+        config.metrics.listen.as_deref(),
+        Some("127.0.0.1:9900"),
+        "the value given is kept"
+    );
+    // A field-level `#[serde(default)]` on a `bool` means `false`, and it
+    // overrides the struct's own default. That made peer credentials
+    // *unverified* by default while the documentation said the opposite.
+    assert!(
+        config.control.verify_peer_credentials,
+        "peer credentials are verified by default (S-02, S-03)"
+    );
+    assert_eq!(config.control.group, None);
+    assert!(config.instances[0].preempt, "the documented default");
+    assert_eq!(config.instances[0].priority, 100, "the documented default");
+}
+
+/// A document that omits every optional table entirely must also work.
+#[test]
+fn the_minimum_document_needs_only_a_node_and_an_instance() {
+    let text = r#"
+schema_version = 1
+
+[node]
+name = "node-a"
+
+[[instance]]
+name = "api"
+interface = "eth0"
+vrid = 42
+preempt = false
+
+[instance.network]
+mode = "unicast"
+peers = ["192.0.2.11"]
+
+[[instance.vip]]
+address = "192.0.2.10/24"
+"#;
+    let config = load_and_validate(text, &ValidationContext::permissive())
+        .expect("the defaults fill the rest");
+
+    assert_eq!(config.logging.level, "info");
+    assert_eq!(config.control.socket, "/run/highland/control.sock");
+    assert_eq!(
+        config.instances[0].advertisement_interval.as_duration(),
+        std::time::Duration::from_secs(1)
+    );
+}

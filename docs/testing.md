@@ -153,6 +153,24 @@ same time. Two things follow, both learned by having them fail:
   if a parallel test is sending. Each socket test takes its own address out of
   `127/8`.
 
+## The two-node suite
+
+`crates/highland-daemon/tests/two_node.rs` is behind the `netlink-tests` feature
+and needs `CAP_NET_ADMIN` and `CAP_NET_RAW`. It builds two namespaces on a bridge,
+starts a daemon in each, and asserts that the address moves within
+`Master_Down_Interval` when the master is killed. `scripts/linux-tests.sh` runs
+it.
+
+Three conventions it follows, all of them learned by breaking them:
+
+- **The bridge lives in the root namespace**, with one veth end there and only
+  the peer end moved in. A bridge cannot be enslaved to from another namespace.
+- **The daemon is started with `ip netns exec`**, not directly, so it sees its
+  own interfaces rather than the container's.
+- **The dead node keeps the address**, and the test says so. `SIGKILL` does not
+  run a shutdown sequence, so the kernel still holds the VIP. That is the
+  exposure fencing exists to close.
+
 ## Network-namespace tests
 
 These arrive with Milestone 4. The harness will build:

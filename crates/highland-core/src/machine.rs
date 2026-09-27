@@ -311,6 +311,19 @@ where
         Candidate::new(self.priority.effective, address)
     }
 
+    /// Sets the interface's primary addresses, which the tie-break compares.
+    ///
+    /// A machine that does not know its own address cannot resolve an equal
+    /// priority, and two nodes that start together always tie.
+    pub fn set_primary_addresses(
+        &mut self,
+        ipv4: Option<std::net::Ipv4Addr>,
+        ipv6: Option<std::net::Ipv6Addr>,
+    ) {
+        self.config.primary_ipv4 = ipv4;
+        self.config.primary_ipv6 = ipv6;
+    }
+
     /// Replaces the configuration, as a reload does.
     ///
     /// A reload never changes the role by itself; it changes the parameters
@@ -476,12 +489,23 @@ where
         }
     }
 
+    /// What a master does when a peer advertises.
+    ///
+    /// A strictly higher priority always wins (`R-16`). An *equal* priority is
+    /// the interesting case, and it is the one two nodes that start together
+    /// produce: both time out at the same instant and both advertise. The
+    /// specification resolves it by address (§12.3), so the same rule that
+    /// `election::decide` documents decides here, rather than a second
+    /// comparison invented next to it.
     fn on_advertisement_as_master(
         &mut self,
         advertisement: &PeerAdvertisement,
         actions: &mut Vec<Action>,
     ) {
-        if election::must_step_down(self.priority.effective, advertisement.priority) {
+        let steps_down = election::must_step_down(self.priority.effective, advertisement.priority)
+            || self.peer_wins_an_equal_priority(advertisement);
+
+        if steps_down {
             self.last_reason = TransitionReason::HigherPriorityPeerAdvertisement;
             self.request_release(
                 TransitionReason::HigherPriorityPeerAdvertisement,
@@ -489,8 +513,23 @@ where
                 actions,
             );
         }
-        // An equal or lower priority is expected traffic from a peer that has
-        // not yet learned about this node's role, and needs no action.
+        // A lower priority is expected traffic from a peer that has not yet
+        // learned about this node's role, and needs no action.
+    }
+
+    /// Returns `true` when the peer wins a tie at equal priority.
+    fn peer_wins_an_equal_priority(&self, advertisement: &PeerAdvertisement) -> bool {
+        if advertisement.priority != self.priority.effective {
+            return false;
+        }
+        let ours = self.candidate();
+        let theirs = election::Candidate {
+            priority: advertisement.priority,
+            address: advertisement.source,
+            peer_set: Vec::new(),
+        };
+        election::decide(&ours, &theirs, election::Incumbent::Local).winner
+            == election::Winner::Remote
     }
 
     /// RFC 5798 §6.4.2: what a backup does with a valid advertisement.

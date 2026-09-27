@@ -7,6 +7,9 @@
 
 use crate::shutdown::{ShutdownPlan, ShutdownReason};
 use crate::{Daemon, DaemonError, Options};
+#[cfg(target_os = "linux")]
+use std::net::IpAddr;
+
 use highland_config::{Config, InstanceConfig, ValidationContext, load, validate};
 use highland_net::{IpCidr, PeerSet};
 use highland_observe::EventSink as _;
@@ -28,12 +31,11 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
     let mut daemon = Daemon::prepare(options)?;
 
     if !TRANSPORT_AVAILABLE {
-        // Refusing here, rather than starting a process that cannot speak VRRP,
-        // is the honest behaviour. The configuration is still validated first, so
-        // `highland run` with a broken file still reports the broken file.
+        // The configuration is still validated first, so `highland run` with a
+        // broken file still reports the broken file rather than the platform.
         tracing::error!(
             instances = daemon.config().instances.len(),
-            "refusing to start: the VRRP transport is not implemented"
+            "refusing to start: this build cannot carry VRRP on the wire"
         );
         return Err(DaemonError::TransportUnavailable);
     }
@@ -59,6 +61,10 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
             DaemonError::Runtime(format!("could not install the SIGHUP handler: {source}"))
         })?;
 
+    // A watch rather than a channel: the signal handlers own the sending end
+    // and every instance holds a receiver, so one signal reaches all of them.
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
     tracing::info!(
         filter = %filter,
         node = %daemon.config().node.name,
@@ -66,6 +72,8 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
         config = %daemon.options().config_path.display(),
         "highland started"
     );
+
+    let instances = start_instances(&daemon, &shutdown_rx).await?;
 
     let reason = loop {
         tokio::select! {
@@ -86,11 +94,166 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
         }
     };
 
-    let plan = ShutdownPlan::new(reason, Vec::new());
+    // Tell the instances before the daemon's own shutdown sequence, so each
+    // actor relinquishes its addresses in its own time and within the budget
+    // (`SPEC.md` §14.5).
+    let _ = shutdown_tx.send(true);
+
+    let plan = ShutdownPlan::new(
+        reason,
+        instances.iter().map(|(name, _)| name.clone()).collect(),
+    );
     for event in daemon.shutdown(plan) {
         tracing::info!(event = %event.name, reason = %event.reason, "highland stopped");
     }
     Ok(())
+}
+
+/// A running instance and the task that drives it.
+type RunningInstance = (String, tokio::task::JoinHandle<()>);
+
+/// Starts one task per configured instance.
+///
+/// Every instance gets its own backend, transport, socket, and actor, because
+/// the state machine holds the only authority over role and two instances must
+/// not be able to disagree about one another's address (`SPEC.md` §20).
+#[cfg(target_os = "linux")]
+async fn start_instances(
+    daemon: &Daemon,
+    shutdown_signal: &tokio::sync::watch::Receiver<bool>,
+) -> Result<Vec<RunningInstance>, DaemonError> {
+    let mut running = Vec::new();
+    for (plan, ownership) in plans(daemon.config()) {
+        use highland_net::NetworkBackend as _;
+
+        let backend = std::sync::Arc::new(
+            highland_net::default_backend()
+                .map_err(|error| DaemonError::Runtime(format!("no network backend: {error}")))?,
+        );
+        let source = source_address(&plan, &ownership, backend.as_ref())
+            .await
+            .map_err(|error| DaemonError::Runtime(format!("instance {}: {error}", plan.name)))?;
+
+        let transport = std::sync::Arc::new(
+            crate::VrrpTransport::bind(
+                &plan,
+                &ownership.interface,
+                source,
+                ownership.peers.clone(),
+            )
+            .map_err(|error| DaemonError::Runtime(format!("instance {}: {error}", plan.name)))?,
+        );
+
+        // The interface name is needed after `ownership` has been moved into
+        // the actor.
+        let interface_name = ownership.interface.clone();
+
+        let mut actor = crate::InstanceActor::new(
+            highland_core::clock::SystemClock::new(),
+            plan.clone(),
+            ownership,
+            backend.clone(),
+            transport.clone(),
+        );
+
+        // The machine needs its own address to resolve an equal-priority
+        // advertisement, which is exactly what two nodes starting together
+        // produce. Without it the tie-break has nothing to compare and both
+        // nodes stay master.
+        if let Ok(interface) = backend.interface(&interface_name).await {
+            actor.set_primary_addresses(interface.primary_ipv4(), interface.primary_ipv6());
+        }
+
+        let (sender, receiver) = crate::channel();
+        let reader = transport.spawn_reader(sender);
+        let watch = shutdown_signal.clone();
+        let name = plan.name.clone();
+
+        let handle = tokio::spawn(async move {
+            crate::run_instance(actor, receiver, watch).await;
+            // The reader stops with the actor: nothing outlives the instance
+            // that owns it (`I-41`).
+            reader.abort();
+        });
+
+        tracing::info!(
+            instance = %name,
+            vrid = plan.vrid,
+            source = %source,
+            peers = transport.destinations().len(),
+            "instance started"
+        );
+        running.push((name, handle));
+    }
+    Ok(running)
+}
+
+/// Without a socket there is nothing to start, and saying so is better than
+/// starting instances that cannot speak VRRP.
+#[cfg(not(target_os = "linux"))]
+fn start_instances(
+    _daemon: &Daemon,
+    _shutdown_signal: &tokio::sync::watch::Receiver<bool>,
+) -> impl std::future::Future<Output = Result<Vec<RunningInstance>, DaemonError>> {
+    std::future::ready(Err(DaemonError::TransportUnavailable))
+}
+
+/// Picks the address an instance sends from.
+///
+/// RFC 5798 §5.1.1.1 requires the primary address of the interface, **not** the
+/// virtual address. That is not a detail: a raw socket cannot bind to an address
+/// the interface does not have yet, and the virtual address is only added when
+/// the instance becomes master. Binding to the VIP would therefore fail at
+/// startup with `EADDRNOTAVAIL` on every node.
+#[cfg(target_os = "linux")]
+async fn source_address(
+    plan: &InstancePlan,
+    ownership: &Ownership,
+    backend: &highland_net::NetlinkBackend,
+) -> Result<IpAddr, crate::executor::TransportError> {
+    use highland_net::NetworkBackend as _;
+
+    let interface = backend
+        .interface(&ownership.interface)
+        .await
+        .map_err(|error| crate::executor::TransportError::Unavailable {
+            reason: format!("interface {}: {error}", ownership.interface),
+        })?;
+
+    let virtual_addresses: Vec<IpAddr> = ownership
+        .addresses
+        .iter()
+        .map(highland_net::IpCidr::address)
+        .collect();
+    let primary = interface
+        .addresses
+        .iter()
+        .map(highland_net::IpCidr::address)
+        .find(|address| !virtual_addresses.contains(address));
+
+    match primary {
+        Some(address) => {
+            tracing::debug!(
+                instance = %plan.name,
+                %address,
+                interface = %interface.name,
+                "sending from the interface's primary address"
+            );
+            Ok(address)
+        }
+        None => {
+            // The interface has nothing but the virtual addresses, which cannot
+            // happen in a working configuration: the node needs an address of its
+            // own to reach its peers. Say so plainly rather than failing later at
+            // the socket.
+            Err(crate::executor::TransportError::Encode {
+                reason: format!(
+                    "interface {} has no address of its own, so instance {} has nothing to send from",
+                    interface.name, plan.name
+                ),
+            })
+        }
+    }
 }
 
 /// Re-reads the configuration file and reports the first reason it was
@@ -171,18 +334,13 @@ pub fn plan_for(instance: &InstanceConfig) -> Result<(InstancePlan, Ownership), 
     Ok((plan, ownership))
 }
 
-/// Whether the daemon can carry VRRP on the wire yet.
+/// Whether this build can carry VRRP on the wire.
 ///
-/// It cannot. Everything below this point is implemented and tested: the state
-/// machine decides, the executor applies the machine's actions to the kernel
-/// through Netlink, and the run loop drives both. What is missing is the raw
-/// socket that puts an advertisement on the wire and reads a peer's TTL back
-/// off an incoming datagram, which needs Linux to develop and verify.
-///
-/// Until that exists the daemon does not start instances, because a process
-/// that claimed to be a VRRP router while sending nothing would be worse than
-/// one that refuses to start.
-pub const TRANSPORT_AVAILABLE: bool = false;
+/// The socket exists on Linux and does not anywhere else, so this is decided at
+/// compile time rather than discovered at runtime. A build where it is `false`
+/// refuses to start, because a process that claimed to be a VRRP router while
+/// sending nothing would be worse than one that declines to run.
+pub const TRANSPORT_AVAILABLE: bool = cfg!(target_os = "linux");
 
 #[cfg(test)]
 mod tests {

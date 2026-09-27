@@ -584,12 +584,21 @@ fn r16_a_master_steps_down_for_a_higher_priority_peer_even_without_preemption() 
     );
 }
 
+/// A master keeps the role against a lower priority, and against an equal
+/// priority from a peer whose address does not win the tie.
+///
+/// Two nodes that start together both time out and both advertise at the same
+/// priority. The specification resolves that by address (§12.3), so the node
+/// with the higher address wins; this test covers the half where the lower
+/// address keeps the role.
 #[test]
 fn r16_a_master_ignores_an_equal_or_lower_priority_peer() {
     let mut machine = machine_with(config());
+    machine.set_primary_addresses(Some("192.0.2.200".parse().expect("valid address")), None);
     startup(&mut machine);
     promote(&mut machine);
 
+    // The peer at 192.0.2.11 has the lower address, so the tie stays ours.
     let actions = machine.handle(advert(150));
     assert!(!actions.contains(&Action::RemoveVirtualAddresses));
     assert_eq!(machine.role(), Role::Master);
@@ -597,6 +606,35 @@ fn r16_a_master_ignores_an_equal_or_lower_priority_peer() {
     let actions = machine.handle(advert(100));
     assert!(!actions.contains(&Action::RemoveVirtualAddresses));
     assert_eq!(machine.role(), Role::Master);
+}
+
+/// A master with a higher address steps down for an equal-priority peer.
+///
+/// This is the case two nodes starting together produce, and the one that made
+/// both nodes believe they were master before the tie-break was wired up.
+#[test]
+fn an_equal_priority_peer_with_a_higher_address_wins() {
+    let mut machine = machine_with(config());
+    machine.set_primary_addresses(Some("192.0.2.10".parse().expect("valid address")), None);
+    startup(&mut machine);
+    promote(&mut machine);
+
+    let actions = machine.handle(advert(150));
+    assert!(
+        actions.contains(&Action::RemoveVirtualAddresses),
+        "the higher address wins the tie"
+    );
+    // Releasing is two-phase like taking over: the role changes when the removal
+    // is confirmed, not when it is asked for.
+    assert_eq!(
+        machine.role(),
+        Role::Master,
+        "still owns until the removal is confirmed"
+    );
+    let _ = machine.handle(Event::ActionSucceeded {
+        kind: ActionKind::RemoveAddresses,
+    });
+    assert_eq!(machine.role(), Role::Backup);
 }
 
 #[test]

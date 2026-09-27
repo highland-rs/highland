@@ -92,11 +92,24 @@ impl std::fmt::Display for Rejection {
     }
 }
 
+/// An advertisement that passed every check, and who sent it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedAdvertisement {
+    /// The decoded advertisement.
+    pub advertisement: Advertisement,
+    /// The address the datagram came from.
+    ///
+    /// This is the peer's identity, and it is the address the VRRP header was
+    /// sent from. The state machine records it so an operator can see which
+    /// neighbour changed the outcome (`R-29`).
+    pub source: IpAddr,
+}
+
 /// The result of offering a datagram to the transport.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Accepted {
     /// The datagram is a valid advertisement from a configured peer.
-    Advertisement(Advertisement),
+    Advertisement(AcceptedAdvertisement),
     /// The datagram was rejected, with the reason.
     Rejected(Rejection),
 }
@@ -106,7 +119,16 @@ impl Accepted {
     #[must_use]
     pub fn advertisement(&self) -> Option<&Advertisement> {
         match self {
-            Accepted::Advertisement(advertisement) => Some(advertisement),
+            Accepted::Advertisement(accepted) => Some(&accepted.advertisement),
+            Accepted::Rejected(_) => None,
+        }
+    }
+
+    /// Returns who sent the advertisement, when it was accepted.
+    #[must_use]
+    pub fn source(&self) -> Option<IpAddr> {
+        match self {
+            Accepted::Advertisement(accepted) => Some(accepted.source),
             Accepted::Rejected(_) => None,
         }
     }
@@ -199,7 +221,10 @@ pub fn validate(
 
     let scope = ChecksumScope::for_packet(family, datagram.source, family.default_group());
     match Advertisement::decode(datagram.bytes, family, scope) {
-        Ok(advertisement) => Accepted::Advertisement(advertisement),
+        Ok(advertisement) => Accepted::Advertisement(AcceptedAdvertisement {
+            advertisement,
+            source: datagram.source,
+        }),
         Err(error) => Accepted::Rejected(rejection_for(&error)),
     }
 }

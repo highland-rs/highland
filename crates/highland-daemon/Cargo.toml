@@ -16,6 +16,9 @@ default = []
 # Mirrors the highland-checks feature so the daemon can report whether command
 # checks are available in this build (`V-21`).
 command-checks = ["highland-checks/command-checks"]
+# Runs the tests that build namespaces and move a real address. They need
+# `CAP_NET_ADMIN` and `CAP_NET_RAW`; see tests/two_node.rs.
+netlink-tests = ["highland-net/netlink-tests"]
 
 [dependencies]
 anyhow.workspace = true

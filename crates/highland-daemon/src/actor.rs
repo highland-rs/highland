@@ -85,6 +85,16 @@ where
         &self.machine
     }
 
+    /// Sets the interface's primary addresses, which the equal-priority
+    /// tie-break compares (`SPEC.md` §12.3).
+    pub fn set_primary_addresses(
+        &mut self,
+        ipv4: Option<std::net::Ipv4Addr>,
+        ipv6: Option<std::net::Ipv6Addr>,
+    ) {
+        self.machine.set_primary_addresses(ipv4, ipv6);
+    }
+
     /// Returns the executor, for inspection and for the status API.
     #[must_use]
     pub fn executor(&self) -> &Executor<B, T> {

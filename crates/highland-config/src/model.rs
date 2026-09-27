@@ -64,7 +64,7 @@ pub struct NodeConfig {
 
 /// The logging configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct LoggingConfig {
     /// The maximum level emitted.
     pub level: String,
@@ -87,7 +87,7 @@ impl Default for LoggingConfig {
 
 /// The metrics configuration.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct MetricsConfig {
     /// Whether the Prometheus endpoint is served.
     pub enabled: bool,
@@ -97,14 +97,18 @@ pub struct MetricsConfig {
 
 /// The control-socket configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct ControlConfig {
     /// The socket path.
     pub socket: String,
     /// The group allowed to use the socket.
     pub group: Option<String>,
     /// Whether peer credentials are verified.
-    #[serde(default)]
+    ///
+    /// The default comes from [`ControlConfig::default`], which is `true`. A
+    /// field-level `#[serde(default)]` here would mean `bool::default()`, which
+    /// is `false`, and would silently turn a documented secure default into an
+    /// insecure one.
     pub verify_peer_credentials: bool,
 }
 
@@ -120,7 +124,7 @@ impl Default for ControlConfig {
 
 /// The multicast settings for one address family.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct MulticastConfig {
     /// The group address, per family.
     #[serde(default = "default_multicast_group")]
@@ -151,7 +155,7 @@ fn default_multicast_ttl() -> u8 {
 
 /// The peer transport configuration for one instance.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct NetworkConfig {
     /// The peer addressing mode.
     pub mode: NetworkMode,
@@ -245,7 +249,7 @@ pub enum FailurePolicy {
 
 /// The instance health configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct HealthConfig {
     /// The policy applied when a check fails.
     #[serde(default)]

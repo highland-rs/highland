@@ -134,6 +134,20 @@ pub enum TransportError {
         /// Why encoding failed.
         reason: String,
     },
+
+    /// The instance has no peer in the family it would speak.
+    #[error("no {family} peer is configured, so there is nowhere to send")]
+    NoPeers {
+        /// The family the instance would have spoken.
+        family: highland_vrrp::IpFamily,
+    },
+
+    /// The socket could not be created, bound, or used.
+    #[error("the VRRP transport is unavailable: {reason}")]
+    Unavailable {
+        /// What the socket reported.
+        reason: String,
+    },
 }
 
 /// Applies a machine's actions to a backend and a transport.

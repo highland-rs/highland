@@ -132,10 +132,26 @@ jobs:
       - name: netlink tests
         run: sudo -E env "PATH=$PATH" cargo test -p highland-net --features netlink-tests
 
-  # Network-namespace tests need a purpose-built topology on both sides. They
-  # are enabled by the `netns-tests` feature once Milestone 4 lands the harness
-  # (SPEC.md, `R-01`).
-  netns:
+  # The two-node suite builds two namespaces and a bridge, starts a daemon in
+  # each, and asserts that the address moves within Master_Down_Interval. That
+  # needs CAP_ADMIN and namespaces, so the job runs privileged and installs
+  # iproute2. The kernel tests on the host have no namespace to play in.
+  two-node:
+    name: two-node failover
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install iproute2
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2
+      - name: netlink against a real kernel
+        run: sudo -E env "PATH=$PATH" cargo test -p highland-net --features netlink-tests
+      - name: two nodes, one segment, a VIP that moves
+        run: sudo -E env "PATH=$PATH" cargo test -p highland-daemon --features netlink-tests
+
+  # Packet loss, delay, and reordering between the nodes are the chaos
+  # scenarios in SPEC.md 21.5. They arrive with the chaos harness.
     name: network namespaces
     if: false
     runs-on: ubuntu-latest

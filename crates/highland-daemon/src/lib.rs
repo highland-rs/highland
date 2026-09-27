@@ -20,7 +20,10 @@ mod executor;
 mod logging;
 mod options;
 mod runner;
+
 mod shutdown;
+#[cfg(target_os = "linux")]
+mod vrrp_transport;
 
 pub use actor::{Applied, InstanceActor};
 pub use driver::{Instruction, InstructionReceiver, InstructionSender, channel, run_instance};
@@ -29,7 +32,10 @@ pub use executor::{
 };
 pub use options::{InstancePlan, Options, OptionsError};
 pub use runner::{TRANSPORT_AVAILABLE, plan_for, plans, run};
+
 pub use shutdown::{DEFAULT_SHUTDOWN_BUDGET, ShutdownPlan, ShutdownReason};
+#[cfg(target_os = "linux")]
+pub use vrrp_transport::{READER_INTERVAL, VrrpTransport};
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;

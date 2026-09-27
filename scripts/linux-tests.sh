@@ -20,9 +20,10 @@ TARGET_VOLUME="${HIGHLAND_TARGET_VOLUME:-highland-target}"
 run_netlink=1
 [ "${1:-}" = "--no-net" ] && run_netlink=0
 
-# `--privileged` gives CAP_NET_ADMIN and the namespace ability the tests need.
-# `--cap-add` is listed as well so the intent survives a `--cap-drop`-style
-# change later.
+# `--privileged` is required, not for the capabilities but for the *namespaces*:
+# `ip netns add` and `unshare --net` need CAP_SYS_ADMIN, and the two-node suite
+# builds one namespace per node. `--cap-add` is listed as well so the intent
+# survives a later restriction.
 docker run --rm --privileged --cap-add=NET_ADMIN --cap-add=NET_RAW \
 	--volume "$ROOT":/src:ro \
 	--volume "$CARGO_CACHE":/usr/local/cargo \
@@ -32,11 +33,19 @@ docker run --rm --privileged --cap-add=NET_ADMIN --cap-add=NET_RAW \
 	"$IMAGE" \
 	sh -c "
 		set -eu
+		# The namespace tests build the topology with iproute2, and the rust
+		# image is slim, so it has to be installed. A Debian image with the
+		# toolchain already present can override IMAGE.
+		if ! command -v ip >/dev/null 2>&1; then
+			apt-get update -qq
+			apt-get install -y -qq --no-install-recommends iproute2
+		fi
 		cargo fmt --all --check
 		cargo clippy --workspace --all-targets --all-features -- -D warnings
 		cargo test --workspace
 		RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 		$( [ "$run_netlink" = 1 ] && echo "cargo test -p highland-net --features netlink-tests" )
+		$( [ "$run_netlink" = 1 ] && echo "cargo test -p highland-daemon --features netlink-tests" )
 	"
 
 # The source is mounted read-only, so a `cargo fmt` fix has to happen on the

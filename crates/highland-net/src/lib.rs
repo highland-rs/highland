@@ -12,6 +12,7 @@
 //! | The VRRP transport: validation, peer filtering, rate limiting | [`validate`], [`PeerSet`], [`RateWindow`], [`Rejection`] |
 //! | The Linux Netlink implementation | `NetlinkBackend`, on Linux only |
 //! | The raw VRRP socket | `VrrpSocket`, on Linux only |
+//! | Sending and receiving for one instance | `SocketTransport` |
 //! | The backend used elsewhere | `UnsupportedBackend`, on other platforms |
 //! | A scripted backend for tests | [`ScriptedBackend`] |
 //!
@@ -38,6 +39,9 @@ mod netlink;
 #[cfg(target_os = "linux")]
 mod socket;
 
+#[cfg(target_os = "linux")]
+mod transport;
+
 #[cfg(not(target_os = "linux"))]
 mod unsupported;
 
@@ -59,6 +63,9 @@ pub use vrrp::{
 pub use netlink::{LinkEvent, NetlinkBackend};
 #[cfg(target_os = "linux")]
 pub use socket::{Received, VrrpSocket};
+
+#[cfg(target_os = "linux")]
+pub use transport::SocketTransport;
 
 #[cfg(not(target_os = "linux"))]
 pub use unsupported::UnsupportedBackend;
@@ -85,4 +92,26 @@ pub fn default_backend() -> Result<UnsupportedBackend> {
     Err(NetError::Unsupported {
         operation: "the netlink backend on this platform",
     })
+}
+
+/// A transport that refuses to do anything, for a platform with no socket.
+///
+/// It exists so the daemon's types do not change shape on a non-Linux host, and
+/// so a test can prove that nothing silently degrades to "no VRRP" on a
+/// platform that should have it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct UnavailableTransport;
+
+impl UnavailableTransport {
+    /// The answer this transport always gives.
+    ///
+    /// # Errors
+    ///
+    /// Always. It is a named error rather than a panic, because a daemon that
+    /// cannot speak VRRP should say so and stop.
+    pub fn unavailable() -> NetError {
+        NetError::Unsupported {
+            operation: "the VRRP socket on this platform",
+        }
+    }
 }

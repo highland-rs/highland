@@ -272,6 +272,39 @@ timers, roles, events, and the effective priority are the machine's own
 bookkeeping and answer with `None`. Everything else that could fail answers with
 `ActionFailed`, so the machine never assumes an outcome.
 
+## The two-node harness
+
+`crates/highland-daemon/tests/two_node.rs` is the milestone's proof, and it is
+worth reading because of how it is built rather than what it asserts.
+
+The topology is a segment, not a simulation of one: a bridge in the container's
+root namespace, a veth pair per node with one end enslaved to the bridge, and the
+peer end moved into the node's namespace and renamed `eth0`. A bridge cannot be
+enslaved to from another namespace, so this is the only arrangement that gives two
+namespaces one link.
+
+Each daemon is started with `ip netns exec`, so it sees its own interfaces. A
+daemon started in the root namespace sees the container's `eth0` and cheerfully
+attaches the VIP to the wrong segment, which is the one thing a namespace exists
+to prevent. That mistake cost an hour and is now impossible to make by accident.
+
+Four defects came out of it that no unit test would have found, listed in
+`CHANGELOG.md`. The one worth remembering: the equal-priority tie-break had been
+specified in `election::decide` since Milestone 1, tested there, and never
+called by the state machine. Two nodes that start together always tie, and the
+master path only yielded to a *strictly* higher priority, so both believed they
+were master. A specification rule that nothing invokes is not a rule.
+
+The timing assertion is the point of the exercise: the survivor must take the
+address within `Master_Down_Interval`, not eventually. A failover that works but
+takes ten seconds is not a failover.
+
+The dead node's namespace still holds the address after `SIGKILL`, and the test
+says so rather than pretending otherwise. The address lives in the kernel, not in
+the daemon, so a process that is killed instead of shut down leaves it behind.
+That is the exposure VRRP cannot close and the reason fencing exists; asserting
+otherwise would assert a guarantee this project does not make.
+
 ## What Milestone 3 does and does not do
 
 Delivered and tested: the Netlink backend with read-back confirmation, the VRRP

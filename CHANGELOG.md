@@ -6,9 +6,10 @@ All notable changes to Highland are recorded here. The format follows
 
 ## [Unreleased]
 
-Milestones 0 through 3 have landed, and the raw VRRP socket now exists. A virtual
-IP still does not move on a real network: the transport is not yet wired into the
-daemon, and the namespace harness is Milestone 4's remaining work.
+Milestones 0 through 3 have landed, and the daemon now carries VRRP over a real
+socket: two namespaces on a bridge elect one master and the virtual IP moves when
+that node is killed. The control socket, the metrics endpoint, transactional
+reload, and gratuitous ARP remain.
 
 ### Added — Milestone 0, the repository
 
@@ -197,12 +198,58 @@ Also corrected: the `rtnetlink` feature is `tokio_socket`, not `tokio`, and
 - A link and address subscription, which is how a node learns an interface went
   away.
 
+### The daemon runs
+
+- `SocketTransport` binds the socket, sends to every configured peer, and reads
+  and validates one datagram without blocking. The rate window is owned by the
+  reader rather than the transport, so sending and receiving share one socket
+  without a lock between them: a node mid-takeover is still advertising while it
+  is listening.
+- `VrrpTransport` is the daemon's `Transport` implementation, and a reader task
+  turns accepted advertisements into state-machine events. A rejected datagram is
+  counted and dropped there, so an unauthenticated peer cannot drive the machine.
+- The runner starts one backend, one transport, one reader, and one actor per
+  instance, and the daemon refuses to start on a platform with no socket.
+- The source address is the interface's primary address, not the virtual address,
+  as RFC 5798 §5.1.1.1 requires. A raw socket cannot bind to an address the
+  interface does not have yet, and the virtual address is only added on becoming
+  master, so binding to it fails with `EADDRNOTAVAIL` on every node.
+- Role changes are logged with their reason, and advertisements received with the
+  peer that sent them.
+
+### Two namespaces, one segment, and a VIP that moves
+
+`crates/highland-daemon/tests/two_node.rs` builds the topology a VRRP segment
+actually is: two namespaces, one bridge, one veth pair each, two daemons. It
+asserts that exactly one node takes the address, that killing the master moves it
+to the survivor within `Master_Down_Interval`, and that the survivor recorded the
+role change that took ownership. This is the `M-04` exit criterion, and the
+timing assertion is the point: a failover that works but takes ten seconds is not
+a failover.
+
+It found four real defects, none of which any amount of unit testing would have:
+
+  - The equal-priority tie-break was specified in `election` and never called.
+    Two nodes that start together both time out and both advertise at the same
+    priority, and the master path only stepped down for a *strictly* higher one,
+    so both stayed master. The machine now applies the same rule `decide`
+    documents, and needs its own primary address to do it, which the runner
+    supplies.
+  - `Accepted` carried the decoded advertisement but dropped the address it came
+    from, so the reader named the local node as the peer. It now carries the
+    source.
+  - The daemons were started in the container's namespace rather than their own,
+    where they saw the container's `eth0` and its address.
+  - A present but partial `[logging]` table demanded every key, because a
+    field-level `#[serde(default)]` only applies when the whole table is absent.
+
 ### Not delivered, and why
 
-- **Wiring the socket into the daemon.** The socket is built and tested against a
-  real kernel, but the transport is not yet the one the actor uses, so the daemon
-  still refuses to start (`TRANSPORT_AVAILABLE` is `false`). This is the next
-  slice of Milestone 4.
+- **The control socket.** The message model exists and the CLI can encode it, but
+  nothing serves it yet, so `highland status` has no daemon to talk to.
+- **Metrics and transactional reload.** `SIGHUP` re-reads and re-validates the
+  file and reports a rejection, but the result is not applied to running
+  instances, which is most of what "transactional" means.
 - **Gratuitous ARP**, which needs an `AF_PACKET` socket whose `sockaddr_ll` has no
   safe representation. It returns `NetError::Unsupported`, and the state machine
   already treats that failure as non-fatal.

@@ -32,8 +32,11 @@ IPVS, and the LVS integration.
 
 ## Differences operators should know
 
-- **Timers.** Highland uses `3 * adver_int + 10ms` for the master-down interval,
-  matching RFC 5798. Keepalived's practical behavior is the same.
+- **Timers.** Highland uses `3 * adver_int + Skew_Time` for the master-down
+  interval, with `Skew_Time` as RFC 5798 §6.1 defines it,
+  `((256 - priority) / 256) * adver_int`. At a one-second interval that is 3.41s
+  behind a priority-150 master, not a fixed figure. Keepalived's practical
+  behavior is the same.
 - **Multicast TTL.** Must be 255. Highland refuses any other value (`V-24`).
 - **Mixed families.** Before 1.0 an instance is single-family (`V-03`). Split
   the configuration if you need both.
@@ -42,6 +45,10 @@ IPVS, and the LVS integration.
   take over an existing master.
 - **Degraded advertisement.** Highland never advertises master without owning
   the VIPs. There is no compatibility switch for this (`I-04`).
+- **No wire compatibility yet.** The codec and the receiver-side validation
+  rules are complete and tested, but there is no socket, so nothing has been
+  observed interoperating with another implementation. Treat the claims on this
+  page as the design, not as a report.
 
 ## Capture-based diagnosis
 

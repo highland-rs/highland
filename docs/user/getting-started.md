@@ -141,21 +141,21 @@ lower-priority node keep it, set `preempt = false` on both.
 
 ## Run it
 
+**Today this exits immediately**, with exit code 1:
+
 ```console
 $ highland run --config /etc/highland/config.toml
+ERROR highland: the VRRP transport is not implemented; the daemon will not start
 ```
 
-Highland loads and validates the configuration, then runs in the foreground and
-logs what it is doing. It handles `SIGTERM` and `SIGINT` for a clean stop, and
-`SIGHUP` to reload the configuration file.
+The refusal is deliberate. Highland has no raw VRRP socket yet, and a process
+that claims to be a VRRP router while sending nothing is worse than one that
+declines to start. The configuration is still loaded and validated first, so a
+broken file reports the broken file rather than this message.
 
-To run it as a service, install the supplied unit:
-
-```console
-$ sudo install -Dm644 deploy/systemd/highland.service /etc/systemd/system/highland.service
-$ sudo systemctl daemon-reload
-$ sudo systemctl enable --now highland.service
-```
+Because of that, do not install the systemd unit yet. It has
+`Restart=on-failure`, so it would restart the daemon every two seconds forever.
+The unit becomes useful when the socket lands.
 
 ## Watch it
 
@@ -170,8 +170,10 @@ $ highland show api
 $ highland events --follow
 ```
 
-The [operations guide](operations.md) is the runbook: what each event means,
-what to do when the address will not move, and how to upgrade without an outage.
+None of these reach a running daemon yet, because there is no control socket.
+The [operations guide](operations.md) is the runbook for when they do: what
+each event means, what to do when the address will not move, and how to upgrade
+without an outage.
 
 ## Changing the configuration later
 
@@ -182,24 +184,32 @@ $ highland check-config /etc/highland/config.toml
 $ highland reload
 ```
 
-The reload is all-or-nothing. If any part of it cannot be applied, nothing
-changes and you get the reason; you are never left half-way between two
-configurations. Changes that cannot be applied to a live instance — its
-interface, its VRID, or its set of addresses — require restarting that instance,
-and Highland tells you which instances are affected before it touches anything.
+Check the file on its own works today. The reload does not yet: `SIGHUP`
+re-validates the file and logs the outcome, but does not apply anything, and
+`highland reload` needs a control socket that does not exist yet.
+
+The design is all-or-nothing, and that is what you will get. If any part of a
+reload cannot be applied, nothing changes and you get the reason; you are never
+left half-way between two configurations. Changes that cannot be applied to a
+live instance — its interface, its VRID, or its set of addresses — require
+restarting that instance, and Highland reports which instances are affected
+before it touches anything.
 
 ## Current state
 
-Be aware of what works today. The configuration layer, the validation rules, and
-the failover logic itself are complete and tested, but the pieces that put bytes
-on the wire and the control socket the CLI talks to are still being built. The
-address will not move on a real network yet.
+Be aware of what works today. The state machine, the VRRPv3 codec, the
+configuration layer, and the netlink backend are complete and tested, and a
+complete failover is exercised in the test suite against a scripted kernel. The
+raw VRRP socket is the gap, so the address will not move on a real network yet
+and the daemon refuses to start.
 
 | You can do this now | Not yet |
 |---|---|
-| Build and test the project | Fail a VIP over between two machines |
-| Write and validate a configuration | Query a running daemon over the control socket |
-| Run the daemon and read its logs | Use the `status`, `show`, or `events` commands against it |
+| Build and test the project | Fail a VIP over between two real machines |
+| Write and validate a configuration | Keep a daemon running |
+| Encode and decode VRRP advertisements | Send gratuitous ARP |
+| Add and remove addresses, confirmed by read-back | Query a running daemon over the control socket |
+| Run the whole failover in the test suite | Use the `status`, `show`, or `events` commands |
 
 The [command reference](cli.md) marks every command with its state. Check
 [`CHANGELOG.md`](../../CHANGELOG.md) for the current release notes.

@@ -19,7 +19,8 @@ $ cargo audit
 |---|---|---|
 | Unit tests | `#[cfg(test)] mod tests` in the module | yes |
 | Integration tests | `crates/<crate>/tests/` | yes |
-| Network-namespace tests | `crates/highland-daemon/tests/network_ns/`, feature-gated | only with `--features netns-tests` and root |
+| Netlink tests | `crates/highland-net/tests/netlink.rs` | only with `--features netlink-tests` and `CAP_NET_ADMIN` |
+| Network-namespace tests | `tests/network-ns/`, not written yet | not until Milestone 4 |
 | Compatibility tests | `tests/compatibility/` | no, requires Keepalived |
 | Fuzz targets | `fuzz/fuzz_targets/` | no, requires `cargo-fuzz` and nightly |
 
@@ -123,7 +124,7 @@ fuzz_vrrp_ipv4_packet
 fuzz_vrrp_ipv6_packet
 fuzz_config_document
 fuzz_check_response
-fuzz_netlink_message
+fuzz_netlink_event
 fuzz_control_request
 ```
 
@@ -142,5 +143,9 @@ corpus for every fixed crash, and a CI smoke job.
 | msrv | build and test on the declared MSRV |
 | licenses and advisories | `cargo deny check`, `cargo audit` |
 | documentation | `cargo doc --workspace --no-deps` with warnings denied |
+| fuzz | `cargo fuzz build <target>` then a 60-second smoke per target, artifacts uploaded on failure |
+| netns | present but disabled (`if: false`) until Milestone 4 lands the harness |
 
-Fuzzing and network-namespace jobs are added when those suites exist.
+Six fuzz targets run in CI: `fuzz_vrrp_ipv4_packet`, `fuzz_vrrp_ipv6_packet`,
+`fuzz_config_document`, `fuzz_check_response`, `fuzz_netlink_event`,
+`fuzz_control_request`.

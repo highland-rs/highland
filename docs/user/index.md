@@ -73,13 +73,16 @@ Instances that the change does not affect are never interrupted.
 
 ## Current state
 
-Highland is not yet released, and not yet finished. The configuration layer and
-the failover logic are complete and tested; the parts that put packets on the
-wire and expose a control socket are still being built, so a virtual address
-does not yet move on a real network.
+Highland is not yet released, and not yet finished. The state machine, the
+VRRPv3 codec, the configuration layer, and the Linux netlink backend are
+complete and tested, and a whole failover is driven end to end in the test
+suite. The raw VRRP socket is not implemented, so a virtual address does not yet
+move on a real network, and `highland run` refuses to start rather than pretend
+otherwise.
 
 The documentation describes the finished product, and marks anything that does
-not work yet. The [command reference](cli.md) and the
+not work yet. The [command reference](cli.md), the
+[troubleshooting guide](troubleshooting.md), and the
 [changelog](../../CHANGELOG.md) are the reliable places to check. If a document
 and the running software disagree, the running software wins — please report it.
 

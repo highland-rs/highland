@@ -40,6 +40,9 @@ one instance does not disturb its neighbours.
 
 ## What can be reloaded, and what cannot
 
+Today no change is applied by a reload, and there is nothing installed to
+upgrade: the daemon refuses to start. The table below is the design.
+
 | Change | Applied by a reload? |
 |---|---|
 | `priority`, `preempt`, `preempt_delay`, `startup_delay` | Yes |
@@ -104,8 +107,9 @@ waiting for a failure:
 $ highland relinquish api --yes
 ```
 
-The peer takes over within one takeover interval. Clients see a normal address
-move with a gratuitous ARP, not an outage.
+The peer takes over within one takeover interval — between three and four
+advertisement intervals, depending on priority. Clients see a normal address
+move, not an outage.
 
 ### 5. Repeat on the remaining nodes
 

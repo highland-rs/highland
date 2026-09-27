@@ -34,10 +34,10 @@ Its security properties are:
 |---|---|---|
 | Off-segment attacker | Sends VRRP packets | Strict field validation, peer allow-lists, TTL 255 checks, rate limits, no panics |
 | On-segment host | Sends valid-looking advertisements | Peer allow-list and VRID checks; note that an on-segment host with the right source address is indistinguishable from a peer, which is why fencing is separate |
-| Local unprivileged user | Connects to the control socket | Socket mode `0660`, group ownership, peer credential verification, audit events |
+| Local unprivileged user | Connects to the control socket | Designed for mode `0660`, group ownership, and peer credential verification. No listener exists yet |
 | User who can write the config | Controls peers, checks, and VIPs | File permission check (`V-26`), command checks off by default, no secret expansion in arguments |
 | Flooding attacker | Sends packets or requests as fast as the link allows | `L-11` packet rate, `L-12` control request rate, `L-13` reload rate, bounded queues |
-| Malformed packet author | Crafted bytes | Fuzzing (Milestone 2), no panics (`I-05`), bounded allocation |
+| Malformed packet author | Crafted bytes | Six fuzz targets in CI, two-phase decoding, no panics (`I-05`), bounded allocation |
 
 ## Trust boundaries
 
@@ -83,7 +83,7 @@ those two capabilities for its whole lifetime.
 | Weakness | Status |
 |---|---|
 | An on-segment host that can send from a peer's address can inject advertisements | Inherent to VRRP; peer allow-lists raise the bar; fencing is post-1.0 |
-| A VIP conflict with a host outside Highland's knowledge | Detected only through gratuitous ARP/NA observation; reported, not prevented |
+| A VIP conflict with a host outside Highland's knowledge | Not implemented. It is meant to be reported, never prevented, and neither happens yet |
 | `command` checks re-enable code execution through configuration | Documented as operationally unsafe; off by default; allow-listed paths only |
 
 ## Reporting

@@ -3,12 +3,13 @@
 A memory-safe, observable, Linux-focused Rust implementation of high-availability
 virtual IP failover, built around VRRPv3.
 
-> **Status: Milestone 0 complete, Milestone 1 in progress.** The workspace, the
-> domain types, the configuration layer with its full validation rule set, the
-> observability primitives, the control-API message model, and the pure
-> `highland-core` state machine exist and are tested. VRRP traffic does not move a
-> VIP yet; that arrives in Milestone 3. See [`docs/SPEC.md`](docs/SPEC.md) §27 for
-> the milestone plan and [`CHANGELOG.md`](CHANGELOG.md) for what has landed.
+> **Status: Milestones 0–3 landed. No VIP moves yet.** The state machine, the
+> VRRPv3 codec, the configuration layer with its full validation rule set, and a
+> real Linux netlink backend that adds and removes addresses confirmed by
+> read-back all exist and are tested. What is missing is the raw VRRP socket, so
+> `highland run` refuses to start rather than sit there claiming to be a VRRP
+> router while sending nothing. See [`docs/SPEC.md`](docs/SPEC.md) §27 for the
+> milestone plan and [`CHANGELOG.md`](CHANGELOG.md) for what has landed.
 
 ## What Highland is
 
@@ -92,12 +93,19 @@ still stubs.
 |---|---|
 | Configuration model, strict TOML parser, `V-01`–`V-32` validation | Implemented, tested |
 | `highland-core`: roles, events, actions, timers, election, health arithmetic, the instance state machine | Implemented, tested, no runtime dependency |
-| `highland-vrrp`: `Version`, `Vrid`, `Priority`, `IpFamily`, validated `Advertisement` | Types and validation only; encoding and decoding land in Milestone 2 |
+| `highland-vrrp`: encoding and decoding for IPv4 and IPv6, RFC 1071 checksums with the IPv6 pseudo-header, two-phase decoding | Implemented, tested, six fuzz targets in CI |
+| `highland-net`: interface lookup, link state, address add and remove **confirmed by read-back**, link subscription, and the receiver-side VRRP validation rules | Implemented, tested |
+| The VRRP **socket**: sending, receiving, and TTL 255 | Not implemented. This is what blocks a live address |
+| Gratuitous ARP and unsolicited Neighbor Advertisements | Not implemented |
+| `highland-daemon`: executor, per-instance actor, run loop, and the whole failover driven end to end against a scripted kernel | Implemented, 15 tests, no privileges needed |
 | `highland-observe`: event model, redaction, bounded ring, sinks | Implemented; no metrics registry or `tracing` bridge yet |
 | `highland-control`: request and response messages, rate limiter, error taxonomy | Message model only; the socket listener lands in Milestone 7 |
-| `highland-net`: `NetworkBackend` trait and typed address types | Trait and types only; the netlink backend lands in Milestone 3 |
 | `highland-checks`: spec, result, hysteresis debouncer, `Check` trait | No probe implementations yet; they land in Milestone 6 |
-| `highland-daemon` and `highland-cli` | Configuration load path, signals, and `check-config`; no VRRP traffic, no control socket |
+| `highland-cli` | `check-config` and `version` work. The socket commands wait on Milestone 7 |
+
+`highland run` currently exits non-zero with `the VRRP transport is not
+implemented; the daemon will not start`. That refusal is deliberate, and
+[`docs/user/troubleshooting.md`](docs/user/troubleshooting.md) explains it.
 
 The `README` never claims more than this table. If the table and the code
 disagree, the table is the bug.

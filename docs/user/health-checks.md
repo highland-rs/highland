@@ -198,6 +198,8 @@ $ highland show api
 $ highland events --follow
 ```
 
+Neither reaches a running daemon today; the control socket does not exist yet.
+
 The event stream distinguishes a single failed probe from a check entering the
 failing state, from the check recovering, and from the instance becoming
 ineligible. That distinction is the fastest way to tell a one-off blip from a
@@ -206,8 +208,10 @@ sustained failure.
 ## Current state
 
 The check framework, the weights, the thresholds, and the hysteresis rules are
-complete and tested. The probes themselves are not implemented yet, so no check
-currently runs. `http` and `tcp` arrive first.
+complete and tested, and a weighted priority drop is driven end to end in the
+test suite. The probes themselves are not implemented, and nothing schedules
+them yet, so no check currently runs and a failing check cannot demote a node.
+`tcp` and `http` arrive first.
 
 The [configuration reference](configuration.md) lists every key a check accepts.
 The [operations guide](operations.md) covers what to do when a health check

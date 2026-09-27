@@ -10,7 +10,7 @@ no mandatory connection to a management service.
 |---|---|
 | Linux on `x86_64` or `aarch64` | It uses Linux networking directly |
 | `CAP_NET_ADMIN` | To add and remove the virtual address |
-| `CAP_NET_RAW` | For packet sockets and for gratuitous ARP and unsolicited Neighbor Advertisements |
+| `CAP_NET_RAW` | For the raw VRRP socket, and eventually for gratuitous ARP |
 | A configuration file you can read | It is the only input |
 | A writable `/run/highland` if you use the control socket | The socket lives there |
 
@@ -61,6 +61,20 @@ $ highland check-config /etc/highland/config.toml
 /etc/highland/config.toml is valid: 1 instance(s), schema version 1
 ```
 
+## Do not install the service yet
+
+`highland run` currently exits non-zero with `the VRRP transport is not
+implemented`, because the raw VRRP socket does not exist. Installing the unit
+with `Restart=on-failure` would restart the daemon every two seconds forever.
+Everything else on this page is worth reading and doing now; hold this one step
+until the socket lands.
+
+If you have already installed it:
+
+```console
+$ sudo systemctl disable --now highland.service
+```
+
 ## Run it under systemd
 
 A unit file is supplied:
@@ -87,7 +101,9 @@ The supplied unit is a starting point. Check these before you rely on it:
   unit creates via `RuntimeDirectory=highland`.
 
 Reloading through systemd is `systemctl reload highland.service`, which sends
-`SIGHUP` and takes exactly the same path as `highland reload`.
+`SIGHUP`. That re-reads and re-validates the file and reports the outcome; it
+does not apply anything yet, and `highland reload` will work when the control
+socket does.
 
 ## Run it without systemd
 

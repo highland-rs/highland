@@ -12,6 +12,7 @@ Two habits pay for themselves before anything else:
 
 ## Contents
 
+- [The daemon will not start](#the-daemon-will-not-start)
 - [The address is not moving](#the-address-is-not-moving)
 - [Both nodes think they own the address](#both-nodes-think-they-own-the-address)
 - [A node is stuck in a fault state](#a-node-is-stuck-in-a-fault-state)
@@ -23,6 +24,42 @@ Two habits pay for themselves before anything else:
 - [I cannot reach the daemon](#i-cannot-reach-the-daemon)
 - [Commands do nothing](#commands-do-nothing)
 - [What to collect before asking for help](#what-to-collect-before-asking-for-help)
+
+## The daemon will not start
+
+**Symptom**:
+
+```console
+$ highland run --config /etc/highland/config.toml
+ERROR highland: the VRRP transport is not implemented; the daemon will not start
+```
+
+This is expected today, and it is deliberate. Highland has no raw VRRP socket
+yet, so the daemon declines to run rather than sit there claiming to be a VRRP
+router while sending nothing. There is nothing to fix on your side.
+
+Two things to know:
+
+- **The configuration is still checked first.** A broken file reports the broken
+  file, not this message. Run `highland check-config` to see which.
+- **Do not install the systemd unit yet.** It has `Restart=on-failure`, so
+  systemd would restart the daemon every two seconds indefinitely.
+
+If you have an existing unit installed, stop and disable it:
+
+```console
+$ sudo systemctl disable --now highland.service
+```
+
+The test suite is where the failover is exercised in the meantime:
+
+```console
+$ cargo test -p highland-daemon --test failover
+```
+
+That drives a complete failover — startup, takeover, ownership confirmed before
+advertising, relinquishment, shutdown — against a scripted kernel, with no
+privileges required.
 
 ## The address is not moving
 
@@ -121,7 +158,7 @@ This is almost always a health check flickering, or a link flapping, and the
 event stream says which.
 
 1. Look for `master_down_timeout` and repeated `role_transition` events with the
-   reason `higher_priority_peer_advertisement` or `health_threshold_exceeded`.
+   reason `higher_priority_peer_advertisement` or `health_ineligible`.
 2. If health is involved, the event stream names the check. See
    [Health checks](health-checks.md) for how to make a marginal check stable:
    raise `failure_threshold`, raise `success_threshold` so recovery is slower
@@ -149,10 +186,12 @@ peer is gone.
    the master disappears.
 3. Has it just started or resumed? A returning node waits out `startup_delay` and
    at least one health evaluation window before competing, on purpose.
-4. Is `advertisement_interval` being honored? The takeover delay is
-   `3 × advertisement_interval + 10ms`. At `1s` that is 3.01 seconds; at a long
-   interval it is correspondingly longer. If you expected a fast takeover, check
-   this value first.
+4. Is the takeover delay what you expect? It is
+   `3 × advertisement_interval + Skew_Time`, where RFC 5798 defines
+   `Skew_Time` as `((256 − priority) / 256) × advertisement_interval`. At a
+   one-second interval that is 3.41s behind a priority-150 master and 3.61s
+   behind a priority-100 one, so between three and four intervals depending on
+   priority. A higher-priority master is detected slightly sooner.
 
 ## Health checks fail but the service is fine
 
@@ -188,7 +227,7 @@ The rules you will meet most:
 | `V-01` | The VRID is 0. Use 1 to 255. |
 | `V-02` | The priority is 0, which is reserved for relinquishment |
 | `V-03` | The instance mixes IPv4 and IPv6 addresses, which 1.0 does not allow yet |
-| `V-04` | The advertisement interval is outside 10ms to 2550ms |
+| `V-04` | The advertisement interval is outside 10ms to 40.95s |
 | `V-06` | Two instances share an interface and VRID |
 | `V-07` | An address family has no peer of that family in unicast mode |
 | `V-08` | A peer you listed is this node's own address |
@@ -211,9 +250,14 @@ Nothing changed. This is the design: a reload that cannot be fully applied is
 refused in full, and the running configuration is left exactly as it was
 (`I-09`).
 
-1. The refusal message names the instances that need a restart, and the change
-   that caused it. See [Upgrading](upgrading.md#what-can-be-reloaded-and-what-cannot)
-   for the table of reloadable changes.
+Neither form of reload works yet, so in practice this is what you see when
+`SIGHUP` finds a file that no longer validates: `reload_rejected` in the log, and
+the running configuration untouched. Validate first with `highland check-config`
+to see the violations before you signal.
+
+1. The refusal names every rule the new file breaks. See
+   [Upgrading](upgrading.md#what-can-be-reloaded-and-what-cannot) for which
+   changes can be applied live and which need a restart.
 2. Validate the new file: `highland check-config`. Every violation is reported
    with its rule and key.
 3. If the change is legitimate but needs a restart, apply it to one instance at
@@ -237,8 +281,8 @@ refused in full, and the running configuration is left exactly as it was
 
 Check the [command reference](cli.md). Several commands are specified and
 documented but not implemented in the current build, because the control socket
-is not open yet. `version`, `check-config`, and the `run` skeleton are what work
-today. [`CHANGELOG.md`](../../CHANGELOG.md) records the rest.
+is not open yet. `version` and `check-config` are what work today; `run` loads
+and validates the file, then exits 1. [`CHANGELOG.md`](../../CHANGELOG.md) records the rest.
 
 ## What to collect before asking for help
 

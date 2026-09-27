@@ -45,7 +45,7 @@ add up, so `1m30s` is ninety seconds. A bare number is rejected.
 | `defer_interface_binding` | bool | `false` | |
 | `vrid` | integer | required | `1..=255`; `0` is invalid (`V-01`) |
 | `priority` | integer | `100` | `1..=255`; `0` is reserved for relinquishment (`V-02`) |
-| `advertisement_interval` | duration | `1s` | `10ms..=2550ms` (`V-04`) |
+| `advertisement_interval` | duration | `1s` | `10ms..=40.95s`, the range of the 12-bit centisecond `Max Adver Int` field (`V-04`) |
 | `preempt` | bool | `true` | |
 | `preempt_delay` | duration | `0s` | Forbidden when `preempt = false` (`V-10`) |
 | `startup_delay` | duration | `0s` | Delay before entering election |
@@ -138,7 +138,7 @@ Every rule has a test in `crates/highland-config/tests/validation.rs`, named
 | `V-01` | VRID 0 |
 | `V-02` | Configured priority 0 |
 | `V-03` | An instance mixing address families before 1.0 |
-| `V-04` | Advertisement interval outside `10ms..=2550ms` |
+| `V-04` | Advertisement interval outside `10ms..=40.95s` |
 | `V-05` | Duplicate instance names |
 | `V-06` | Two instances sharing an `(interface, vrid)` pair |
 | `V-07` | A VIP family with no peer of that family in unicast mode |

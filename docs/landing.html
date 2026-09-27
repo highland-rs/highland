@@ -775,7 +775,7 @@
         <button class="ctl" id="btnHealth" type="button">Fail health check</button>
         <button class="ctl" id="btnReturn" type="button" disabled>Return master</button>
         <button class="ctl" id="btnReset" type="button">Reset</button>
-        <span class="sim__hint">master-down = 3 × adver_int + 10ms</span>
+        <span class="sim__hint">master-down = 3 × adver_int + Skew_Time · depends on priority</span>
       </div>
     </div>
   </div>
@@ -786,9 +786,11 @@
   <p class="eyebrow reveal"><b>01</b> Honest status</p>
   <h2 class="h2 reveal">What works <em>today</em>, and what does not</h2>
   <p class="lede reveal">
-    Highland is pre-release. The failover logic and the configuration layer are
-    finished and tested; the parts that put packets on the wire are still being
-    built. This page will not pretend otherwise.
+    Highland is pre-release. The state machine, the VRRPv3 codec, the
+    configuration layer, and the Linux netlink backend are finished and tested,
+    and a complete failover is exercised in the test suite. The raw VRRP socket
+    is the one missing piece, so <code class="mono">highland run</code> refuses
+    to start rather than pretend. This page will not say otherwise.
   </p>
 
   <div class="board reveal" style="margin-block-start:2.5rem">
@@ -797,21 +799,22 @@
       <ul>
         <li>Configuration model, strict TOML parser, and 32 validation rules, each with its own test</li>
         <li>Deterministic state machine: roles, timers, election, health arithmetic, no runtime dependency</li>
-        <li>VRRP domain types, validated so an invalid wire value cannot be represented</li>
+        <li>VRRPv3 codec for IPv4 and IPv6, RFC 1071 checksums, six fuzz targets in CI</li>
+        <li>Linux netlink backend: addresses added and removed, confirmed by read-back</li>
+        <li>A whole failover driven end to end against a scripted kernel</li>
         <li>Event model, redaction, bounded 4096-entry history</li>
-        <li>Control message model, error taxonomy, token-bucket rate limiter</li>
         <li><code class="mono">highland check-config</code>, fully functional</li>
       </ul>
     </div>
     <div class="board__col board--no">
       <h3>Not yet on the wire</h3>
       <ul>
-        <li>Packet encoding and decoding, with fuzz targets (Milestone 2)</li>
-        <li>The netlink backend that adds and removes addresses (Milestone 3)</li>
+        <li><b>The raw VRRP socket.</b> Without it the daemon refuses to start</li>
+        <li>Gratuitous ARP, and so a clean address handover</li>
         <li>A real address moving between two machines (Milestone 4, ships as 0.1.0)</li>
         <li>The control socket, so the CLI can query a running daemon (Milestone 7)</li>
-        <li>Health probes for anything beyond the framework (Milestone 6)</li>
-        <li>IPv6, multicast, and Keepalived interoperability (1.0)</li>
+        <li>Health probes, so no check can demote a node (Milestone 6)</li>
+        <li>IPv6 and multicast on the wire, and Keepalived interoperability (1.0)</li>
       </ul>
     </div>
   </div>
@@ -881,7 +884,7 @@
     <a class="crate crate--core" href="SPEC.md"><span class="crate__i">02</span><span class="crate__n">highland-vrrp</span><span class="crate__d">VRRPv3 encoding, decoding, checksums, validation. No sockets.</span></a>
     <a class="crate" href="user/configuration.md"><span class="crate__i">03</span><span class="crate__n">highland-config</span><span class="crate__d">Typed TOML model, 32 validation rules, source-located errors.</span></a>
     <a class="crate" href="SPEC.md"><span class="crate__i">04</span><span class="crate__n">highland-observe</span><span class="crate__d">Events, redaction, bounded history, Prometheus metrics.</span></a>
-    <a class="crate" href="SPEC.md"><span class="crate__i">05</span><span class="crate__n">highland-net</span><span class="crate__d">Interfaces, addresses, gratuitous updates, netlink — behind a trait.</span></a>
+    <a class="crate" href="SPEC.md"><span class="crate__i">05</span><span class="crate__n">highland-net</span><span class="crate__d">Interfaces, addresses, netlink, and the receiver-side VRRP rules — behind a trait.</span></a>
     <a class="crate" href="user/health-checks.md"><span class="crate__i">06</span><span class="crate__n">highland-checks</span><span class="crate__d">Native probes with thresholds, weights, bounded timeouts.</span></a>
     <a class="crate" href="user/cli.md"><span class="crate__i">07</span><span class="crate__n">highland-control</span><span class="crate__d">Local Unix-socket API. Never a network listener.</span></a>
     <a class="crate" href="user/operations.md"><span class="crate__i">08</span><span class="crate__n">highland-daemon</span><span class="crate__d">Process lifecycle, signals, shutdown budget, wiring.</span></a>
@@ -933,7 +936,7 @@ weight = <span class="tk-l">100</span></code></pre>
     <div class="reason"><code>startup</code><span>The instance entered election</span></div>
     <div class="reason"><code>interface_up</code><span>The interface became usable</span></div>
     <div class="reason"><code>interface_down</code><span>The link went away</span></div>
-    <div class="reason"><code>master_down_timeout</code><span>No advertisement in 3 × adver_int + 10ms</span></div>
+    <div class="reason"><code>master_down_timeout</code><span>No advertisement in 3 × adver_int + Skew_Time</span></div>
     <div class="reason"><code>higher_priority_peer_advertisement</code><span>A peer outranked this node</span></div>
     <div class="reason"><code>health_ineligible</code><span>Health policy removed eligibility</span></div>
     <div class="reason"><code>operator_relinquish</code><span>An operator gave the address up</span></div>
@@ -987,9 +990,14 @@ weight = <span class="tk-l">100</span></code></pre>
     new Date().toISOString().replace("T", " ").slice(0, 19) + "Z";
 
   /* ------------------------------------------------------------------ model
-     Mirrors SPEC.md: node-a priority 150, node-b 100, adver_int 1s, so
-     Master_Down_Interval = 3 * adver_int + Skew_Time(10ms) = 3010ms. */
-  const MASTER_DOWN_MS = 3010;
+     RFC 5798 6.1:
+       Master_Down_Interval = 3 * Master_Adver_Interval + Skew_Time
+       Skew_Time            = ((256 - priority) / 256) * Master_Adver_Interval
+     The skew depends on the *local* priority, so a priority-100 backup behind a
+     one-second master waits 3.609s, and a priority-150 one waits 3.414s. */
+  const ADVERT_MS = 1000;
+  const masterDownMs = (localPriority) =>
+    3 * ADVERT_MS + Math.round(((256 - localPriority) / 256) * ADVERT_MS);
 
   const fresh = () => ({
     a: { name: "node-a", addr: "192.0.2.11", prio: 150, eff: 150, role: "master", vips: 1, alive: true, healthy: true },
@@ -1150,8 +1158,9 @@ weight = <span class="tk-l">100</span></code></pre>
       n.role = "fault";
       paintAll();
 
-      log("warn", nodes[other(key)].name, "master timer armed, waiting for silence");
-      countdown(MASTER_DOWN_MS, 0, () => takeOver(other(key), "master_down_timeout"));
+      const wait_ms = masterDownMs(nodes[other(key)].prio);
+      log("warn", nodes[other(key)].name, `master timer armed: ${(wait_ms / 1000).toFixed(3)}s`);
+      countdown(wait_ms, 0, () => takeOver(other(key), "master_down_timeout"));
     });
   }
 
@@ -1167,7 +1176,7 @@ weight = <span class="tk-l">100</span></code></pre>
       paintAll();
       return;
     }
-    log("warn", n.name, `no advertisement in ${MASTER_DOWN_MS}ms, asserting election`);
+    log("warn", n.name, `no advertisement in ${masterDownMs(n.prio)}ms, asserting election`);
     log("info", n.name, `BACKUP → MASTER  reason=${reason}  vrid=42`);
     n.role = "master";
     paintAll();
@@ -1303,7 +1312,7 @@ weight = <span class="tk-l">100</span></code></pre>
     ui.down.className = "";
     phase("converged");
     log("info", "node-a", "MASTER  vrid=42  vip=192.0.2.10/24  eff=150");
-    log("info", "node-b", "BACKUP  vrid=42  peer=192.0.2.11  master_down=3.010s");
+    log("info", "node-b", `BACKUP  vrid=42  peer=192.0.2.11  master_down=${(masterDownMs(nodes.b.prio) / 1000).toFixed(3)}s`);
     paintAll();
   }
 

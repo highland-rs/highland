@@ -7,6 +7,9 @@ behavior; every transition reason listed here MUST have an entry
 
 ## Requirements
 
+The daemon requires `CAP_NET_ADMIN` and `CAP_NET_RAW`. It also refuses to start
+until it has a working VRRP socket, so nothing below is reachable today.
+
 - Linux with `CAP_NET_ADMIN` and `CAP_NET_RAW`.
 - The configuration file readable by the daemon, and not world-writable.
 - The control socket directory writable at startup.
@@ -15,6 +18,9 @@ behavior; every transition reason listed here MUST have an entry
   modifies them.
 
 ## Running
+
+Everything below describes the finished product. Today `highland run` exits
+non-zero with `the VRRP transport is not implemented`.
 
 ```console
 $ highland run --config /etc/highland/config.toml
@@ -32,25 +38,37 @@ credential (`R-28`).
 
 `force-transition` is disabled unless the daemon was started with
 `--enable-force-transition` (`R-10`). It exists for breaking a stuck state
-machine, and it is the first thing to look suspicious in an incident.
+machine, and it is the first thing to look suspicious in an incident. That
+daemon flag is not wired up yet, so the command is doubly unavailable today.
+
+The confirmation prompts and audit events described above are also not
+implemented yet: `--yes` is accepted and ignored.
 
 ## Signals
 
 | Signal | Effect |
 |---|---|
 | `SIGTERM`, `SIGINT` | Graceful shutdown (`SPEC.md` §14.5) |
-| `SIGHUP` | Reload, with the same semantics as `highland reload` (`R-30`) |
+| `SIGHUP` | Re-reads and re-validates the file, then logs the outcome |
 | A second `SIGTERM` | Ignored; shutdown stays idempotent (`I-31`) |
+
+`SIGHUP` does not apply anything yet. It reports `reload_accepted` or
+`reload_rejected`, and a rejected reload leaves the running configuration
+untouched. `highland reload` is the same operation over the control socket,
+which does not exist yet.
 
 Shutdown order: stop accepting control requests, stop health checks, send a
 zero-priority advertisement and remove VIPs for each master, dump state, exit.
 The default budget is five seconds; exceeding it is an error, and the daemon
-names the addresses it could not remove.
+names the addresses it could not remove. None of this is reachable today,
+because the daemon refuses to start; see
+[troubleshooting](troubleshooting.md#the-daemon-will-not-start).
 
 ## Metrics
 
-Metrics are documented in `SPEC.md` §16.2, with types and labels. Two rules
-matter operationally:
+There is no metrics endpoint yet: `metrics.enabled` and `metrics.listen` are
+parsed and validated, and nothing serves them. The set below is what `SPEC.md`
+§16.2 specifies and what you will get. Two rules matter operationally:
 
 - `highland_instance_role` is numeric: `0` INIT, `1` BACKUP, `2` MASTER, `3`
   FAULT, `4` DISABLED (`R-19`).
@@ -60,14 +78,15 @@ matter operationally:
 ## Transition reasons
 
 Every role transition carries one of these. This list is the closed set
-(`R-17`); a new reason is a specification change.
+(`R-17`); a new reason is a specification change. These are the exact strings
+the code emits, so they are safe to alert on.
 
 | Reason | Meaning | What to check |
 |---|---|---|
 | `startup` | The instance entered election | Expected at boot |
 | `interface_up` | The interface became usable | Expected after a link event |
 | `interface_down` | The interface became unusable | Check the link, the peer, and the switch |
-| `master_down_timeout` | No advertisement arrived within `3 * adver_int + 10ms` | Packet loss, or the peer died |
+| `master_down_timeout` | No advertisement arrived within `3 * adver_int + Skew_Time` | Packet loss, or the peer died |
 | `preemption_delay_elapsed` | A higher-priority backup took over after its preemption delay | Expected during a rolling restart of a higher-priority node |
 | `higher_priority_peer_advertisement` | A higher-priority peer advertised, so this master stepped down | Expected during preemption |
 | `health_ineligible` | Health policy made the instance ineligible | Inspect the failing check |

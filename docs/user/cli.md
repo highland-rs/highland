@@ -75,12 +75,24 @@ Only pass `--allow-insecure-config` for a file on a trusted filesystem, such as
 one generated at boot. Highland refuses a world-writable file by default because
 anyone who can write it can name themselves as a trusted peer.
 
+**Today this command exits immediately**, with exit code 1:
+
+```console
+$ highland run --config /etc/highland/config.toml
+ERROR highland: the VRRP transport is not implemented; the daemon will not start
+```
+
+The configuration is loaded and validated first, so a broken file reports the
+broken file rather than this message. The refusal is deliberate: there is no raw
+VRRP socket yet, and a process that claims to be a VRRP router while sending
+nothing is worse than one that declines to start.
+
 Highland handles three signals:
 
 | Signal | What it does |
 |---|---|
 | `SIGTERM`, `SIGINT` | Stops cleanly, giving up any addresses it holds |
-| `SIGHUP` | Reloads the configuration file |
+| `SIGHUP` | Re-reads and re-validates the configuration file. Does not apply it yet |
 | A second `SIGTERM` | Ignored; the first shutdown is already under way |
 
 The `run` command starts the `highland-daemon` process, so both binaries must be
@@ -171,7 +183,7 @@ an instance stuck in a state it will not leave on its own.
 | `--enable` | Required. Acknowledges that this changes running state |
 
 The daemon must also have been started with `--enable-force-transition`, so this
-cannot be issued by accident from a script.
+cannot be issued by accident from a script. That daemon flag does not exist yet.
 
 If you need this in production, treat it as an incident: it means the state
 machine and the machine disagree, and the reason is worth reading in the event
@@ -180,7 +192,8 @@ stream before you force anything.
 ## Confirmation and exit codes
 
 Commands that change running state print the instance they will affect and ask
-for confirmation. Pass `--yes` to skip the prompt when scripting.
+for confirmation. Pass `--yes` to skip the prompt when scripting. The prompt is
+not implemented yet, so `--yes` is currently accepted and ignored.
 
 | Outcome | Exit code |
 |---|---|
@@ -196,8 +209,12 @@ them.
 |---|---|
 | `version` | Works |
 | `check-config` | Works |
-| `run` | Works as a skeleton: it loads the configuration, logs, and handles signals. It does not yet move an address |
+| `run` | Loads and validates the configuration, then exits 1: the VRRP socket is not implemented |
 | `status`, `show`, `events`, `reload`, `pause`, `resume`, `relinquish`, `force-transition` | Need the control socket, which is not open yet |
+
+`force-transition` additionally requires the daemon to have been started with
+`--enable-force-transition`. That flag is not wired up yet either, so the command
+is doubly unavailable today.
 
 Everything above describes the intended behavior of each command, which is fixed
 and will not change. What changes is when it starts working; the

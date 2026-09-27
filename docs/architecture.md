@@ -169,7 +169,9 @@ machine.handle(Event::Startup);
 assert_eq!(machine.deadline_of(TimerId::MasterDown), Some(Duration::from_millis(3410)));
 ```
 
-`Master_Down_Interval` is `3 * adver_int + 10ms`, from RFC 5798. The state
+`Master_Down_Interval` is `3 * adver_int + Skew_Time`, from RFC 5798 §6.1, where
+`Skew_Time` is `((256 - priority) / 256) * adver_int` — 3.41s at priority 150
+behind a one-second master. It is not a constant. The state
 machine uses a saturating form because the interval has already been bounded by
 `V-04`; the fallible `master_down_interval` is the public API for callers that
 have not validated their input.

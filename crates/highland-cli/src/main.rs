@@ -90,6 +90,18 @@ enum Command {
         /// The instance name.
         instance: String,
     },
+    /// Force a role change. Requires the daemon to have been started with
+    /// `--enable-force-transition`.
+    ForceTransition {
+        /// The instance name.
+        instance: String,
+        /// The role to force: init, backup, master, fault, or disabled.
+        #[arg(long)]
+        role: String,
+        /// Required acknowledgement that this changes runtime state.
+        #[arg(long)]
+        enable: bool,
+    },
     /// Stream events.
     Events {
         /// How many recent events to print first.
@@ -129,6 +141,27 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             config,
             allow_insecure_config,
         } => run_daemon::exec_daemon(config, *allow_insecure_config),
+        Command::ForceTransition {
+            instance,
+            role,
+            enable,
+        } => {
+            // `R-10` and `R-29`: the CLI refuses before contacting the daemon,
+            // so a mistyped command cannot half-apply.
+            if !enable {
+                anyhow::bail!(
+                    "force-transition changes runtime state and must be acknowledged with --enable; \
+                     target instance {instance:?} to role {role:?}"
+                );
+            }
+            let request = ControlRequest::ForceTransition {
+                instance: instance.clone(),
+                role: role.clone(),
+                confirm: true,
+            };
+            send(&cli.socket, request, cli.json).await?;
+            Ok(ExitCode::SUCCESS)
+        }
         other => {
             send(&cli.socket, request_for(other), cli.json).await?;
             Ok(ExitCode::SUCCESS)
@@ -155,6 +188,15 @@ fn request_for(command: &Command) -> ControlRequest {
         Command::Events { limit, follow } => ControlRequest::Events {
             limit: Some(*limit),
             follow: *follow,
+        },
+        Command::ForceTransition {
+            instance,
+            role,
+            enable,
+        } => ControlRequest::ForceTransition {
+            instance: instance.clone(),
+            role: role.clone(),
+            confirm: *enable,
         },
         Command::Version | Command::CheckConfig { .. } | Command::Run { .. } => {
             unreachable!("the local commands never reach the control socket")

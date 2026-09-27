@@ -48,7 +48,23 @@ section, and configuration key is tagged with the earliest release that must pro
 
 If a section is untagged, all of its normative statements are `[I]`.
 
-### 0.4 Unresolved decisions
+### 0.4 Implementation status
+
+This specification is the contract; the code is the implementation. They are kept
+honest with respect to each other as follows:
+
+- A requirement is **implemented** when a test enforces it. The test name or the
+  test body carries the identifier.
+- A requirement that is specified but not yet implemented is **planned**, and
+  `CHANGELOG.md` records which milestone delivers it.
+- Nothing in this document is weakened to match the code. When the code turns
+  out to be wrong, the code changes. When the design turns out to be
+  incomplete, this document changes and the change is recorded in Appendix A.
+
+`docs/architecture.md` records the dependency edges as built, including edges
+that differ from the target graph in §9.
+
+### 0.5 Unresolved decisions
 
 Decisions this document deliberately does **not** make are listed in Appendix B. They are
 tracked as open questions, and no other part of this document may assume an answer to one.
@@ -326,12 +342,12 @@ highland/
 │   ├── highland-control/
 │   ├── highland-daemon/
 │   └── highland-cli/
-├── tests/
+├── tests/                     # shared fixtures, not compiled by cargo
 │   ├── integration/
 │   ├── network-ns/
 │   ├── packet-captures/
 │   └── compatibility/
-├── fuzz/
+├── fuzz/                      # reserved; populated in Milestone 2
 │   ├── vrrp-packet/
 │   ├── config-parser/
 │   ├── check-response/
@@ -343,9 +359,16 @@ highland/
     └── containers/
 ```
 
-- `R-01` Integration tests that require root or network namespaces MUST live in
-  `tests/network-ns/` and MUST be gated behind a Cargo feature so that `cargo test
-  --workspace` succeeds unprivileged.
+Unit tests live in `#[cfg(test)] mod tests` inside the module they test, which
+is the Rust convention and keeps private items testable.
+
+- `R-01` Rust integration tests MUST live in `crates/<crate>/tests/`, next to the
+  crate whose public API they exercise, because the workspace root is not a
+  package. The workspace-level `tests/` directory holds fixtures shared by more
+  than one crate: packet captures, recorded netlink transcripts, and namespace
+  topologies. Tests that require root or network namespaces MUST be gated
+  behind a Cargo feature so that `cargo test --workspace` succeeds
+  unprivileged.
 - `R-02` The workspace MUST define a single MSRV. A documented policy for bumping it MUST
   exist in `CONTRIBUTING.md`.
 
@@ -356,17 +379,28 @@ highland/
 Each crate MUST depend only on crates listed for it or on crates strictly below it in this
 list. Cycles are forbidden.
 
-| # | Crate | Depends on | Runtime-aware |
+Two properties are load-bearing rather than stylistic. `highland-core` and
+`highland-vrrp` MUST NOT depend on an async runtime, on Linux, or on each other,
+because that is what makes the state machine and the codec testable with a fake
+clock and no executor. And a crate MUST declare only the internal dependencies
+it actually uses, so that an unused edge cannot hide a cycle or drag a
+dependency into a consumer's build.
+
+| # | Crate | May depend on | Runtime-aware |
 |---|---|---|---|
 | 1 | `highland-core` | none | no |
 | 2 | `highland-vrrp` | none | no |
 | 3 | `highland-config` | 1 | no |
 | 4 | `highland-observe` | 1 | no |
-| 5 | `highland-net` | 1 | yes |
+| 5 | `highland-net` | 1, 2 | yes |
 | 6 | `highland-checks` | 1, 4 | yes |
 | 7 | `highland-control` | 1, 4 | yes |
 | 8 | `highland-daemon` | 1–7 | yes |
 | 9 | `highland-cli` | 3, 7 | yes |
+
+Configuration does not depend on checks: checks are built from configuration, not
+the other way round, which keeps the configuration layer reusable by importers
+and by the control API.
 
 ### 9.1 `highland-core`
 
@@ -844,11 +878,11 @@ pub enum Event {
     InterfaceUp,
     InterfaceDown,
     CarrierLost,
-    AdvertisementReceived(Advertisement),
+    AdvertisementReceived(PeerAdvertisement),
     AdvertisementTimeout,
     HealthChanged(HealthSummary),
     TimerExpired(TimerId),
-    ActionFailed { action: ActionKind, error: ActionError },
+    ActionFailed { kind: ActionKind, error: ActionError },
     OperatorPauseRequested,
     OperatorResumeRequested,
     OperatorRelinquishRequested,
@@ -857,6 +891,14 @@ pub enum Event {
     ShutdownRequested,
 }
 ```
+
+The set is closed apart from the `#[non_exhaustive]` marker, which exists so that
+adding an event is a compatible change for downstream matchers.
+
+A `PeerAdvertisement` is the domain-level view of a decoded advertisement:
+VRID, priority, source address, and the interval the peer claims. The state
+machine never sees a wire type, which is what keeps `highland-core` independent of
+`highland-vrrp` (§9.2).
 
 - `R-09` Every `Operator*` event MUST originate from an authenticated control request, MUST
   be recorded in the audit log, and MUST carry the requesting peer credential.
@@ -867,22 +909,27 @@ pub enum Event {
 
 ```rust
 pub enum Action {
-    ArmTimer { timer: TimerId, after: Duration },
+    ArmTimer { timer: TimerId, deadline: Duration },
     CancelTimer { timer: TimerId },
     SendAdvertisement { priority: u8 },
     AddVirtualAddresses,
     RemoveVirtualAddresses,
     SendGratuitousUpdates,
     SetEffectivePriority { priority: u8 },
-    SetHoldDown { after: Duration },
     EnterRole { role: Role, reason: TransitionReason },
-    EmitEvent(TransitionEvent),
-    ScheduleRetry { after: Duration, reason: RetryReason },
+    EmitEvent { name: &'static str },
     Log { level: LogLevel, message: String },
 }
 ```
 
-Actions are requests, not completed facts. The executor applies them and reports outcomes.
+Timers are armed with an **absolute deadline** in the clock's own units, not
+with a relative delay. A relative delay would make the state machine's output
+depend on when the executor happened to apply the previous action, which would
+break determinism (`R-27`). Hold-down and retry are timers like any other, so
+there is no separate `SetHoldDown` or `ScheduleRetry` action; `ActionKind` is the
+coarse classification used when a failure is reported back, and it is deliberately
+coarser than `Action` so that adding an action does not require a new failure
+path.
 
 - `I-17` The state machine MUST NOT perform I/O. All side effects MUST be expressed as
   actions.
@@ -1051,8 +1098,11 @@ path, and an ID in `TimerId`.
 | Master-down | Entering `BACKUP` | `3 × adver_int + Skew_Time` | Receiving a valid advertisement, leaving `BACKUP` |
 | Preemption delay | Seeing a lower-priority advert, `preempt = true` | `preempt_delay` | See §12.5 |
 | Hold-down | Entering `FAULT` | `hold_down`, default 10s | Operator action, reload |
-| Check interval | Check running | `interval` | Check removal, instance removal |
 | Retry | Failed action | backoff, base 1s, cap 30s | Successful action, reload |
+
+Health-check intervals are not core timers. A check owns its own schedule and
+delivers results as `Event::HealthChanged`; the state machine never schedules a
+probe, which is what keeps `highland-core` free of check knowledge (`I-38`).
 
 - `I-29` Every timer MUST be cancellable, and cancellation MUST be idempotent.
 - `I-30` Re-delivery of an expired timer MUST NOT occur after cancellation, including
@@ -1203,25 +1253,52 @@ block the state machine task (`R-05`, `I-38`).
 
 ### 16.1 Structured events `[I]`
 
-Every role transition, health state change, ownership change, configuration reload, and
-operator action MUST produce an event containing: timestamp, node name, instance name,
-previous state, new state, reason, peer information when applicable, local and remote
-effective priority, health summary, and the result of any network operation.
+Every role transition, health state change, ownership change, configuration
+reload, and operator action MUST produce an event. The event model has a fixed
+shape so that consumers can rely on it:
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | closed enum | The event name (`R-17`) |
+| `level` | `info`, `warn`, `error` | |
+| `node` | string | Node name |
+| `instance` | string or null | Null for node-wide events |
+| `from`, `to` | string or null | Role before and after, when the event describes a transition |
+| `reason` | string | The machine-readable reason (§16.1.1) |
+| `fields` | array of key and value pairs | Variable detail: peer, priorities, timer durations |
+| `timestamp` | RFC 3339 UTC | |
 
 ```json
 {
-  "event": "role_transition",
+  "name": "role_transition",
+  "level": "info",
   "node": "node-a",
   "instance": "api",
   "from": "MASTER",
   "to": "BACKUP",
   "reason": "higher_priority_peer_advertisement",
-  "peer": "192.0.2.11",
-  "local_priority": 120,
-  "remote_priority": 150,
+  "fields": [
+    { "key": "peer", "value": "192.0.2.11" },
+    { "key": "local_priority", "value": 120 },
+    { "key": "remote_priority", "value": 150 }
+  ],
   "timestamp": "2027-01-03T12:00:14.123Z"
 }
 ```
+
+Field values are a closed set of scalar types (boolean, integer, float, text), so
+that a consumer never has to guess how to render one. Arbitrary detail belongs in
+`fields` rather than in new top-level keys, which is what lets the shape stay
+stable as events gain detail.
+
+#### 16.1.1 Transition reasons
+
+`reason` is a closed enum, because operators and dashboards depend on its
+spelling. The set is `startup`, `interface_up`, `interface_down`,
+`master_down_timeout`, `higher_priority_peer_advertisement`, `health_ineligible`,
+`operator_relinquish`, `operator_force_transition`, `configuration_reloaded`,
+`hold_down_expired`, `ownership_failed`, and `shutdown`. Each one is documented in
+`docs/operations.md` with what an operator should check when it appears.
 
 - `R-17` The set of `reason` values is a closed, documented enum. Any new reason MUST be
   added to `docs/operations.md` in the same change.
@@ -1258,6 +1335,10 @@ effective priority, health summary, and the result of any network operation.
 
 ### 16.3 Status API `[I]`
 
+The status response is the control API's `NodeStatus` message, serialized as
+JSON. It is defined in `highland-control` so that the CLI and the daemon cannot
+disagree about its shape.
+
 ```json
 {
   "node": "node-a",
@@ -1267,7 +1348,6 @@ effective priority, health summary, and the result of any network operation.
     {
       "name": "api",
       "role": "MASTER",
-      "vrid": 42,
       "priority": 150,
       "effective_priority": 100,
       "vip_addresses": ["192.0.2.10/24"],
@@ -1275,19 +1355,21 @@ effective priority, health summary, and the result of any network operation.
       "health": "degraded",
       "master_down_remaining_ms": null,
       "preemption_remaining_ms": null,
-      "last_advertisement": "2027-01-03T12:00:14Z",
-      "peers": [
-        { "address": "192.0.2.11", "reachable": true, "last_seen": "2027-01-03T12:00:13Z" }
-      ],
-      "checks": {
-        "api-ready": "failing",
-        "database-port": "passing"
-      },
       "last_reason": "health_threshold_exceeded"
     }
   ]
 }
 ```
+
+The response carries the configured and effective priority, whether the VIPs are
+present in the kernel, the health verdict, the two timer remainders, and the reason
+for the most recent transition. The active `Generation` is included so that a
+caller can tell whether the status it is reading describes the configuration it
+asked about (`I-12`).
+
+Per-check detail and per-peer reachability are returned by the `events` and
+`instances` operations respectively rather than being embedded in every status
+response, so that the common case stays small.
 
 - `R-21` `master_down_remaining_ms` and `preemption_remaining_ms` MUST be `null` when the
   corresponding timer is not armed.
@@ -1352,22 +1434,35 @@ and never a crash.
 Errors are typed, contextual, and actionable, using `thiserror` in libraries and `anyhow`
 only in the daemon and CLI binaries.
 
-```rust
-pub enum HighlandError {
-    Config(ConfigError),
-    Protocol(ProtocolError),
-    Network(NetworkError),
-    Check(CheckError),
-    Control(ControlError),
-    Reload(ReloadError),
-    Shutdown(ShutdownError),
-}
-```
+**Each crate owns exactly one public error type.** A single crate-wide aggregate
+was considered and rejected: the CLI depends only on `highland-config` and
+`highland-control` (§9), so an aggregate that mentions network and check errors
+would force the CLI to depend on `highland-net` and `highland-checks` for no
+benefit, and would make the dependency graph of §9 unenforceable.
+
+| Crate | Error type | Domain |
+|---|---|---|
+| `highland-core` | `CoreError` | Timer arithmetic and domain invariants |
+| `highland-vrrp` | `ProtocolError`, `EncodeError`, `DecodeError`, `AdvertisementError` | Wire values |
+| `highland-net` | `NetError` | Interfaces, addresses, sockets |
+| `highland-checks` | `CheckError` | Check configuration and results |
+| `highland-config` | `ConfigError` | Reading, parsing, and validating configuration |
+| `highland-control` | `ControlError` | Control requests and the socket |
+| `highland-daemon` | `DaemonError` | Process startup and runtime |
+| `highland-cli` | `anyhow` | Command dispatch only |
+
+The protocol crate carries more than one type because encoding, decoding, and
+construction fail for genuinely different reasons, and a caller that only
+encodes should not have to match decode failures.
+
+A subsystem that produces domain values, such as `highland-vrrp`, MUST return a
+typed error rather than a `Result` of `Option`, so that a caller can distinguish
+"no address configured" from "the caller asked for the wrong family".
 
 Context is preserved in the variant, not in a formatted string:
 
 ```rust
-NetworkError::AddAddress {
+NetError::AddAddress {
     interface: String,
     address: IpCidr,
     source: io::Error,
@@ -1776,66 +1871,104 @@ Exit (`M-10`): every §26 condition is satisfied and recorded in `CHANGELOG.md`.
 
 ## 28. Example Library API
 
-These examples illustrate the intended shape. They are illustrative, not frozen signatures;
-the conceptual separation is normative.
+These examples show the intended shape and are the API the crates are built
+towards. They are illustrative rather than frozen: the conceptual separation is
+normative, the exact signatures are not. Where the code already implements a
+signature, this section matches it; where a milestone is still to come, the
+example states so.
 
 ```rust
-use highland_core::{Event, InstanceConfig, InstanceStateMachine, Role};
-use highland_core::clock::FakeClock;
+use highland_core::clock::ManualClock;
+use highland_core::state::{Action, Event, InstanceConfig, InstanceStateMachine, Role, TimerId};
+use std::time::Duration;
 
-let clock = FakeClock::new();
+let clock = ManualClock::new();
 let config = InstanceConfig {
-    name: "api".into(),
+    name: "api".to_owned(),
     vrid: 42,
     priority: 150,
-    startup_delay: std::time::Duration::from_secs(0),
-    ..Default::default()
+    ..InstanceConfig::default()
 };
 
-let mut machine = InstanceStateMachine::new(config, clock);
+let mut machine = InstanceStateMachine::new(config, clock.clone());
 let actions = machine.handle(Event::Startup);
 
-assert!(matches!(machine.role(), Role::Backup));
+assert_eq!(machine.role(), Role::Backup);
+assert!(actions.contains(&Action::ArmTimer {
+    timer: TimerId::MasterDown,
+    deadline: Duration::from_millis(3010),
+}));
 
-for action in actions {
-    println!("{action:?}");
-}
-
-clock.advance(std::time::Duration::from_secs(1));
-assert!(machine.handle(Event::StartupDelayElapsed).iter().any(
-    |a| matches!(a, highland_core::Action::ArmTimer { timer, .. } if *timer == TimerId::MasterDown)
-));
+// Timers are absolute deadlines, so a test asserts the deadline rather than
+// sleeping.
+clock.advance(Duration::from_millis(3010));
+assert!(machine.is_due(TimerId::MasterDown));
 ```
+
+Protocol usage, once Milestone 2 lands the codec. The field values are validated
+on construction, so an `Advertisement` that exists can be encoded:
 
 ```rust
-use highland_vrrp::{Advertisement, IpFamily, decode_advertisement, encode_advertisement};
+use highland_vrrp::{Advertisement, IpFamily, Priority, Vrid};
+use std::time::Duration;
 
-let advertisement = Advertisement {
-    vrid: 42,
-    priority: 150,
-    addresses: vec!["192.0.2.10".parse().unwrap()],
-    ..Default::default()
-};
+let advertisement = Advertisement::new(
+    Vrid::new(42)?,
+    Priority::new(150)?,
+    Duration::from_secs(1),
+    vec!["192.0.2.10".parse()?],
+)?;
+assert_eq!(advertisement.family(), IpFamily::V4);
 
-let bytes = encode_advertisement(&advertisement, IpFamily::V4)?;
-let decoded = decode_advertisement(&bytes, IpFamily::V4)?;
-
-assert_eq!(decoded.vrid, 42);
-assert_eq!(decoded.priority, 150);
+// Arrives with Milestone 2:
+// let bytes = encode_advertisement(&advertisement, IpFamily::V4)?;
+// let decoded = decode_advertisement(&bytes, IpFamily::V4)?;
+// assert_eq!(decoded.vrid().get(), 42);
 ```
+
+Health-check usage. The debouncer is the part with interesting semantics: a
+single failed probe never changes the verdict unless the failure threshold is
+one.
 
 ```rust
-use highland_checks::TcpCheck;
+use highland_checks::{CheckKind, CheckResult, CheckSpec, CheckStatus, Debouncer, Stability};
+use highland_core::state::Generation;
+use std::time::{Duration, Instant};
 
-let check = TcpCheck::new("database", "127.0.0.1:5432")
-    .timeout(std::time::Duration::from_millis(500))
-    .failure_threshold(3);
+let spec = CheckSpec::new(
+    "database",
+    CheckKind::Tcp,
+    Duration::from_secs(2),
+    Duration::from_millis(500),
+    3,
+    2,
+    100,
+)?;
 
-let result = check.run().await?;
-assert!(matches!(result.status, highland_checks::CheckStatus::Passing));
+let mut debouncer = Debouncer::new(&spec);
+assert_eq!(debouncer.observe(CheckStatus::Passing), None);
+assert_eq!(debouncer.observe(CheckStatus::Passing), Some(Stability::Passing));
+
+// A result carries the sequence number that makes out-of-order delivery
+// harmless: a stale result can never overwrite a newer verdict.
+let older = CheckResult::passing(
+    "database",
+    Duration::from_millis(3),
+    Instant::now(),
+    Generation::initial(),
+    1,
+    "connection accepted",
+)?;
+let newer = CheckResult::passing(
+    "database",
+    Duration::from_millis(2),
+    Instant::now(),
+    Generation::initial(),
+    2,
+    "connection accepted",
+)?;
+assert!(newer.supersedes(&older));
 ```
-
----
 
 ## 29. Failure Scenarios the Design Must Handle
 
@@ -1990,6 +2123,8 @@ resolution, so a later change can be traced.
 | A-28 | `V-20` rejected a total check weight of 0, which would forbid an instance from having only observational checks | `V-20` now rejects only a total above 255 |
 | A-29 | §18 sketches one `HighlandError` aggregating every subsystem, but the dependency graph gives the CLI no access to the network or check errors | Each crate owns one error type; see `docs/architecture.md` |
 | A-30 | §8 places tests at the workspace root, where cargo cannot compile them | Integration tests live in `crates/<crate>/tests/`; `tests/` holds shared fixtures |
+| A-31 | §16.1 and §16.3 showed a free-form JSON shape with top-level fields, which no typed model can produce | The event and status shapes are defined as typed messages with a fixed field set and a scalar value union; the examples match them |
+| A-32 | §9 listed `highland-net` as depending on the core but not on the protocol crate, although address ownership and advertisement sending need the codec | `highland-net` may depend on `highland-vrrp`; the edge appears when Milestone 3 lands |
 
 ## Appendix B — Open Questions
 

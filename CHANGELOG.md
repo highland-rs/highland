@@ -6,10 +6,19 @@ All notable changes to Highland are recorded here. The format follows
 
 ## [Unreleased]
 
-Milestones 0 through 3 have landed, and the daemon now carries VRRP over a real
-socket: two namespaces on a bridge elect one master and the virtual IP moves when
-that node is killed. The control socket, the metrics endpoint, transactional
-reload, and gratuitous ARP remain.
+Milestones 0 through 4 have landed. The daemon carries VRRP over a real socket,
+answers operators over a control socket, exports Prometheus metrics, applies a
+transactional reload without dropping the address it holds, records an event
+history, and announces a takeover to the segment. Two namespaces on a bridge
+elect one master, the virtual IP moves when that node is killed, and a third
+namespace that runs no daemon sees its neighbour cache entry change with it.
+
+A segment with faults on it is now part of the test suite: loss, reordering,
+duplication, a one-way partition, a link flap, and a frozen process, each
+asserted for bounded recovery and bounded event volume. That suite found five
+defects, listed below.
+
+Milestone 4 is complete. What remains is Milestone 5, IPv6 and multicast.
 
 ### Added — Milestone 0, the repository
 
@@ -349,50 +358,113 @@ running node.
 - The running configuration is replaced, so the next reload compares against
   what is actually running rather than against the file the daemon started from.
 
+### A segment with faults on it
+
+`crates/highland-daemon/tests/chaos.rs` injects faults with `tc netem` on one
+node's own egress — never on the shared bridge, because the question is what one
+node does to its peer on its own. Five scenarios: loss, a one-way partition,
+reordering and duplication, a link flap, and a frozen process. Each asserts
+bounded recovery inside the timing budget and bounded event volume, because a
+daemon that recovers by flapping has not recovered: every flap is another
+address move for every client.
+
+Two of the five assert what a VRRP implementation *cannot* fix, on purpose. A
+frozen or partitioned node still believes it is master and still holds the
+address, because no protocol message reaches it. The assertions are about what
+happens when the fault heals, which is the same fencing limitation the failover
+suite records for a killed node.
+
+### Fixed, by running it on a segment with faults
+
+- **A master advertised once and then went silent.** The advertisement timer was
+  armed at takeover and never re-armed. Nothing noticed, because one
+  advertisement is enough to keep resetting a backup's `Master_Down_Interval`;
+  under loss it is not, and the address moved on every interval. Now `I-47`.
+- **Nothing watched the interface.** The machine has handled `InterfaceDown` and
+  `InterfaceUp` since Milestone 1 and no producer existed, so a pulled cable was
+  discovered by an address operation failing: the node held the address on a
+  dead link for about three seconds and then went to `FAULT` rather than
+  relinquishing. Each instance now polls the kernel and reports the transition.
+  Now `I-48`.
+- **A faulted instance seized the address on a retry backoff.** A node returning
+  from a link flap grabbed the address from a live master. The retry now tells
+  *away* from *unable*: a local failure still re-attempts, which is what the
+  hold-down bounds, and a fault caused by the interface going away returns to the
+  election and listens for a full `Master_Down_Interval` first.
+- **The machine's log and event actions were discarded.** The executor treats
+  them as bookkeeping and nothing else looked at them, so a failed announcement,
+  a refused takeover, and a rejected action all happened silently, which `R-24`
+  forbids.
+- **`ScriptedBackend` shared one script across every operation**, so a failure
+  scripted for an address add could be eaten by an interface poll. Interface
+  lookups have their own queue.
+
+### A takeover that tells the segment
+
+A node that takes over a virtual address now announces it: a gratuitous ARP for
+IPv4, written as a complete Ethernet frame on an `AF_PACKET` socket, and an
+unsolicited Neighbor Advertisement for IPv6 with the override flag set. Without
+it every neighbour keeps a cache entry pointing at the node that had the address
+last, and traffic to the VIP is a black hole until that entry ages out.
+
+The proof is the effect rather than the send. A capture on the sending node
+proves nothing, because a bridge does not reflect a broadcast back to the port it
+came from, so the test adds a third namespace that runs no daemon, resolves the
+address to the old master, kills the master, and requires the neighbour's cache to
+point at the new one within three seconds. Checked against a build with the
+announcement disabled, it fails.
+
+This is the only code in the workspace that uses `unsafe`, in two functions with
+documented safety arguments, and `docs/adr/ADR-0004-gratuitous-arp.md` records
+why a datalink crate was the wrong answer for one 42-byte frame.
+
+### The event history
+
+`highland events` reports what the instance did as it happened, with the reason,
+a sequence number, and a real timestamp. The log is bounded at 4096 entries, and
+`--follow` polls with a cursor rather than holding a connection open, so a client
+that disappears mid-stream leaves nothing waiting on a socket.
+
+### A reload an operator can actually ask for
+
+`highland reload` and `SIGHUP` are now the same operation: one `ReloadHandle`,
+shared by the signal loop and the control API, so they cannot disagree about what
+a reload does. A reloadable instance keeps its role, its address, and its timers;
+a reload that needs a restart is refused whole, naming the instance and the
+field.
+
 ### Not delivered, and why
 
-- **`highland reload` over the control socket** still answers "the reload runs
-  on the signal loop". The reload itself is implemented and `SIGHUP` drives it;
-  what is missing is routing the control request to the signal loop, so there is
-  one implementation of "what a reload does" rather than two.
-- **Adding a new instance on reload** is planned and classified, but the runner
-  reports it rather than starting it; instances are only created at startup.
-- **The event stream**, `highland events` is wired to the socket and gets an
-  explicit "not implemented" rather than hanging.
-- **The event stream.** `highland events` is wired to the socket and gets an
-  explicit "not implemented" rather than silence.
-- **Packet loss, delay, and reordering** between the nodes. The harness has one
-  healthy link; the chaos scenarios in `SPEC.md` 21.5 are not built.
-- **Gratuitous ARP**, which needs an `AF_PACKET` socket whose `sockaddr_ll` has no
-  safe representation. It returns `NetError::Unsupported`, and the state machine
-  already treats that failure as non-fatal.
-- **The namespace harness**, which is Milestone 4's exit criterion and needs root.
-  What the scripted-kernel tests establish is that the logic and the sequencing
-  are right, so that the namespace run has one variable rather than two.
+- **IPv6 and multicast virtual addresses** are Milestone 5. The IPv6
+  announcement is written and its frame is unit-tested, but the daemon speaks
+  unicast IPv4, so it has never been run against a real kernel.
+- **Adding an instance that did not exist before a reload** is classified and
+  reported, and the reload is applied; the instance itself is started at startup
+  only. That is a gap between the planner and the runner, not between the
+  planner and the operator.
+- **Health probes are not scheduled by the daemon.** The check model and the
+  policy arithmetic exist and the machine consumes their verdicts, but nothing
+  runs probes on a timer yet, so a check cannot yet demote a running node.
+- **Keepalived interoperability** is Milestone 8, and the packet vectors are
+  encoder-produced rather than captured. The IPv4 checksum scope therefore rests
+  on the RFC's silence rather than on observed interoperability.
+- **`--yes` is accepted and ignored.** The confirmation prompt is not
+  implemented; the exit code is, and a refused command exits non-zero.
+- **Adding a new instance on reload** and **hold-down and retry becoming
+  configurable** are both open questions recorded in `SPEC.md` Appendix B
+  rather than decisions.
 
 ### Known limitations
 
-- `highland run` exits non-zero: `the VRRP transport is not wired in yet; the
-  daemon will not start`.
-- No VRRP traffic is sent or received, so no address moves between machines.
-- No control socket listener, so every `highland` command except `version` and
-  `check-config` fails to connect.
-- `SIGHUP` re-reads and re-validates the file and reports the outcome, but does
-  not apply it: the reload planner and `I-09` arrive with Milestone 4.
-- No health probes and no check scheduler, so a failing check cannot demote a
-  node.
-- No metrics endpoint, and no `tracing` bridge in `highland-observe`; `Action::Log`
-  and `Action::EmitEvent` are discarded.
-- `--enable-force-transition` and the `--yes` confirmation prompts are not wired
-  up.
-- The shutdown budget is declared but not timed, and no VIP is relinquished on
-  shutdown, because the daemon never starts.
-- The netlink tests need `CAP_NET_ADMIN` and are behind the `netlink-tests`
-  feature; they are not in CI. The `netns` CI job is still `if: false`.
-- The packet vectors are encoder-produced, not captured from another
-  implementation. Real captures arrive in Milestone 8, and until then the IPv4
-  checksum scope rests on the RFC's silence rather than on observed
-  interoperability.
+- A node that is killed, frozen, or partitioned while it holds the address keeps
+  holding it. Nothing can tell it otherwise, so a survivor takes the address too
+  and both nodes have it until the fault heals or the client is fenced. This is
+  inherent to VRRP rather than specific to Highland, and it is the reason a load
+  balancer belongs in front of the address rather than trusting the address
+  alone.
+- The netlink, namespace, and chaos tests need `CAP_NET_ADMIN` and namespaces.
+  They run in three CI jobs on `ubuntu-latest` and in
+  `scripts/linux-tests.sh`, but not in the ordinary test job.
 - Several errors in `SPEC.md` §18 are aggregated per crate rather than in one
   `HighlandError`, because the CLI and the daemon do not share a dependency set.
   See `docs/architecture.md`.

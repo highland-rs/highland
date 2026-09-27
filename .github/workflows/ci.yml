@@ -147,17 +147,27 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 curl
       - name: netlink against a real kernel
         run: sudo -E env "PATH=$PATH" cargo test -p highland-net --features netlink-tests
+      # One test at a time: each of these builds a bridge and a pair of
+      # namespaces, and the assertions are about elapsed time, so running several
+      # at once has them competing for the same CPU.
       - name: two nodes, one segment, a VIP that moves
-        run: sudo -E env "PATH=$PATH" cargo test -p highland-daemon --features netlink-tests
+        run: sudo -E env "PATH=$PATH" cargo test -p highland-daemon --features netlink-tests -- --test-threads=1
       - name: an operator can read the node and stop it
         run: sudo -E env "PATH=$PATH" cargo test -p highland-daemon --features netlink-tests --test cli
 
-  # Packet loss, delay, and reordering between the nodes are the chaos
-  # scenarios in SPEC.md 21.5. They arrive with the chaos harness.
-    name: network namespaces
-    if: false
+  # The chaos scenarios of SPEC.md 21.5: loss, reordering, duplication, a
+  # one-way partition, a link flap, and a frozen process, each asserted for
+  # bounded recovery and bounded event volume. They need the same namespaces and
+  # the same bridge as the failover suite, so they run here rather than in a job
+  # of their own.
+  chaos:
+    name: chaos scenarios
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: sudo cargo test --workspace --features netns-tests
+      - uses: Swatinem/rust-cache@v2
+      - name: install test tooling
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2
+      - name: a segment with faults on it
+        run: sudo -E env "PATH=$PATH" cargo test -p highland-daemon --features netlink-tests --test chaos -- --test-threads=1

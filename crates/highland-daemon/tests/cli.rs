@@ -144,6 +144,29 @@ impl Node {
         std::fs::read_to_string(self.directory.join("daemon.log")).unwrap_or_default()
     }
 
+    /// Rewrites the configuration file in place.
+    fn rewrite_config(&self, edit: impl FnOnce(&str) -> String) {
+        let path = self.directory.join("config.toml");
+        let text = std::fs::read_to_string(&path).expect("the configuration is readable");
+        std::fs::write(&path, edit(&text)).expect("the configuration is writable");
+    }
+
+    /// Sends `SIGHUP` to this node's daemon, which is what a reload is.
+    ///
+    /// The pid is signalled directly rather than matched by name, because
+    /// `ip netns exec` changes only the *network* namespace: every node shares one
+    /// process table, so a `pkill -f` on the daemon's name signals every other
+    /// node in the test as well.
+    fn reload(&self) {
+        let pid = self.daemon.as_ref().expect("the daemon is running").id();
+        let raw = i32::try_from(pid).expect("a process id fits in the kernel's type");
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(raw),
+            nix::sys::signal::Signal::SIGHUP,
+        )
+        .unwrap_or_else(|error| panic!("the reload signal reached pid {pid}: {error}"));
+    }
+
     fn socket(&self) -> PathBuf {
         self.directory.join("control.sock")
     }
@@ -457,4 +480,83 @@ fn scrape_in_namespace(node: &Node, address: &str) -> (bool, String) {
         Ok(output) => (false, String::from_utf8_lossy(&output.stderr).into_owned()),
         Err(error) => (false, error.to_string()),
     }
+}
+
+/// A reload is a transaction, and the two halves of that have to be tested
+/// against a real node: a change every instance can absorb is applied in place
+/// without the address moving, and a change one instance cannot absorb is
+/// refused with nothing touched.
+#[test]
+fn a_reload_is_applied_in_place_or_refused_whole() {
+    let node = Node::start("reload");
+    assert!(wait_for_socket(&node), "no control socket:\n{}", node.log());
+
+    // Wait until it is master and actually owns the address.
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        let (ok, text) = cli(&node, &["status", "--json"]);
+        if ok && text.contains("\"vips_owned\":true") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let (_, before) = cli(&node, &["status", "--json"]);
+    assert!(
+        before.contains("\"vips_owned\":true"),
+        "the node never took the address: {before}"
+    );
+
+    // A priority change is reloadable: the role and the address must survive it.
+    node.rewrite_config(|text| text.replace("priority = 150", "priority = 120"));
+    node.reload();
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        let (_, text) = cli(&node, &["status", "--json"]);
+        if text.contains("\"priority\":120") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let (_, applied) = cli(&node, &["status", "--json"]);
+    assert!(
+        applied.contains("\"priority\":120"),
+        "the reload was not applied: {applied}\n--- daemon ---\n{}",
+        node.log()
+    );
+    assert!(
+        applied.contains("\"vips_owned\":true"),
+        "a reload is not a restart: the address must not move\n{applied}\n--- daemon ---\n{}",
+        node.log()
+    );
+    assert!(
+        applied.contains("\"role\":\"MASTER\""),
+        "and the role must survive it: {applied}"
+    );
+
+    // A VIP change is not reloadable, so the whole reload is refused and the
+    // running configuration is untouched.
+    node.rewrite_config(|text| text.replace("192.0.2.100/24", "192.0.2.101/24"));
+    node.reload();
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(3) {
+        let (_, text) = cli(&node, &["status", "--json"]);
+        if text.contains("reload_rejected") || !text.contains("192.0.2.101") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let (_, refused) = cli(&node, &["status", "--json"]);
+    assert!(
+        !refused.contains("192.0.2.101"),
+        "a refused reload must not change what is running: {refused}"
+    );
+    assert!(
+        refused.contains("\"priority\":120"),
+        "and it must not undo the reload that was applied: {refused}"
+    );
+    assert!(
+        node.log().contains("reload rejected") && node.log().contains("would need a restart"),
+        "the refusal names the instance and the change:\n{}",
+        node.log()
+    );
 }

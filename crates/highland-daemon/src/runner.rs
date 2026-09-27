@@ -25,8 +25,18 @@ use crate::options::InstancePlan;
 ///
 /// # Errors
 ///
-/// Returns an error when the configuration cannot be loaded, when logging
-/// cannot be initialized, or when a signal handler cannot be installed.
+/// Returns an error when the configuration cannot be loaded, when logging cannot
+/// be initialized, when a signal handler cannot be installed, or when an instance
+/// cannot bind its socket.
+// The entry point is long because it is the whole start-up sequence in one
+// place, in order: configuration, logging, metrics, control, instances, then the
+// signal loop. Splitting it would hide the order, which is the part that
+// matters: a client that connects before the instances exist gets a status that
+// describes nothing.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the start-up sequence reads better in order"
+)]
 pub async fn run(options: Options) -> Result<(), DaemonError> {
     let mut daemon = Daemon::prepare(options)?;
 
@@ -91,8 +101,21 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
     )
     .with_metrics(std::sync::Arc::clone(&metrics));
 
-    let instances =
-        start_instances(&daemon, &shutdown_rx, &registry, &metrics, &mut service).await?;
+    // The configuration a reload compares against, and the channels it applies
+    // to. The instance map is shared with the control service, so a reload
+    // reaches exactly the instances an operator does.
+    let active_config = std::sync::Mutex::new(daemon.config().clone());
+    let senders = std::sync::Arc::new(std::sync::Mutex::new(service.channels().clone()));
+
+    let instances = start_instances(
+        &daemon,
+        &shutdown_rx,
+        &registry,
+        &metrics,
+        &mut service,
+        &senders,
+    )
+    .await?;
 
     // The control socket is served after the instances exist, so the first
     // `status` a client asks for already describes the real thing.
@@ -105,18 +128,37 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
             // `SIGHUP` reloads and continues. Once the sequence above has been
             // chosen, a second termination signal is ignored, which keeps
             // shutdown idempotent (`I-31`).
-            _ = reload.recv() => match reload_config(&daemon.options().config_path) {
-                Ok(()) => {
-                    metrics.record_reload("accepted");
-                    announce(&daemon, "reload_accepted");
-                    tracing::warn!("the configuration was accepted but is not applied yet");
+            _ = reload.recv() => {
+                tracing::info!("reload requested");
+                let outcome = crate::runner::reload(
+                    &daemon.options().config_path,
+                    &locked(&active_config),
+                    &registry,
+                    &senders,
+                    registry.node_status().generation,
+                );
+                match outcome {
+                    ReloadOutcome::Applied { generation, reloadable, added, config } => {
+                        metrics.record_reload("accepted");
+                        announce(&daemon, "reload_accepted");
+                        // The running configuration is replaced, so the next
+                        // reload compares against what is actually running and
+                        // not against the file the daemon started from.
+                        *locked(&active_config) = *config;
+                        tracing::info!(
+                            generation,
+                            reconfigured = reloadable.len(),
+                            started = added.len(),
+                            "reload applied"
+                        );
+                    }
+                    ReloadOutcome::Rejected { reason } => {
+                        metrics.record_reload("rejected");
+                        announce(&daemon, "reload_rejected");
+                        tracing::error!(reason = %reason, "reload rejected; the running configuration is unchanged");
+                    }
                 }
-                Err(reason) => {
-                    metrics.record_reload("rejected");
-                    announce(&daemon, "reload_rejected");
-                    tracing::error!(reason = %reason, "reload rejected; the running configuration is unchanged");
-                }
-            },
+            }
         }
     };
 
@@ -150,6 +192,9 @@ async fn start_instances(
     registry: &std::sync::Arc<crate::StatusRegistry>,
     metrics: &std::sync::Arc<crate::Metrics>,
     service: &mut crate::ControlService,
+    senders: &std::sync::Arc<
+        std::sync::Mutex<std::collections::BTreeMap<String, crate::InstructionSender>>,
+    >,
 ) -> Result<Vec<RunningInstance>, DaemonError> {
     let mut running = Vec::new();
     for (plan, ownership) in plans(daemon.config()) {
@@ -201,7 +246,10 @@ async fn start_instances(
         let (sender, receiver) = crate::channel();
         let (reader_sender, reader_receiver) = crate::channel();
         registry.publish(actor.publish_status());
-        service.register(plan.name.clone(), sender);
+        service.register(plan.name.clone(), sender.clone());
+        if let Ok(mut channels) = senders.lock() {
+            channels.insert(plan.name.clone(), sender);
+        }
 
         let reader = transport.spawn_reader(reader_sender);
         let watch = shutdown_signal.clone();
@@ -245,6 +293,9 @@ fn start_instances(
     _registry: &std::sync::Arc<crate::StatusRegistry>,
     _metrics: &std::sync::Arc<crate::Metrics>,
     _service: &mut crate::ControlService,
+    _senders: &std::sync::Arc<
+        std::sync::Mutex<std::collections::BTreeMap<String, crate::InstructionSender>>,
+    >,
 ) -> impl std::future::Future<Output = Result<Vec<RunningInstance>, DaemonError>> {
     std::future::ready(Err(DaemonError::TransportUnavailable))
 }
@@ -400,20 +451,128 @@ fn start_control_socket(
     std::future::ready(Ok(()))
 }
 
-/// Re-reads the configuration file and reports the first reason it was
-/// rejected, if any.
+/// Takes a lock, recovering from poisoning.
 ///
-/// A rejected reload leaves the running configuration untouched (`I-09`).
-fn reload_config(path: &std::path::Path) -> Result<(), String> {
-    let config = load(path, false).map_err(|error| error.to_string())?;
-    validate(&config, &ValidationContext::permissive()).map_err(|violations| {
-        violations
+/// A panic while recording a reload outcome must not stop a node that owns a
+/// VIP, so the data is taken even from a poisoned lock. The worst case is a
+/// reload compared against a stale configuration, which the next reload
+/// corrects.
+fn locked<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// What a reload decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReloadOutcome {
+    /// Every instance absorbed the change.
+    Applied {
+        /// The new generation.
+        generation: u64,
+        /// The instances that were reconfigured in place.
+        reloadable: Vec<String>,
+        /// The instances that were started.
+        added: Vec<String>,
+        /// The configuration that is now running, which the next reload compares
+        /// against. Boxed because it is much larger than the other variants.
+        config: Box<Config>,
+    },
+    /// Nothing was changed, for the stated reason.
+    Rejected {
+        /// Why, in the words an operator would use.
+        reason: String,
+    },
+}
+
+/// Reads the candidate configuration, plans the change, and applies it.
+///
+/// A reload is a transaction (`I-09`, `R-46`): if any instance would need a
+/// restart, nothing is applied and the refusal names the instance and the change.
+/// The caller keeps the configuration that is actually running, so the next
+/// reload compares against reality rather than against the file it started from.
+pub fn reload(
+    path: &std::path::Path,
+    running: &Config,
+    registry: &crate::StatusRegistry,
+    senders: &std::sync::Mutex<std::collections::BTreeMap<String, crate::InstructionSender>>,
+    current_generation: u64,
+) -> ReloadOutcome {
+    let candidate = match load(path, false) {
+        Ok(candidate) => candidate,
+        Err(error) => {
+            return ReloadOutcome::Rejected {
+                reason: error.to_string(),
+            };
+        }
+    };
+    if let Err(violations) = validate(&candidate, &ValidationContext::permissive()) {
+        let reason = violations
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
-            .join("; ")
-    })?;
-    Ok(())
+            .join("; ");
+        return ReloadOutcome::Rejected { reason };
+    }
+
+    let plan = crate::reload::plan(running, &candidate);
+    if !plan.is_applicable() {
+        // Nothing has been touched at this point, and nothing will be.
+        return ReloadOutcome::Rejected {
+            reason: plan.refusals().join("; "),
+        };
+    }
+
+    let generation = current_generation + 1;
+    let mut reloadable = Vec::new();
+    for (name, change) in &plan.changes {
+        if !matches!(change, crate::reload::Change::Reloadable { .. }) {
+            continue;
+        }
+        let Some(instance) = candidate
+            .instances
+            .iter()
+            .find(|instance| &instance.name == name)
+        else {
+            continue;
+        };
+        let Some(sender) = senders.lock().ok().and_then(|map| map.get(name).cloned()) else {
+            continue;
+        };
+        let instruction = crate::Instruction::Reload {
+            plan: crate::reload::plan_for(instance),
+            ownership: ownership_for(instance),
+            generation: highland_core::state::Generation::from_number(generation),
+        };
+        // `try_send`, not `send`: a reload must not wait behind a flood of
+        // advertisements, and an undelivered reload is reported as unapplied
+        // rather than half-applied.
+        if sender.try_send(instruction).is_ok() {
+            reloadable.push(name.clone());
+        }
+    }
+
+    registry.set_generation(generation);
+    ReloadOutcome::Applied {
+        generation,
+        reloadable,
+        added: plan.added().into_iter().map(ToOwned::to_owned).collect(),
+        config: Box::new(candidate),
+    }
+}
+
+/// The addresses one configured instance manages.
+fn ownership_for(instance: &InstanceConfig) -> crate::executor::Ownership {
+    let addresses = instance
+        .vip_addresses()
+        .iter()
+        .filter_map(|text| IpCidr::parse(text).ok())
+        .collect();
+    crate::executor::Ownership::new(
+        instance.interface.clone(),
+        addresses,
+        PeerSet::new(instance.network.peers.clone()),
+    )
 }
 
 fn announce(daemon: &Daemon, reason: &'static str) {
@@ -454,7 +613,7 @@ pub fn plans(config: &Config) -> Vec<(InstancePlan, Ownership)> {
 /// executor needs, which the configuration validator should already have
 /// caught. Reporting it here rather than panicking keeps a bad reload from
 /// taking the daemon down (`R-24`).
-pub fn plan_for(instance: &InstanceConfig) -> Result<(InstancePlan, Ownership), String> {
+fn plan_for(instance: &InstanceConfig) -> Result<(InstancePlan, Ownership), String> {
     let addresses: Vec<IpCidr> = instance
         .vip_addresses()
         .iter()
@@ -558,10 +717,33 @@ address = "192.0.2.10/24"
         }
     }
 
+    /// A configuration with no instances, which is the starting point for a
+    /// rejection test: nothing can be applied to it.
+    fn empty_config() -> Config {
+        highland_config::parse("schema_version = 1\n[node]\nname = \"node-a\"\n")
+            .expect("the fixture parses")
+    }
+
     #[test]
-    fn an_unreadable_reload_reports_why() {
-        let error = reload_config(std::path::Path::new("/nonexistent/highland.toml"))
-            .expect_err("the file is absent");
-        assert!(error.contains("could not read") || error.contains("No such file"));
+    fn an_unreadable_reload_is_rejected_and_changes_nothing() {
+        let registry = std::sync::Arc::new(crate::StatusRegistry::new("node-a"));
+        let senders = std::sync::Mutex::new(std::collections::BTreeMap::new());
+        let outcome = reload(
+            std::path::Path::new("/nonexistent/highland.toml"),
+            &empty_config(),
+            &registry,
+            &senders,
+            0,
+        );
+
+        assert!(
+            matches!(outcome, ReloadOutcome::Rejected { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            registry.node_status().generation,
+            0,
+            "a rejected reload bumps nothing"
+        );
     }
 }

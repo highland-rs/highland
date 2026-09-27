@@ -140,7 +140,7 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Run {
             config,
             allow_insecure_config,
-        } => run_daemon::exec_daemon(config, *allow_insecure_config),
+        } => run_daemon::exec_daemon(config, *allow_insecure_config).map(|()| ExitCode::FAILURE),
         Command::ForceTransition {
             instance,
             role,

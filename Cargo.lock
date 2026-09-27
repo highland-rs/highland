@@ -335,6 +335,7 @@ dependencies = [
  "highland-net",
  "highland-observe",
  "highland-vrrp",
+ "nix 0.31.3",
  "serde_json",
  "thiserror",
  "tokio",

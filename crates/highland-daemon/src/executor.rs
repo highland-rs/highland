@@ -189,6 +189,18 @@ where
         self.metrics = Some(metrics);
     }
 
+    /// Replaces the plan and the addresses this instance manages.
+    ///
+    /// The backend, the transport, and the resolved interface all stay, because a
+    /// reload is not a restart: the socket stays open and the addresses stay put
+    /// (`R-48`).
+    pub fn reconfigure(&mut self, plan: InstancePlan, ownership: Ownership) {
+        // The resolved interface index stays: a change of interface is
+        // classified as a restart, so the cached index is still correct here.
+        self.plan = plan;
+        self.ownership = ownership;
+    }
+
     /// Records one metric, when metrics are attached.
     ///
     /// A test drives an executor with no metrics rather than a zeroed registry,

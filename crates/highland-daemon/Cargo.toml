@@ -36,6 +36,9 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 highland-vrrp.workspace = true
+# Only to raise a signal in a test: `kill(1)` is not present in the slim image the
+# kernel tests run in, and a test should not depend on a shell tool being there.
+nix = { workspace = true, features = ["signal"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 

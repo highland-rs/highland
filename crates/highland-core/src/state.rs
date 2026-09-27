@@ -227,6 +227,13 @@ impl Generation {
         Self(self.0 + 1)
     }
 
+    /// Creates a generation from a number, for a value that is counted
+    /// elsewhere such as a reload.
+    #[must_use]
+    pub fn from_number(value: u64) -> Self {
+        Self(value)
+    }
+
     /// Returns the numeric value.
     #[must_use]
     pub fn get(self) -> u64 {

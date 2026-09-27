@@ -22,6 +22,7 @@ mod logging;
 mod metrics;
 mod metrics_server;
 mod options;
+mod reload;
 mod runner;
 
 mod shutdown;
@@ -37,7 +38,8 @@ pub use executor::{
 pub use metrics::{CONTENT_TYPE, Metrics, render};
 pub use metrics_server::{MetricsError, MetricsServer};
 pub use options::{InstancePlan, Options, OptionsError};
-pub use runner::{TRANSPORT_AVAILABLE, plan_for, plans, run};
+pub use reload::{Change, Plan, classify, plan, plan_for};
+pub use runner::{ReloadOutcome, TRANSPORT_AVAILABLE, plans, reload, run};
 
 pub use shutdown::{DEFAULT_SHUTDOWN_BUDGET, ShutdownPlan, ShutdownReason};
 #[cfg(target_os = "linux")]

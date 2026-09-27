@@ -43,6 +43,15 @@ pub enum Instruction {
     Relinquish,
     /// An operator forced a role change.
     ForceRole(highland_core::state::Role),
+    /// A reload the planner accepted, carrying the new generation.
+    Reload {
+        /// The new parameters for the instance.
+        plan: crate::options::InstancePlan,
+        /// The addresses the instance manages.
+        ownership: crate::executor::Ownership,
+        /// The generation these parameters belong to.
+        generation: highland_core::state::Generation,
+    },
 }
 
 impl Instruction {
@@ -88,6 +97,7 @@ impl Instruction {
             Instruction::Resume => "resume",
             Instruction::Relinquish => "relinquish",
             Instruction::ForceRole(_) => "force_transition",
+            Instruction::Reload { .. } => "reload",
         }
     }
 }
@@ -183,6 +193,18 @@ where
     B: NetworkBackend,
     T: crate::executor::Transport,
 {
+    if let Instruction::Reload {
+        plan,
+        ownership,
+        generation,
+    } = instruction
+    {
+        // Applied in place: the role, the ownership, and the armed timers all
+        // survive, which is what makes a reload a reload (`R-48`).
+        let _ = actor.reconfigure(plan, ownership, generation);
+        return;
+    }
+
     let event = match instruction {
         Instruction::Event(event) => event,
         Instruction::Health(summary) => Event::HealthChanged(summary),
@@ -190,7 +212,13 @@ where
         // that stops sending is already covered by the master-down timer, and
         // inventing an event for it would give the wire a second way to change a
         // role.
-        Instruction::PeerReachable | Instruction::PeerUnreachable => return,
+        // Neither a peer becoming reachable or unreachable, nor a reload, is an
+        // event the machine takes: the first is already covered by the
+        // master-down timer, and the second is applied above rather than
+        // delivered as an event.
+        Instruction::PeerReachable | Instruction::PeerUnreachable | Instruction::Reload { .. } => {
+            return;
+        }
         Instruction::Pause => Event::OperatorPauseRequested,
         Instruction::Resume => Event::OperatorResumeRequested,
         Instruction::Relinquish => Event::OperatorRelinquishRequested,

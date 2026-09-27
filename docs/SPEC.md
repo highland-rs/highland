@@ -819,15 +819,28 @@ On reload the daemon MUST, in order:
 
 ### 10.6 Change classification
 
+Every instance in a candidate configuration is compared with the running one and
+classified. A reload is applied only if **no** instance needs a restart: a partial
+reload that leaves one instance on old settings is the situation "transactional"
+exists to prevent (`I-09`).
+
 | Change | Classification |
 |---|---|
 | `priority`, `preempt`, `preempt_delay`, `startup_delay`, `health`, `check` | `Reloadable` |
-| `advertisement_interval` | `Reloadable` when the instance is not `MASTER`; `RestartRequired` when it is `MASTER` |
+| `advertisement_interval` | `Reloadable` when the instance is not `MASTER`; `RestartRequired` when it is `MASTER`, because the running advertisement timer was armed from the old value |
 | `peers` | `Reloadable` |
-| `interface`, `vrid` | `RestartRequired` |
+| `interface`, `vrid`, `network.mode` | `RestartRequired`: the socket and the identity of the instance are bound at startup |
 | Adding or removing a VIP | `RestartRequired` |
-| Changing `network.mode` | `RestartRequired` |
-| Removing an instance | `RestartRequired`; the instance relinquishes its VIPs before the task ends |
+| Removing an instance | `RestartRequired` |
+| Adding an instance | Applied by starting it, which is not a restart of anything |
+
+- `R-46` A reload MUST be rejected as a whole when any instance is
+  `RestartRequired`, and the rejection MUST name the instance and the change.
+- `R-47` A reload that is applied MUST bump the generation, and every result
+  carrying an older generation MUST be discarded (`I-12`).
+- `R-48` An instance classified `Reloadable` MUST be reconfigured in place, and
+  its role, its ownership, and its timers MUST survive the change. A reload is not
+  a restart.
 
 - `I-13` When a `MASTER` instance must change its VIP set, it MUST first stop advertising,
   then remove the departed VIPs, then add the new VIPs, then resume advertising. The

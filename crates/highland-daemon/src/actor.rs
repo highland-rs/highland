@@ -18,6 +18,7 @@ use std::sync::Arc;
 
 use highland_core::clock::Clock;
 use highland_core::machine::{InstanceStateMachine, PendingOwnership};
+use highland_core::state::Generation;
 use highland_core::state::{Action, Event, Role, TimerId};
 use highland_net::NetworkBackend;
 use highland_vrrp::Advertisement;
@@ -98,6 +99,41 @@ where
     #[must_use]
     pub fn machine(&self) -> &InstanceStateMachine<C> {
         &self.machine
+    }
+
+    /// Reconfigures the instance in place, as a reload does.
+    ///
+    /// The role, the ownership, and the armed timers survive: a reload changes
+    /// the parameters used by the next decision, not the current state
+    /// (`R-48`). A generation older than the one the instance already runs is
+    /// refused, so a reload that arrives out of order cannot undo a newer one
+    /// (`I-12`).
+    pub fn reconfigure(
+        &mut self,
+        plan: crate::options::InstancePlan,
+        ownership: crate::executor::Ownership,
+        generation: Generation,
+    ) -> bool {
+        use highland_core::state::InstanceConfig;
+
+        if generation < self.machine.generation() {
+            return false;
+        }
+        self.machine.reconfigure(
+            InstanceConfig {
+                name: plan.name.clone(),
+                vrid: plan.vrid,
+                priority: plan.priority,
+                advertisement_interval: plan.advertisement_interval,
+                startup_delay: plan.startup_delay,
+                preempt: plan.preempt,
+                preempt_delay: plan.preempt_delay,
+                ..InstanceConfig::default()
+            },
+            generation,
+        );
+        self.executor.reconfigure(plan, ownership);
+        true
     }
 
     /// Sets the interface's primary addresses, which the equal-priority

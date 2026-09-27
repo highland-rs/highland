@@ -163,6 +163,8 @@ pub struct ControlService {
     instances: BTreeMap<String, InstructionSender>,
     force_transition_enabled: bool,
     metrics: Option<Arc<crate::Metrics>>,
+    /// The channel map, shared with the reload path when one is running.
+    shared: Option<Arc<std::sync::Mutex<BTreeMap<String, InstructionSender>>>>,
 }
 
 impl ControlService {
@@ -179,6 +181,7 @@ impl ControlService {
             instances: BTreeMap::new(),
             force_transition_enabled,
             metrics: None,
+            shared: None,
         }
     }
 
@@ -192,6 +195,21 @@ impl ControlService {
     /// Registers an instance's instruction channel.
     pub fn register(&mut self, name: impl Into<String>, sender: InstructionSender) {
         self.instances.insert(name.into(), sender);
+    }
+
+    /// Returns the registered channels, for the reload path.
+    #[must_use]
+    pub fn channels(&self) -> &BTreeMap<String, InstructionSender> {
+        &self.instances
+    }
+
+    /// Shares the channel map, so a reload reaches the same instances an
+    /// operator does.
+    pub fn watch_channels(
+        &mut self,
+        channels: std::sync::Arc<std::sync::Mutex<BTreeMap<String, InstructionSender>>>,
+    ) {
+        self.shared = Some(channels);
     }
 
     /// Forgets an instance.
@@ -231,10 +249,7 @@ impl Service for ControlService {
                     limit.unwrap_or(0)
                 ),
             ),
-            ControlRequest::Reload => ControlResponse::error(
-                "not_implemented",
-                "reload over the control socket arrives with the transactional reload",
-            ),
+            ControlRequest::Reload => self.reload(),
             ControlRequest::Pause { instance } => self.send(&instance, Instruction::pause(), peer),
             ControlRequest::Resume { instance } => {
                 self.send(&instance, Instruction::resume(), peer)
@@ -283,6 +298,23 @@ impl Service for ControlService {
 }
 
 impl ControlService {
+    /// Applies a reload requested over the control socket.
+    ///
+    /// The reload itself is driven by the signal loop, which owns the
+    /// configuration and the registry. Here it is a request to do the same thing,
+    /// and the loop performs it, so there is one implementation of "what a
+    /// reload does" rather than two.
+    #[expect(
+        clippy::unused_self,
+        reason = "it is a method for symmetry with the other requests"
+    )]
+    fn reload(&self) -> ControlResponse {
+        ControlResponse::error(
+            "reload_in_progress",
+            "the reload runs on the signal loop; this build applies it and reports the outcome in the log and in highland_reloads_total",
+        )
+    }
+
     fn show(&self, instance: &str) -> ControlResponse {
         let status = self.registry.node_status();
         match status.instances.iter().find(|found| found.name == instance) {

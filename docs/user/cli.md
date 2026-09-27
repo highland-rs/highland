@@ -79,6 +79,9 @@ The configuration is loaded and validated first, so a broken file reports the
 broken file rather than a problem with the daemon. Each instance then binds a raw
 VRRP socket, opens the control socket, and runs until a signal arrives.
 
+`highland run` **replaces** itself with the daemon, so a signal sent to
+`highland run` reaches the process that owns the sockets.
+
 ```console
 $ highland run --config /etc/highland/config.toml
 INFO highland started node=node-a instances=1
@@ -90,6 +93,13 @@ INFO control socket listening socket=/run/highland/control.sock
 On a build with no raw socket the daemon refuses to start, and says so. A process
 that claimed to be a VRRP router while sending nothing would be worse than one
 that declines to run.
+
+A reload is a transaction. `highland reload` is not wired to the socket in this
+build, but `SIGHUP` is: the file is re-read, every instance is classified, and
+the change is applied only if no instance would need a restart. A refusal names the
+instance and the change, and nothing is touched. A reloadable instance is
+reconfigured in place, so the role, the address, and the running timers all
+survive.
 
 Highland handles three signals:
 
@@ -214,12 +224,12 @@ them.
 |---|---|
 | `version` | Works |
 | `check-config` | Works |
-| `run` | Works |
+| `run` | Works, and becomes the daemon rather than supervising it |
 | `status`, `show` | Work |
 | `pause`, `resume`, `relinquish` | Work |
 | `force-transition` | Works, and needs the daemon started with `--enable-force-transition` |
+| `reload` | `SIGHUP` applies the change; over the socket it answers "the reload runs on the signal loop" |
 | `events` | Answers "not implemented" rather than hanging |
-| `reload` | Answers "not implemented": a reload is validated and reported, but not yet applied to running instances |
 
 `force-transition` additionally requires the daemon to have been started with
 `--enable-force-transition`, and refuses without an explicit confirmation.

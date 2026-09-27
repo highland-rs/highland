@@ -7,20 +7,20 @@ use std::process::Command;
 
 use anyhow::Context as _;
 
-/// Runs the daemon in the foreground by executing the daemon binary.
+/// Runs the daemon in the foreground by **replacing** this process with it.
 ///
-/// The CLI does not reimplement daemon startup: it locates the daemon binary
-/// next to itself, forwards the arguments, and propagates the exit code
-/// (SPEC.md, §9.9).
+/// The CLI does not reimplement daemon startup: it locates the daemon binary next
+/// to itself and hands over (SPEC.md, §9.9).
 ///
-/// # Errors
-///
-/// Returns a message when the daemon binary is missing next to this executable,
-/// or when it could not be started.
-pub(crate) fn exec_daemon(
-    config: &Path,
-    allow_insecure_config: bool,
-) -> anyhow::Result<std::process::ExitCode> {
+/// Replacing rather than spawning is deliberate. A child daemon would make this
+/// process a second supervisor in front of the real one, and a signal sent to
+/// `highland run` would land on the wrong process: `SIGHUP` would never reach
+/// the daemon that owns the sockets, and a `SIGTERM` would stop the CLI while
+/// the daemon kept forwarding addresses. After the handover there is exactly one
+/// process, and it is the daemon.
+pub(crate) fn exec_daemon(config: &Path, allow_insecure_config: bool) -> anyhow::Result<()> {
+    use std::os::unix::process::CommandExt as _;
+
     let current = std::env::current_exe().context("locating the highland executable")?;
     let daemon = current.with_file_name(format!("highland-daemon{}", std::env::consts::EXE_SUFFIX));
 
@@ -38,18 +38,10 @@ pub(crate) fn exec_daemon(
         command.arg("--allow-insecure-config");
     }
 
-    let status = command
-        .status()
-        .with_context(|| format!("starting {}", daemon.display()))?;
-    Ok(exit_code(status))
-}
-
-fn exit_code(status: std::process::ExitStatus) -> std::process::ExitCode {
-    if status.success() {
-        std::process::ExitCode::SUCCESS
-    } else {
-        std::process::ExitCode::FAILURE
-    }
+    // Only reached when the handover fails, which is the one case an error is
+    // for. On success this never returns.
+    let error = command.exec();
+    Err(anyhow::Error::new(error).context(format!("running {}", daemon.display())))
 }
 
 #[cfg(test)]
@@ -57,12 +49,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_missing_daemon_binary_is_reported_clearly() {
-        // The test binary is not named highland, so no daemon sits next to it.
+    fn a_missing_daemon_binary_is_reported_rather_than_panicked() {
+        // The test binary is not called `highland`, so no daemon sits next to it.
         let error = match exec_daemon(Path::new("/etc/highland/config.toml"), false) {
-            Ok(_) => None,
+            Ok(()) => None,
             Err(error) => Some(error.to_string()),
         };
-        assert!(matches!(error, Some(message) if message.contains("highland-daemon")));
+        let message = error.unwrap_or_default();
+        assert!(
+            message.contains("highland-daemon"),
+            "unexpected outcome: {message}"
+        );
     }
 }

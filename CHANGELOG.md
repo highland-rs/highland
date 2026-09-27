@@ -325,13 +325,40 @@ they are.
 A poisoned metrics lock is recovered from rather than propagated: a panic in a
 counter must not stop a node that owns a VIP.
 
+### Transactional reload
+
+A reload is a transaction, and both halves of that are now tested against a
+running node.
+
+- `highland_daemon::reload::plan` compares the running configuration with a
+  candidate and classifies every instance as unchanged, reloadable, added, or
+  needing a restart. It is a pure function, so it is tested exhaustively without
+  a kernel, a socket, or a daemon.
+- **A reload is applied only if no instance needs a restart.** A partial reload
+  that leaves one instance on old settings is the state the word
+  "transactional" exists to prevent (`I-09`, `R-46`), and a refusal names the
+  instance and the change.
+- `advertisement_interval` is a restart, not a reload: the running advertisement
+  timer was armed from the old value, so changing it underneath a master would
+  leave the timer firing at the old rate.
+- A reloadable instance is reconfigured **in place**: the role, the ownership,
+  and the armed timers all survive. A reload is not a restart (`R-48`), and the
+  test asserts the address does not move.
+- Applying a reload bumps the generation, so a result still carrying the old one
+  is discarded (`I-12`, `R-47`), and a reload already out of order is refused.
+- The running configuration is replaced, so the next reload compares against
+  what is actually running rather than against the file the daemon started from.
+
 ### Not delivered, and why
 
-- **Transactional reload.** `SIGHUP` re-reads and re-validates the file and
-  reports the outcome, and the outcome is counted, but the result is not applied
-  to running instances, which is most of what "transactional" means. `highland
-  reload` and the control `reload` operation answer "not implemented" rather than
-  pretending.
+- **`highland reload` over the control socket** still answers "the reload runs
+  on the signal loop". The reload itself is implemented and `SIGHUP` drives it;
+  what is missing is routing the control request to the signal loop, so there is
+  one implementation of "what a reload does" rather than two.
+- **Adding a new instance on reload** is planned and classified, but the runner
+  reports it rather than starting it; instances are only created at startup.
+- **The event stream**, `highland events` is wired to the socket and gets an
+  explicit "not implemented" rather than hanging.
 - **The event stream.** `highland events` is wired to the socket and gets an
   explicit "not implemented" rather than silence.
 - **Packet loss, delay, and reordering** between the nodes. The harness has one

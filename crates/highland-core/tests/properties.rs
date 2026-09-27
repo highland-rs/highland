@@ -19,7 +19,7 @@ use highland_core::health::{HealthPolicy, HealthPolicyConfig, HealthSummary, eva
 use highland_core::machine::{InstanceStateMachine, PendingOwnership};
 use highland_core::state::{
     Action, ActionKind, Event, Generation, InstanceConfig, PeerAdvertisement, Role, TimerId,
-    master_down_interval,
+    master_down_interval, skew_time,
 };
 use highland_core::timer::{RetryPolicy, TimerSet};
 use proptest::prelude::*;
@@ -570,19 +570,70 @@ fn arb_candidate() -> impl Strategy<Value = Candidate> {
 // ----- timer arithmetic properties ---------------------------------------
 
 proptest! {
-    /// The takeover budget is exactly three intervals plus the skew allowance.
+    /// The takeover budget is exactly three intervals plus the RFC's skew term.
     #[test]
-    fn the_takeover_budget_follows_the_formula(centis in 1u64..=255) {
+    fn the_takeover_budget_follows_the_formula(centis in 1u64..=4095, priority in 0u8..=255) {
         let interval = Duration::from_millis(centis * 10);
-        let expected = interval * 3 + Duration::from_millis(10);
-        prop_assert_eq!(master_down_interval(&interval).unwrap(), expected);
+        let expected = interval * 3 + skew_time(priority, interval);
+        prop_assert_eq!(master_down_interval(priority, interval).unwrap(), expected);
     }
 
-    /// The budget grows with the advertisement interval.
+    /// The budget grows with the advertisement interval, for every priority.
     #[test]
-    fn a_shorter_interval_gives_a_shorter_budget(shorter in 1u64..200, longer in 200u64..255) {
-        let small = master_down_interval(&Duration::from_millis(shorter * 10)).unwrap();
-        let large = master_down_interval(&Duration::from_millis(longer * 10)).unwrap();
+    fn a_shorter_interval_gives_a_shorter_budget(
+        shorter in 1u64..2000,
+        longer in 2000u64..4095,
+        priority in 1u8..=255,
+    ) {
+        let small = master_down_interval(priority, Duration::from_millis(shorter * 10)).unwrap();
+        let large = master_down_interval(priority, Duration::from_millis(longer * 10)).unwrap();
         prop_assert!(small < large);
+    }
+
+    /// The budget is never shorter than three intervals, and never longer than
+    /// four, for any priority and interval in range. The skew term is at most one
+    /// interval, because it is `(256 - priority) / 256` of it.
+    #[test]
+    fn the_budget_stays_within_three_to_four_intervals(
+        centis in 1u64..=4095,
+        priority in 0u8..=255,
+    ) {
+        let interval = Duration::from_millis(centis * 10);
+        let budget = master_down_interval(priority, interval).unwrap();
+        prop_assert!(budget >= interval * 3);
+        prop_assert!(budget <= interval * 4, "Skew_Time is at most one interval");
+    }
+
+    /// Skew never increases as priority rises.
+    #[test]
+    fn skew_never_increases_as_priority_rises(pair in any::<[u8; 2]>()) {
+        let interval = Duration::from_secs(1);
+        let (first, second) = if pair[0] <= pair[1] { (pair[0], pair[1]) } else { (pair[1], pair[0]) };
+        prop_assert!(skew_time(first, interval) >= skew_time(second, interval));
+    }
+
+    /// The skew term is a fraction of the interval and never exceeds it, which
+    /// is what bounds the takeover budget at four intervals.
+    #[test]
+    fn skew_never_exceeds_the_interval(centis in 1u64..=4095, priority in 0u8..=255) {
+        let interval = Duration::from_millis(centis * 10);
+        let skew = skew_time(priority, interval);
+        prop_assert!(skew <= interval);
+        // The fraction is (256 - priority) / 256, so the bound is tight at
+        // priority zero.
+        if priority == 0 && centis % 256 == 0 {
+            prop_assert_eq!(skew, interval);
+        }
+    }
+
+    /// The address owner has the smallest skew of any priority, which is what
+    /// makes a 255-priority takeover the fastest.
+    #[test]
+    fn the_address_owner_has_the_smallest_skew(centis in 1u64..=4095) {
+        let interval = Duration::from_millis(centis * 10);
+        let owner = skew_time(255, interval);
+        for priority in 1..=254u8 {
+            prop_assert!(owner <= skew_time(priority, interval));
+        }
     }
 }

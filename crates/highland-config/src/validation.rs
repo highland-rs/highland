@@ -18,10 +18,13 @@ use crate::model::{
     SUPPORTED_SCHEMA_VERSION,
 };
 
-/// The lowest advertisement interval accepted by `V-04`.
+/// The lowest advertisement interval accepted by `V-04`: one centisecond, the
+/// smallest value the wire field can carry.
 const MIN_ADVERTISEMENT_INTERVAL: DurationSpec = DurationSpec(Duration::from_millis(10));
-/// The highest advertisement interval accepted by `V-04`.
-pub const MAX_ADVERTISEMENT_INTERVAL: DurationSpec = DurationSpec(Duration::from_millis(2550));
+/// The highest advertisement interval accepted by `V-04`: 4095 centiseconds,
+/// which is the largest value the 12-bit `Max Adver Int` field can carry
+/// (RFC 5798 §5.2.7).
+pub const MAX_ADVERTISEMENT_INTERVAL: DurationSpec = DurationSpec(Duration::from_millis(40_950));
 /// The largest number of instances accepted by `V-27`.
 pub const MAX_INSTANCES: usize = 256;
 /// The largest total electoral weight accepted by `V-20`.

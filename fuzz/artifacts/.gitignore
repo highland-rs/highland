@@ -1,0 +1,4 @@
+# Crash artifacts are build output. A reproducer belongs in fuzz/corpus/, not
+# here.
+*
+!.gitignore

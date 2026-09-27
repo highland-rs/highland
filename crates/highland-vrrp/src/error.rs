@@ -3,7 +3,7 @@
 //! Protocol error types.
 //!
 //! Decoding untrusted input MUST NOT panic; every rejection is one of these
-//! variants (SPEC.md, `I-05`).
+//! variants (SPEC.md, `I-05`, `S-04`).
 
 use thiserror::Error;
 
@@ -23,6 +23,13 @@ pub enum ProtocolError {
         version: u8,
     },
 
+    /// The packet type is not one this version defines.
+    #[error("unexpected VRRP packet type {packet_type}")]
+    UnexpectedPacketType {
+        /// The raw type field.
+        packet_type: u8,
+    },
+
     /// A VRID of `0` was encountered.
     #[error("VRID {vrid} is outside {min}..={max}")]
     VridOutOfRange {
@@ -34,14 +41,25 @@ pub enum ProtocolError {
         max: u8,
     },
 
-    /// A priority outside the representable range was encountered.
-    #[error("priority {priority} is outside {min}..={max}")]
-    PriorityOutOfRange {
-        /// The rejected priority.
-        priority: u16,
-        /// The lowest representable priority.
+    /// The advertisement interval was outside the 12-bit field.
+    #[error("max adver int {centiseconds}cs is outside {min}..={max}cs")]
+    AdverIntOutOfRange {
+        /// The rejected value in centiseconds.
+        centiseconds: u16,
+        /// The lowest accepted value.
         min: u16,
-        /// The highest representable priority.
+        /// The highest accepted value.
+        max: u16,
+    },
+
+    /// The address count was outside the range the count field allows.
+    #[error("address count {count} is outside {min}..={max}")]
+    AddressCountOutOfRange {
+        /// The rejected count.
+        count: usize,
+        /// The lowest accepted count.
+        min: u16,
+        /// The highest accepted count.
         max: u16,
     },
 
@@ -68,11 +86,29 @@ pub enum EncodeError {
         reason: &'static str,
     },
 
-    /// The addresses did not all belong to the requested family.
-    #[error("cannot encode an advertisement for {expected} from the given addresses")]
+    /// The addresses did not belong to the requested family.
+    #[error("cannot encode an advertisement for {expected}: the addresses are {found}")]
     FamilyMismatch {
         /// The family the caller requested.
         expected: IpFamily,
+        /// The family the addresses belong to.
+        found: IpFamily,
+    },
+
+    /// The advertisement carried more addresses than the count field can hold.
+    #[error("an advertisement carries at most 255 addresses, not {count}")]
+    TooManyAddresses {
+        /// The number of addresses supplied.
+        count: usize,
+    },
+
+    /// The checksum could not be computed because the packet's addresses are
+    /// unknown. An IPv6 VRRP checksum covers them, so producing a value without
+    /// them would produce one that does not interoperate.
+    #[error("the {family} checksum needs the packet's source and destination addresses")]
+    UndecidableChecksum {
+        /// The family whose checksum is undecidable.
+        family: IpFamily,
     },
 }
 
@@ -100,21 +136,41 @@ pub enum DecodeError {
         reason: String,
     },
 
-    /// The packet declared a length inconsistent with its contents.
-    #[error("declared length {declared} is inconsistent with the {family} address count {count}")]
+    /// The count field disagreed with the message length.
+    #[error(
+        "count {count} implies a {declared}-byte {family} message, but the buffer is {actual} bytes"
+    )]
     InconsistentLength {
-        /// The length declared by the packet.
+        /// The length the count implies.
         declared: usize,
-        /// The address count declared by the packet.
+        /// The length of the buffer.
+        actual: usize,
+        /// The count found in the header.
         count: u8,
-        /// The family the packet was decoded as.
+        /// The family the message was decoded as.
         family: IpFamily,
     },
 
     /// The packet was a different protocol type.
-    #[error("unexpected packet type {packet_type}")]
+    #[error("unexpected VRRP packet type {packet_type}")]
     UnexpectedPacketType {
-        /// The IP protocol number found in the packet.
+        /// The type field found in the packet.
         packet_type: u8,
     },
+
+    /// The checksum did not match.
+    #[error("{family} checksum mismatch")]
+    ChecksumMismatch {
+        /// The family the packet was decoded as.
+        family: IpFamily,
+    },
+}
+
+/// The error returned when a checksum cannot be computed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
+pub enum ChecksumScopeError {
+    /// The scope needs the packet's addresses, which were not supplied.
+    #[error("the checksum scope needs the packet's addresses")]
+    Undecidable,
 }

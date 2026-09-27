@@ -106,6 +106,36 @@ a new outcome path.
 Separating the vocabulary from the logic is deliberate: a reader can learn what
 the machine can say without first reading what it does.
 
+### The protocol layer
+
+`highland-vrrp` follows RFC 5798, and the RFC is the authority: where the code
+and the specification disagree, the code is a bug. Implementing against the
+specification text rather than from memory turned up four errors in the
+specification itself, recorded in `SPEC.md` Appendix A:
+
+- the advertisement interval is a **12-bit** centisecond field, not an 8-bit one,
+  so the configured range is 10ms to 40.95s rather than 10ms to 2.55s;
+- `Skew_Time` is `((256 - priority) * Master_Adver_Interval) / 256`, not a
+  constant allowance, so the takeover delay is between three and four intervals;
+- a backup must **discard** a lower-priority advertisement rather than reset its
+  timer, which is what makes preemption converge;
+- there is one message format for both address families, with a 4-bit reserved
+  field sharing an octet with the interval.
+
+Decoding is two-phase. `Peek::read` parses the eight fixed octets without
+trusting the count, so a receiver can check the TTL, the source address, and the
+peer list first; the addresses are read only after the checksum verifies. A
+decoder that sized an allocation from an unauthenticated count field would be a
+denial-of-service vector, and the fuzz targets assert that it never does.
+
+The checksum scope is an explicit parameter. RFC 5798 §5.2.8 requires an RFC 2460
+pseudo-header without distinguishing the families, and interoperating
+implementations compute the plain message checksum for IPv4. Rather than pick one
+silently, `ChecksumScope` makes the choice visible, and its IPv6 default is
+`Undecidable`: producing a checksum without the addresses would produce one that
+fails only in the field, so it refuses. Milestone 8 settles the IPv4 case against
+a real implementation.
+
 ### Timers
 
 Deadlines are absolute, not relative. A relative delay would make the machine's
@@ -113,7 +143,7 @@ output depend on when the executor applied the previous action, which would
 break determinism (`R-27`). A test therefore asserts a deadline:
 
 ```rust
-clock.advance(Duration::from_millis(3010));
+clock.advance(Duration::from_millis(3410));
 assert!(machine.is_due(TimerId::MasterDown));
 ```
 
@@ -128,7 +158,7 @@ exact deadline:
 let clock = ManualClock::new();
 let mut machine = InstanceStateMachine::new(config, clock.clone());
 machine.handle(Event::Startup);
-assert_eq!(machine.deadline_of(TimerId::MasterDown), Some(Duration::from_millis(3010)));
+assert_eq!(machine.deadline_of(TimerId::MasterDown), Some(Duration::from_millis(3410)));
 ```
 
 `Master_Down_Interval` is `3 * adver_int + 10ms`, from RFC 5798. The state

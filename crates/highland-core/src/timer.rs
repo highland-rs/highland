@@ -203,11 +203,11 @@ mod tests {
     #[test]
     fn a_timer_is_due_only_at_or_after_its_deadline() {
         let mut timers = TimerSet::new();
-        timers.arm(TimerId::MasterDown, Duration::from_millis(3010));
+        timers.arm(TimerId::MasterDown, Duration::from_millis(3410));
 
-        assert!(!timers.is_due(TimerId::MasterDown, Duration::from_millis(3009)));
-        assert!(timers.is_due(TimerId::MasterDown, Duration::from_millis(3010)));
-        assert!(timers.is_due(TimerId::MasterDown, Duration::from_millis(3011)));
+        assert!(!timers.is_due(TimerId::MasterDown, Duration::from_millis(3409)));
+        assert!(timers.is_due(TimerId::MasterDown, Duration::from_millis(3410)));
+        assert!(timers.is_due(TimerId::MasterDown, Duration::from_millis(3411)));
     }
 
     #[test]

@@ -132,8 +132,80 @@ impl fmt::Display for TimerId {
     }
 }
 
-/// The clock-resolution allowance defined by RFC 5798.
-pub const SKEW_TIME: Duration = Duration::from_millis(10);
+/// The default advertisement interval, in centiseconds (RFC 5798 §6.1).
+pub const DEFAULT_ADVERTISEMENT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Returns `Skew_Time` in whole centiseconds, as RFC 5798 §6.1 defines it:
+///
+/// ```text
+/// Skew_Time = ((256 - priority) * Master_Adver_Interval) / 256
+/// ```
+///
+/// This is not a constant allowance. It grows as a node's priority falls, which
+/// is what keeps the takeover time within a bounded fraction of the master's
+/// interval for every priority. A node at priority 255 has zero skew; a node at
+/// priority 100 with a one-second master interval has 60 centiseconds.
+///
+/// # Examples
+///
+/// ```
+/// use highland_core::state::skew_time;
+/// use std::time::Duration;
+///
+/// // The address owner: no skew behind a one-second master.
+/// assert_eq!(skew_time(255, Duration::from_secs(1)), Duration::ZERO);
+/// // A default-priority backup behind the same master.
+/// assert_eq!(skew_time(100, Duration::from_secs(1)), Duration::from_millis(600));
+/// ```
+#[must_use]
+pub fn skew_time(priority: u8, master_advert_interval: Duration) -> Duration {
+    let interval_cs = u64::try_from(master_advert_interval.as_millis() / 10).unwrap_or(u64::MAX);
+    let skew_cs = u64::from(256u32.wrapping_sub(u32::from(priority))) * interval_cs / 256;
+    Duration::from_millis(skew_cs.saturating_mul(10))
+}
+
+/// Returns `Master_Down_Interval`, the delay before a `BACKUP` declares the
+/// master down (RFC 5798 §6.1):
+///
+/// ```text
+/// Master_Down_Interval = (3 * Master_Adver_Interval) + Skew_Time
+/// ```
+///
+/// `Master_Adver_Interval` is the interval the *master* claims, learned from its
+/// advertisements and initially equal to this node's own interval. It is
+/// therefore not simply a function of local configuration, which is why
+/// [`InstanceStateMachine`](crate::machine::InstanceStateMachine) tracks it
+/// rather than recomputing it from a single configuration value.
+///
+/// # Errors
+///
+/// Returns [`CoreError::TimerDurationOverflow`] when the result is not
+/// representable as a `Duration`.
+///
+/// # Examples
+///
+/// ```
+/// use highland_core::state::master_down_interval;
+/// use std::time::Duration;
+///
+/// // A one-second master at the address owner's priority.
+/// assert_eq!(master_down_interval(255, Duration::from_secs(1)).unwrap(), Duration::from_secs(3));
+/// // A one-second master at the default backup priority.
+/// assert_eq!(master_down_interval(100, Duration::from_secs(1)).unwrap(), Duration::from_millis(3600));
+/// ```
+pub fn master_down_interval(
+    local_priority: u8,
+    master_advert_interval: Duration,
+) -> Result<Duration, CoreError> {
+    master_advert_interval
+        .checked_mul(3)
+        .and_then(|scaled| scaled.checked_add(skew_time(local_priority, master_advert_interval)))
+        .ok_or(CoreError::TimerDurationOverflow {
+            timer: TimerId::MasterDown,
+            operation: "3 * Master_Adver_Interval + Skew_Time",
+            max: Duration::MAX,
+        })
+}
 
 /// A monotonically increasing configuration revision identifier.
 ///
@@ -488,32 +560,6 @@ impl Default for InstanceConfig {
     }
 }
 
-/// Returns `3 * adver_int + Skew_Time`, the `BACKUP` takeover delay.
-///
-/// # Errors
-///
-/// Returns [`CoreError::TimerDurationOverflow`] when the computation leaves the
-/// representable `Duration` range.
-///
-/// # Examples
-///
-/// ```
-/// use highland_core::state::master_down_interval;
-/// use std::time::Duration;
-///
-/// assert_eq!(master_down_interval(&Duration::from_secs(1)).unwrap(), Duration::from_millis(3010));
-/// ```
-pub fn master_down_interval(advert_interval: &Duration) -> Result<Duration, CoreError> {
-    advert_interval
-        .checked_mul(3)
-        .and_then(|scaled| scaled.checked_add(SKEW_TIME))
-        .ok_or(CoreError::TimerDurationOverflow {
-            timer: TimerId::MasterDown,
-            operation: "3 * adver_int + Skew_Time",
-            max: Duration::MAX,
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -601,16 +647,51 @@ mod tests {
     }
 
     #[test]
-    fn master_down_interval_follows_rfc_5798() {
+    fn the_takeover_delay_follows_rfc_5798() {
+        // Master_Down_Interval = 3 * Master_Adver_Interval + Skew_Time.
         assert_eq!(
-            master_down_interval(&Duration::from_millis(10)).unwrap(),
-            Duration::from_millis(40)
+            master_down_interval(255, Duration::from_secs(1)).unwrap(),
+            Duration::from_secs(3)
         );
         assert_eq!(
-            master_down_interval(&Duration::from_millis(2550)).unwrap(),
-            Duration::from_millis(7660)
+            master_down_interval(100, Duration::from_secs(1)).unwrap(),
+            Duration::from_millis(3600)
         );
-        assert!(master_down_interval(&Duration::MAX).is_err());
+        // 100cs master at priority 1: 300cs + ((255 * 10) / 256) = 300 + 9.
+        assert_eq!(
+            master_down_interval(1, Duration::from_millis(100)).unwrap(),
+            Duration::from_millis(390)
+        );
+        assert!(master_down_interval(100, Duration::MAX).is_err());
+    }
+
+    #[test]
+    fn skew_grows_as_the_priority_falls() {
+        let interval = Duration::from_secs(1);
+        assert_eq!(
+            skew_time(255, interval),
+            Duration::ZERO,
+            "the address owner has no skew"
+        );
+        // The skew term truncates to whole centiseconds, so the two highest
+        // priorities both have none.
+        assert_eq!(skew_time(254, interval), Duration::ZERO);
+        assert_eq!(skew_time(250, interval), Duration::from_millis(20));
+        assert_eq!(skew_time(200, interval), Duration::from_millis(210));
+        assert_eq!(skew_time(100, interval), Duration::from_millis(600));
+        assert_eq!(skew_time(1, interval), Duration::from_millis(990));
+    }
+
+    #[test]
+    fn skew_scales_with_the_master_interval() {
+        assert_eq!(
+            skew_time(100, Duration::from_millis(200)),
+            Duration::from_millis(120)
+        );
+        assert_eq!(
+            skew_time(200, Duration::from_millis(100)),
+            Duration::from_millis(20)
+        );
     }
 
     #[test]

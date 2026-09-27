@@ -87,6 +87,38 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --workspace --no-deps
 
+  fuzz:
+    name: fuzz smoke
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - fuzz_vrrp_ipv4_packet
+          - fuzz_vrrp_ipv6_packet
+          - fuzz_config_document
+          - fuzz_check_response
+          - fuzz_netlink_event
+          - fuzz_control_request
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: install cargo-fuzz
+        uses: taiki-e/install-action@cargo-fuzz
+      - name: build the target
+        run: cargo fuzz build ${{ matrix.target }}
+      # A smoke run, not a campaign. Its purpose is to prove the target builds
+      # under the sanitizer and that its assertions hold on fresh input, so a
+      # regression in a parser contract fails the build rather than being found
+      # in a later campaign. A failure uploads the reproducer as an artifact.
+      - name: run for 60 seconds
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=60 -rss_limit_mb=2560
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifact-${{ matrix.target }}
+          path: fuzz/artifacts
+
   # Network-namespace tests need root and a purpose-built topology. They are
   # enabled by the `netns-tests` feature once Milestone 4 lands the harness
   # (SPEC.md, `R-01`).

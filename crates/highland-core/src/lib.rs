@@ -45,12 +45,12 @@
 //! assert_eq!(machine.role(), Role::Backup);
 //! assert!(actions.contains(&Action::ArmTimer {
 //!     timer: TimerId::MasterDown,
-//!     deadline: Duration::from_millis(3010),
+//!     deadline: Duration::from_millis(3410),
 //! }));
 //!
 //! // Timers are absolute deadlines, so a test asserts the deadline rather than
 //! // sleeping. Firing one is an explicit event, not a side effect of time.
-//! clock.advance(Duration::from_millis(3010));
+//! clock.advance(Duration::from_millis(3410));
 //! assert!(machine.is_due(TimerId::MasterDown));
 //! machine.handle(Event::TimerExpired(TimerId::MasterDown));
 //! ```

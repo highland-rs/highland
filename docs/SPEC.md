@@ -249,9 +249,10 @@ platform.
 | `DISABLED` | Operator- or configuration-disabled; not participating; no timers armed |
 | VIP | Virtual IP address managed by an instance |
 | Advertisement | A VRRP packet announcing the current `MASTER` and its priority |
-| `adver_int` | The advertisement interval, encoded in centiseconds on the wire |
-| `Master_Down_Interval` | `3 × adver_int + Skew_Time`; the BACKUP takeover delay |
-| `Skew_Time` | The local timer-resolution allowance, at most 0.01s |
+| `Max Adver Int` | The 12-bit advertisement-interval field, in centiseconds (RFC 5798 §5.2.7) |
+| `Master_Adver_Interval` | The interval the current master claims, learned from its advertisements |
+| `Master_Down_Interval` | `3 × Master_Adver_Interval + Skew_Time`; the BACKUP takeover delay |
+| `Skew_Time` | `((256 − priority) × Master_Adver_Interval) / 256`, in whole centiseconds |
 | Address owner | The BackUp holding the highest-priority IP address on the segment, priority 255 |
 | Configured priority | The `priority` value from configuration |
 | Effective priority | Configured priority adjusted by health results (§12.2) |
@@ -355,12 +356,10 @@ highland/
 │   ├── network-ns/
 │   ├── packet-captures/
 │   └── compatibility/
-├── fuzz/                      # reserved; populated in Milestone 2
-│   ├── vrrp-packet/
-│   ├── config-parser/
-│   ├── check-response/
-│   ├── netlink-event/
-│   └── control-request/
+├── fuzz/                      # a package of its own: nightly plus a sanitizer
+│   ├── Cargo.toml
+│   ├── fuzz_targets/
+│   └── corpus/
 └── deploy/
     ├── systemd/
     ├── openrc/
@@ -722,7 +721,7 @@ ttl = 255             # must be 255
 | `instance.interface` | string | — | Required unless `defer_interface_binding` is enabled |
 | `instance.vrid` | integer 1–255 | — | Required |
 | `instance.priority` | integer 1–255 | 100 | 255 marks the address owner |
-| `instance.advertisement_interval` | duration | `1s` | Bounds in `V-04` |
+| `instance.advertisement_interval` | duration | `1s` | `10ms..=40950ms`, the range of the 12-bit `Max Adver Int` field (`V-04`) |
 | `instance.preempt` | bool | `true` | |
 | `instance.preempt_delay` | duration | `0s` | Forbidden when `preempt = false` |
 | `instance.startup_delay` | duration | `0s` | Delay before entering election |
@@ -761,7 +760,7 @@ corresponding unit test and a fixture in `tests/integration/config/`.
 | `V-01` | `vrid` is outside 1–255 |
 | `V-02` | `priority` is outside 1–255, or `priority = 0` is given |
 | `V-03` | An instance contains VIPs of more than one address family while `1.0` multi-family support is unavailable (that is, in `0.x`) |
-| `V-04` | `advertisement_interval` is below `10ms` or above `2550ms` |
+| `V-04` | `advertisement_interval` is below `10ms` or above `40950ms` |
 | `V-05` | Two instances share the same `name` |
 | `V-06` | Two instances share the same `(interface, vrid)` pair, regardless of family or mode |
 | `V-07` | In unicast mode, a VIP family has no configured peer of that family |
@@ -1112,7 +1111,7 @@ path, and an ID in `TimerId`.
 |---|---|---|---|
 | Startup delay | `Startup`, `InterfaceUp`, resume | `startup_delay` | Shutdown, pause |
 | Advertisement | Entering `MASTER` | `advertisement_interval` | Leaving `MASTER`, pause, interface down |
-| Master-down | Entering `BACKUP` | `3 × adver_int + Skew_Time` | Receiving a valid advertisement, leaving `BACKUP` |
+| Master-down | Entering `BACKUP` | `3 × Master_Adver_Interval + Skew_Time` | An advertisement the backup accepts, or a priority-zero advertisement, or leaving `BACKUP` |
 | Preemption delay | Seeing a lower-priority advert, `preempt = true` | `preempt_delay` | See §12.5 |
 | Hold-down | Entering `FAULT` | `hold_down`, default 10s | Operator action, reload |
 | Retry | Failed action | backoff, base 1s, cap 30s | Successful action, reload |
@@ -1127,16 +1126,36 @@ probe, which is what keeps `highland-core` free of check knowledge (`I-38`).
 
 ### 13.3 Timing budget `[I]`
 
-With `advertisement_interval = 1s`:
+`Master_Down_Interval` is not a constant. RFC 5798 §6.1 defines it as
+
+```text
+Skew_Time             = ((256 - priority) × Master_Adver_Interval) / 256
+Master_Down_Interval  = (3 × Master_Adver_Interval) + Skew_Time
+```
+
+in whole centiseconds, where `Master_Adver_Interval` is the interval the master
+claims and `priority` is the local node's effective priority. The skew term is
+therefore between zero and one interval, and the takeover delay is between three
+and four intervals.
+
+With a one-second master interval:
+
+| Local priority | `Skew_Time` | `Master_Down_Interval` |
+|---|---|---|
+| 255 (address owner) | 0s | 3.00s |
+| 150 | 0.41s | 3.41s |
+| 100 (default) | 0.60s | 3.60s |
+| 1 | 0.99s | 3.99s |
+
+Other budgets:
 
 | Event | Budget |
 |---|---|
-| Backup takes over after master silence | ≤ 3.06s from the last advertisement |
 | Master advertises after a health failure crosses threshold | ≤ `interval` + `timeout` + `debounce` |
-| Master takes over from a failed peer under `fail_closed` | ≤ 1.06s after the zero-priority advertisement |
+| Master takes over from a failed peer under `fail_closed` | ≤ one advertisement interval after the zero-priority advertisement |
 | Graceful shutdown to VIP removal | ≤ 5s default (`shutdown.budget`) |
 
-These numbers are derived from RFC 5798 §6.1 and MUST be asserted in the netns test suite.
+These numbers MUST be asserted in the netns test suite.
 
 ---
 
@@ -1528,7 +1547,11 @@ Each invariant is a named test requirement.
 15. `I-41` No task outlives its owning instance without explicit cancellation.
 16. `I-42` An instance never removes another instance's VIP.
 17. `I-43` A node never accepts an advertisement from a source that is not a configured peer.
-18. `I-44` Repeated advertisements reset the master-down timer and nothing else.
+18. `I-44` An advertisement from a peer of equal or greater priority resets the
+    master-down timer and updates the learned interval. An advertisement from a
+    lower-priority peer is discarded when preemption is enabled: it resets
+    nothing, per RFC 5798 §6.4.2. An advertisement carrying priority zero sets
+    the timer to `Skew_Time`.
 
 ---
 
@@ -1847,8 +1870,21 @@ is visible in a diff.
 Encoding, decoding, checksum, validation, IPv4 and IPv6 tests, fuzz targets, capture
 fixtures.
 
-Exit (`M-03`): fuzz targets run in CI for a defined smoke budget with no crash; captures
-in `tests/packet-captures/` decode successfully.
+Exit (`M-03`): all six fuzz targets build under the sanitizer and run for a
+defined smoke budget in CI with no crash, and every checked-in packet vector
+decodes. The budget is 60 seconds per target per run (`-max_total_time=60`,
+`-rss_limit_mb=2560`), which is a smoke test rather than a campaign: it proves a
+target builds and that its assertions hold on fresh input, so a regression in a
+parser contract fails the build. A longer campaign is a local activity, described
+in `docs/testing.md`.
+
+The packet vectors in `crates/highland-vrrp/tests/captures.rs` were produced by
+this project's encoder, which is stated in the file and in `docs/testing.md`.
+They are not captures from another implementation: RFC 5798 publishes no
+byte-level worked example, and inventing one would be worse than being explicit
+about provenance. Interoperability evidence arrives in Milestone 8, where
+Highland and Keepalived run against each other and real captures replace the
+generated vectors.
 
 ### Milestone 3 — Single-instance Linux daemon `[I]`
 
@@ -1933,12 +1969,12 @@ let actions = machine.handle(Event::Startup);
 assert_eq!(machine.role(), Role::Backup);
 assert!(actions.contains(&Action::ArmTimer {
     timer: TimerId::MasterDown,
-    deadline: Duration::from_millis(3010),
+    deadline: Duration::from_millis(3410),
 }));
 
 // Timers are absolute deadlines, so a test asserts the deadline rather than
 // sleeping.
-clock.advance(Duration::from_millis(3010));
+clock.advance(Duration::from_millis(3410));
 assert!(machine.is_due(TimerId::MasterDown));
 ```
 
@@ -2167,6 +2203,12 @@ resolution, so a later change can be traced.
 | A-35 | Preemption and administrative interface management had no transition reason and no event | Added `preemption_delay_elapsed` to §16.1.1 and `Event::InterfaceBroughtUp`, so an interface may be brought down again only once the instance is not `MASTER` |
 | A-36 | `M-02` demanded that every `I-nn` in §11 and §19 be tested, which is not possible for invariants a later milestone owns | The exit criterion now names the three partly-owned invariants and the milestone that finishes each |
 | A-37 | §8 and §25 listed the operator documents at the top of `docs/`, which made them sit beside developer documents and spread one topic across several files | End-user documentation is consolidated under `docs/user/`, with an index as its entry point. The specification points there |
+| A-38 | §8 listed one subdirectory per fuzz target | `cargo-fuzz` requires a single manifest with a `fuzz_targets/` directory, so that is the layout. The package is excluded from the workspace so `cargo test --workspace` never builds it |
+| A-39 | §5, §10.3 and `V-04` assumed the advertisement interval was an 8-bit centisecond field, bounding it at 2.55s | RFC 5798 §5.2.7 defines a **12-bit** `Max Adver Int` in centiseconds, so the range is 10ms to 40.95s. `V-04` and the configuration bound were both wrong |
+| A-40 | §5 and §13.3 treated `Skew_Time` as a constant allowance of at most 0.01s, which is the VRRPv2 model | RFC 5798 §6.1 defines `Skew_Time` as `((256 − priority) × Master_Adver_Interval) / 256` and `Master_Down_Interval` as `3 × Master_Adver_Interval + Skew_Time`. The takeover delay is therefore between three and four intervals, not a fixed 3.06s |
+| A-41 | `I-44` said repeated advertisements reset the master-down timer, without exception | RFC 5798 §6.4.2 requires a lower-priority advertisement to be **discarded** when preemption is enabled, and a priority-zero advertisement to set the timer to `Skew_Time`. Both are now specified and implemented |
+| A-42 | §9.2 implied the IPv4 and IPv6 message layouts differ, as in the VRRPv2-era IPv6 draft | RFC 5798 §5.1 defines **one** format for both families, with a 4-bit reserved field sharing an octet with the 12-bit interval. The decoder accepts a non-zero reserved nibble, as the RFC requires of a receiver |
+| A-43 | §5.2.8 was read as requiring the IPv6 pseudo-header checksum for IPv4 as well | The RFC does not distinguish, and interoperating implementations compute the plain message checksum for IPv4. The scope is now an explicit parameter, `ChecksumScope`, whose IPv6 default is `Undecidable` rather than a value that would not interoperate. Milestone 8 settles it against a real implementation |
 
 ## Appendix B — Open Questions
 

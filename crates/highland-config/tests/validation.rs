@@ -105,7 +105,7 @@ address = "2001:db8::10/64"
 
 #[test]
 fn v04_rejects_an_advertisement_interval_outside_the_protocol_range() {
-    for interval in ["9ms", "2551ms"] {
+    for interval in ["9ms", "40951ms"] {
         let text = VALID.replace(
             "advertisement_interval = \"1s\"",
             &format!("advertisement_interval = \"{interval}\""),

@@ -52,7 +52,53 @@ All notable changes to Highland are recorded here. The format follows
 - A shutdown or a pause cancels an in-flight ownership request and owes a
   best-effort removal, so a late confirmation cannot revive an instance.
 
+### Changed
+
+- **The advertisement interval is a 12-bit centisecond field** (RFC 5798
+  §5.2.7), not the 8-bit field the specification assumed, so the accepted range
+  is 10ms to 40.95s. `V-04` and the configuration bound were both wrong.
+- **`Skew_Time` is not a constant.** RFC 5798 §6.1 defines it as
+  `((256 - priority) * Master_Adver_Interval) / 256`, and
+  `Master_Down_Interval` as `3 * Master_Adver_Interval + Skew_Time`. The takeover
+  delay is therefore between three and four intervals: 3.41s at priority 150
+  behind a one-second master, not a fixed 3.06s.
+- **A backup discards a lower-priority advertisement** when preemption is
+  enabled, per RFC 5798 §6.4.2: it resets neither the master-down timer nor the
+  learned interval. An advertisement with priority zero sets the timer to
+  `Skew_Time` instead of a full interval.
+- The state machine tracks `Master_Adver_Interval`, learned from accepted
+  advertisements, because the takeover delay follows the master rather than local
+  configuration.
+- One message format serves both address families, with a 4-bit reserved field
+  sharing an octet with the interval. The decoder ignores a non-zero reserved
+  nibble, as the RFC requires of a receiver.
+
 ### Added in this milestone
+
+- `highland-vrrp` is a working codec: `Version`, `PacketType`, `Vrid`,
+  `Priority`, `MaxAdverInt`, `IpFamily`, `Advertisement`, `Checksum`, and
+  `ChecksumScope`, all validated on construction.
+- Two-phase decoding. `Peek::read` validates the fixed header without trusting
+  the count, and the addresses are read only after the checksum verifies.
+- `Advertisement::encode_v4` and `encode_with_checksum`, plus
+  `decode_verified` and `decode`. An IPv6 checksum needs the packet's addresses,
+  so the scope is a required argument rather than a guess.
+- The RFC 1071 checksum with the RFC 2460 §8.1 pseudo-header, cross-checked
+  against a second, naive implementation over many lengths and offsets.
+- Six fuzz targets under `fuzz/fuzz_targets/`, run as a 60-second smoke in CI.
+- Seven checked-in packet vectors with a stated provenance, and 9 property tests
+  including one that flips every bit of a valid packet and requires each
+  corruption to be detected or rejected.
+
+### Fixed in this milestone
+
+- The checksum accumulator dropped an odd trailing octet instead of padding it
+  with a zero as RFC 1071 requires. Found by the cross-check against a naive
+  implementation, not by inspection.
+- `MaxAdverInt::from_duration` truncated to milliseconds before converting to
+  centiseconds, so 1.5s became 100 centiseconds instead of 150.
+
+### Known limitations
 
 - `Event::ActionSucceeded` and `Event::InterfaceBroughtUp`, and the transition
   reason `preemption_delay_elapsed`.
@@ -75,9 +121,12 @@ All notable changes to Highland are recorded here. The format follows
 - No executor applies the machine's actions yet. `highland-net` has the trait but
   no Linux implementation, so nothing adds or removes an address. The socket
   listener arrives with Milestone 7.
-- `I-09` and `I-39` are not yet covered: they belong to the reload planner
-  (Milestone 4) and the decoder (Milestone 2) respectively. `SPEC.md` §27 says
-  which part of each is tested here.
+- `I-09` is not yet covered: it belongs to the reload planner, in Milestone 4.
+  `SPEC.md` §27 says which part of each partly-owned invariant is tested where.
+- The packet vectors are encoder-produced, not captured from another
+  implementation. Real captures arrive in Milestone 8, and until then the IPv4
+  checksum scope rests on the RFC's silence rather than on observed
+  interoperability.
 
 ## [0.0.0]
 

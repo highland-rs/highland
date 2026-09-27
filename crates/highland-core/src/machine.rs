@@ -38,11 +38,11 @@
 //! assert_eq!(machine.role(), Role::Backup);
 //! assert!(actions.contains(&Action::ArmTimer {
 //!     timer: TimerId::MasterDown,
-//!     deadline: Duration::from_millis(3010),
+//!     deadline: Duration::from_millis(3410),
 //! }));
 //!
 //! // The master-down timer fires, and the machine asks for the addresses.
-//! clock.advance(Duration::from_millis(3010));
+//! clock.advance(Duration::from_millis(3410));
 //! let actions = machine.handle(Event::TimerExpired(TimerId::MasterDown));
 //! assert!(actions.contains(&Action::AddVirtualAddresses));
 //! assert_eq!(machine.role(), Role::Backup, "ownership is not yet confirmed");
@@ -64,7 +64,7 @@ use crate::election::{self, Candidate};
 use crate::health::{self, HealthSummary, PriorityState};
 use crate::state::{
     Action, ActionKind, Event, Generation, InstanceConfig, LogLevel, PeerAdvertisement, Role,
-    TimerId, TransitionReason, master_down_interval,
+    TimerId, TransitionReason, skew_time,
 };
 use crate::timer::TimerSet;
 
@@ -123,6 +123,7 @@ pub struct InstanceStateMachine<C> {
     preemption_armed_for: Option<u8>,
     deferred_advertisement: Option<PeerAdvertisement>,
     shutting_down: bool,
+    master_advert_interval: Duration,
     last_reason: TransitionReason,
     last_peer: Option<IpAddr>,
 }
@@ -154,6 +155,7 @@ where
             preemption_armed_for: None,
             deferred_advertisement: None,
             shutting_down: false,
+            master_advert_interval: config.advertisement_interval,
             last_reason: TransitionReason::Startup,
             last_peer: None,
             config,
@@ -283,6 +285,18 @@ where
         self.preemption_armed_for
     }
 
+    /// Returns the interval the current master claims, as learned from its
+    /// advertisements (RFC 5798 §6.1, `Master_Adver_Interval`).
+    ///
+    /// It starts as this node's own configured interval and is replaced whenever
+    /// a valid advertisement from a peer of equal or greater priority is
+    /// accepted, which is what makes the takeover delay follow the master rather
+    /// than this node's configuration.
+    #[must_use]
+    pub fn master_advert_interval(&self) -> Duration {
+        self.master_advert_interval
+    }
+
     /// Returns the candidate this instance presents in an election.
     #[must_use]
     pub fn candidate(&self) -> Candidate {
@@ -302,6 +316,11 @@ where
     /// A reload never changes the role by itself; it changes the parameters
     /// used by the next decision (`I-10`).
     pub fn reconfigure(&mut self, config: InstanceConfig, generation: Generation) {
+        if config.advertisement_interval != self.config.advertisement_interval {
+            // The learned interval started as the local one, so a change to the
+            // local interval invalidates it until the next advertisement.
+            self.master_advert_interval = config.advertisement_interval;
+        }
         self.config = config;
         self.generation = generation;
         self.priority = health::evaluate(self.config.priority, &self.config.health, &self.health);
@@ -421,11 +440,15 @@ where
         }
     }
 
+    /// Arms the master-down timer from the current `Master_Adver_Interval` and
+    /// this node's effective priority.
+    ///
+    /// The interval has been validated by `V-04`, so the saturating form of the
+    /// RFC's formula is used: overflow is unreachable, and a fault would be worse
+    /// than a long timer.
     fn rearm_master_down(&mut self, actions: &mut Vec<Action>) {
-        let Ok(interval) = master_down_interval(&self.config.advertisement_interval) else {
-            self.enter_fault(TransitionReason::OwnershipFailed, actions);
-            return;
-        };
+        let interval =
+            master_down_interval_saturating(self.priority.effective, self.master_advert_interval);
         self.arm(TimerId::MasterDown, interval, actions);
     }
 
@@ -470,37 +493,44 @@ where
         // not yet learned about this node's role, and needs no action.
     }
 
+    /// RFC 5798 §6.4.2: what a backup does with a valid advertisement.
+    ///
+    /// - Priority zero means the master is stopping, and the takeover delay
+    ///   becomes `Skew_Time` rather than a full interval.
+    /// - An advertisement from a peer of equal or greater priority resets the
+    ///   master-down timer, and its interval is learned.
+    /// - An advertisement from a lower-priority peer is **discarded**: neither
+    ///   the timer nor the learned interval changes. This is deliberate. A
+    ///   higher-priority node that extended the incumbent's lease would keep a
+    ///   lower-priority master alive indefinitely, and the two would never
+    ///   converge. Highland additionally arms its own preemption timer, which is
+    ///   what turns the discard into an actual takeover; with a preemption delay
+    ///   of zero that takeover is immediate, which is Keepalived's behavior.
     fn on_advertisement_as_backup(
         &mut self,
         advertisement: &PeerAdvertisement,
         actions: &mut Vec<Action>,
     ) {
-        // Every valid advertisement resets the master-down timer (`I-44`).
-        self.rearm_master_down(actions);
-
         if advertisement.is_relinquish() {
-            // A peer announcing zero is going away. This is not a lower priority
-            // to beat; the node waits for the normal interval or its preemption
-            // timer, and never treats zero as a target.
+            self.cancel(TimerId::PreemptionDelay, actions);
+            self.preemption_armed_for = None;
+            let delay = skew_time(self.priority.effective, self.master_advert_interval);
+            self.arm(TimerId::MasterDown, delay, actions);
+            return;
+        }
+
+        if advertisement.priority >= self.priority.effective || !self.config.preempt {
+            self.master_advert_interval = advertisement.advert_interval;
+            self.rearm_master_down(actions);
             self.cancel(TimerId::PreemptionDelay, actions);
             self.preemption_armed_for = None;
             return;
         }
 
-        if election::may_preempt(
-            self.priority.effective,
-            advertisement.priority,
-            self.config.preempt,
-        ) {
-            // The preemption timer is armed once and is not restarted by further
-            // lower-or-equal advertisements (SPEC.md, §12.5).
-            if !self.timers.is_armed(TimerId::PreemptionDelay) {
-                self.arm(TimerId::PreemptionDelay, self.config.preempt_delay, actions);
-                self.preemption_armed_for = Some(advertisement.priority);
-            }
-        } else {
-            self.cancel(TimerId::PreemptionDelay, actions);
-            self.preemption_armed_for = None;
+        // Discard: the interval is not learned and the timer is not reset.
+        if !self.timers.is_armed(TimerId::PreemptionDelay) {
+            self.arm(TimerId::PreemptionDelay, self.config.preempt_delay, actions);
+            self.preemption_armed_for = Some(advertisement.priority);
         }
     }
 
@@ -1036,6 +1066,17 @@ where
             actions.push(Action::CancelTimer { timer });
         }
     }
+}
+
+/// Returns `3 * Master_Adver_Interval + Skew_Time`, saturating instead of
+/// overflowing. See [`InstanceStateMachine::rearm_master_down`].
+fn master_down_interval_saturating(
+    local_priority: u8,
+    master_advert_interval: Duration,
+) -> Duration {
+    master_advert_interval
+        .saturating_mul(3)
+        .saturating_add(skew_time(local_priority, master_advert_interval))
 }
 
 fn log(actions: &mut Vec<Action>, level: LogLevel, message: &str) {

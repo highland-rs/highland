@@ -1,3 +1,8 @@
 /target
+fuzz/target
+# macOS keeps directory metadata in sibling files.
+.DS_Store
+# Generated dumps of the tree, from local tooling.
+repomix-output.txt
 **/*.rs.bk
 *.pdb

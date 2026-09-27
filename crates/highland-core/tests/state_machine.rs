@@ -964,8 +964,8 @@ fn the_takeover_budget_is_within_three_advertisement_intervals() {
     startup(&mut machine);
     assert_eq!(
         machine.deadline_of(TimerId::MasterDown),
-        Some(Duration::from_millis(3010)),
-        "SPEC.md 13.3: at most 3.06s from the last advertisement"
+        Some(Duration::from_millis(3410)),
+        "3 * 1s + ((256 - 150) * 100cs) / 256 = 300 + 41 centiseconds"
     );
 }
 

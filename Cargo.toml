@@ -11,6 +11,9 @@ members = [
     "crates/highland-daemon",
     "crates/highland-cli",
 ]
+# The fuzz suite needs a nightly compiler and a sanitizer, so it is a package of
+# its own rather than a workspace member.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"

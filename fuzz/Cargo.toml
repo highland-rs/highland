@@ -1,0 +1,71 @@
+# The fuzz suite. It is a package of its own so that `cargo test --workspace`
+# never builds it, and it is excluded from the main workspace because it needs a
+# nightly compiler and a sanitizer.
+#
+# The targets are the six named in `SPEC.md` §21.3. Each one states a contract
+# rather than a function: a parser that accepts untrusted input must never panic,
+# never allocate without bound, and never return something inconsistent with what
+# it was given.
+[package]
+name = "highland-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+highland-vrrp = { path = "../crates/highland-vrrp" }
+highland-config = { path = "../crates/highland-config" }
+highland-checks = { path = "../crates/highland-checks" }
+highland-control = { path = "../crates/highland-control" }
+highland-core = { path = "../crates/highland-core" }
+highland-net = { path = "../crates/highland-net" }
+
+[[bin]]
+name = "fuzz_vrrp_ipv4_packet"
+path = "fuzz_targets/fuzz_vrrp_ipv4_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_vrrp_ipv6_packet"
+path = "fuzz_targets/fuzz_vrrp_ipv6_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_config_document"
+path = "fuzz_targets/fuzz_config_document.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_check_response"
+path = "fuzz_targets/fuzz_check_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_netlink_event"
+path = "fuzz_targets/fuzz_netlink_event.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_control_request"
+path = "fuzz_targets/fuzz_control_request.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

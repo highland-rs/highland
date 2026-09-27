@@ -44,6 +44,9 @@ pub struct VrrpTransport {
     name: String,
     metrics: Arc<crate::Metrics>,
     family: &'static str,
+    /// How many packets have been discarded for each reason, so the log can say
+    /// "and this has now happened 3,000 times" without a line per packet.
+    rejections: Arc<std::sync::Mutex<std::collections::BTreeMap<&'static str, u64>>>,
 }
 
 impl VrrpTransport {
@@ -82,6 +85,7 @@ impl VrrpTransport {
             name: plan.name.clone(),
             metrics,
             family: Self::family_name(family),
+            rejections: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         })
     }
 
@@ -183,6 +187,31 @@ impl VrrpTransport {
                             reason.as_str(),
                             crate::Metrics::known_rejections(),
                         );
+                        // The first rejection of each reason is logged, and then
+                        // every thousandth. A node silently discarding a peer's
+                        // advertisements is the failure this very repository
+                        // shipped: it was invisible without metrics enabled, and
+                        // it looks like a working node until the failover is
+                        // late. A flood is bounded by the counter rather than by
+                        // the log volume.
+                        let count = {
+                            let mut seen = transport
+                                .rejections
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            let entry = seen.entry(reason.as_str()).or_insert(0_u64);
+                            *entry = entry.saturating_add(1);
+                            *entry
+                        };
+                        if count == 1 || count % 1_000 == 0 {
+                            tracing::warn!(
+                                instance = %transport.name,
+                                reason = reason.as_str(),
+                                seen = count,
+                                "discarded a VRRP packet; if a peer is configured, it is not \
+                                 being heard"
+                            );
+                        }
                     }
                     Ok(None) => {}
                     Err(_) => {

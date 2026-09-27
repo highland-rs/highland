@@ -40,19 +40,26 @@ docker run --rm --privileged --cap-add=NET_ADMIN --cap-add=NET_RAW \
 			apt-get update -qq
 			# curl scrapes the metrics endpoint from inside a namespace, since
 			# a namespace has its own loopback and its own routes.
-			apt-get install -y -qq --no-install-recommends iproute2 curl
+			# keepalived is the implementation interoperability is tested
+			# against; without it that suite reports a skip and the checksum
+			# scope is only checked against our own bytes.
+			apt-get install -y -qq --no-install-recommends iproute2 curl keepalived
 		fi
 		cargo fmt --all --check
 		cargo clippy --workspace --all-targets --all-features -- -D warnings
 		cargo test --workspace
 		RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
-		$( [ "$run_netlink" = 1 ] && echo "cargo test -p highland-net --features netlink-tests" )
+		# One test at a time: each creates a dummy interface, and one of them
+		# asserts that a link is quiet, so running them together has them hearing
+		# each other.
+		$( [ "$run_netlink" = 1 ] && echo "cargo test -p highland-net --features netlink-tests -- --test-threads=1" )
 		# The daemon suites that build namespaces run one test at a time: they
 		# each create a bridge and a pair of namespaces, and their assertions are
 		# about elapsed time, so running several at once would have them
 		# competing for the same CPU and failing for the wrong reason.
 		$( [ "$run_netlink" = 1 ] && echo "cargo test -p highland-daemon --features netlink-tests -- --test-threads=1" )
 		$( [ "$run_netlink" = 1 ] && echo "cargo test -p highland-control" )
+		$( [ "$run_netlink" = 1 ] && echo "cargo test -p highland-daemon --features netlink-tests --test interop -- --test-threads=1" )
 	"
 
 # The source is mounted read-only, so a `cargo fmt` fix has to happen on the

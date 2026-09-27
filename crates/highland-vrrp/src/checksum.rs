@@ -17,6 +17,20 @@ use std::net::IpAddr;
 
 use crate::types::{IpFamily, VRRP_PROTOCOL};
 
+/// A `VRRPv3` IPv4 advertisement captured from Keepalived 2.3.3, in a network
+/// namespace, addressed from `192.0.2.12` to `192.0.2.11` for VRID 42 at
+/// priority 100 carrying one address, `192.0.2.100`.
+///
+/// This is the packet whose checksum scope settled `SPEC.md` A-43: the value in
+/// bytes 6 and 7 is the one's complement of the sum over the message **and** an
+/// IPv4 pseudo-header — source, destination, the upper-layer length, and 112 as
+/// the protocol — where summing the message alone gives a different answer. A
+/// golden vector from the implementation everyone else runs is worth more than
+/// the argument that produced it.
+pub const KEEPALIVED_V4_ADVERTISEMENT: [u8; 12] = [
+    0x31, 0x2a, 0x64, 0x01, 0x00, 0x64, 0x23, 0x77, 0xc0, 0x00, 0x02, 0x64,
+];
+
 /// The value a checksum field carries when it has not been computed.
 ///
 /// A receiver must reject it, because zero is indistinguishable from a genuine
@@ -24,51 +38,80 @@ use crate::types::{IpFamily, VRRP_PROTOCOL};
 pub const CHECKSUM_UNCOMPUTED: u16 = 0;
 
 /// Which headers the checksum covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+///
+/// RFC 5798 §5.2.8 says the checksum covers "the entire VRRP message starting
+/// with the version field and a 'pseudo-header' as defined in Section 8.1 of
+/// RFC 2460. The next header field in the 'pseudo-header' should be set to 112
+/// (decimal) for VRRP." It draws no family distinction, and an implementation
+/// that reads the IPv4 header's own checksum as a reason to skip the
+/// pseudo-header disagrees with every other implementation on the wire.
+///
+/// This was checked against Keepalived rather than reasoned about: see
+/// [`KEEPALIVED_V4_ADVERTISEMENT`] and `SPEC.md` A-43.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ChecksumScope {
-    /// The VRRP message alone. What interoperating implementations compute for
-    /// IPv4, whose header carries a checksum of its own.
-    #[default]
+    /// The VRRP message alone.
+    ///
+    /// Correct for nothing RFC 5798 defines. It remains available because it is
+    /// the scope that reproduces a VRRPv2-era checksum, and a test that needs to
+    /// compare against such a value has a use for it.
     MessageOnly,
-    /// The VRRP message preceded by the RFC 2460 §8.1 pseudo-header. Required
-    /// for IPv6, which has no header checksum.
+    /// The VRRP message preceded by the RFC 2460 §8.1 pseudo-header, with the
+    /// addresses in their own family's width and the next-header field set to
+    /// 112. Required for both families.
     PseudoHeader {
         /// The packet's source address.
         source: IpAddr,
         /// The packet's destination address.
         destination: IpAddr,
     },
-    /// The family requires a pseudo-header and the addresses are unknown, so no
-    /// checksum can be computed.
+    /// The scope needs addresses that were not supplied, so no checksum can be
+    /// computed.
     Undecidable,
 }
 
 impl ChecksumScope {
     /// Returns the scope to use for `family` when no addresses are known.
     ///
-    /// An IPv4 packet needs nothing beyond the message. An IPv6 packet needs
-    /// the pseudo-header, and without the addresses it cannot be computed at
-    /// all, which is [`ChecksumScope::Undecidable`] rather than a silent
-    /// fallback to a checksum that would not interoperate.
+    /// Always [`ChecksumScope::Undecidable`]: the pseudo-header is required for
+    /// both families, and a checksum computed without it is a value that no
+    /// other implementation will accept. Returning an error beats returning a
+    /// plausible number.
     #[must_use]
-    pub fn for_family(family: IpFamily) -> Self {
-        match family {
-            IpFamily::V4 => ChecksumScope::MessageOnly,
-            IpFamily::V6 => ChecksumScope::Undecidable,
-        }
+    pub fn for_family(_family: IpFamily) -> Self {
+        ChecksumScope::Undecidable
     }
 
     /// Returns the scope for a packet with known addresses.
+    ///
+    /// The same scope for both families, which is the point the RFC makes and the
+    /// one Keepalived agrees with. A family whose addresses are the wrong width
+    /// for the message is a programming error rather than a protocol case, so it
+    /// is normalised to the message's own family.
     #[must_use]
     pub fn for_packet(family: IpFamily, source: IpAddr, destination: IpAddr) -> Self {
-        match family {
-            IpFamily::V4 => ChecksumScope::MessageOnly,
-            IpFamily::V6 => ChecksumScope::PseudoHeader {
-                source,
-                destination,
-            },
+        // `IpFamily` is not closed, so the two arms are written as
+        // if-let-free matches on the family and the catch-all keeps a family
+        // added later working with its addresses untouched.
+        let (source, destination) = if family == IpFamily::V4 {
+            (to_v4(source), to_v4(destination))
+        } else {
+            (to_v6(source), to_v6(destination))
+        };
+        ChecksumScope::PseudoHeader {
+            source,
+            destination,
         }
+    }
+}
+
+/// There is no scope to reach for by default: every checksum needs a
+/// pseudo-header, and a pseudo-header needs two addresses. The variant that
+/// compiles without them says so rather than producing a number.
+impl Default for ChecksumScope {
+    fn default() -> Self {
+        ChecksumScope::Undecidable
     }
 }
 
@@ -129,9 +172,23 @@ impl Checksum {
     /// upper-layer packet length as a 32-bit value, three zero octets, and the
     /// next-header value. Both addresses are written in the IPv6 form, because
     /// that is the form the pseudo-header is defined in.
+    /// Sums the pseudo-header for a message of `message_len` octets.
+    ///
+    /// The layout is RFC 2460 §8.1: the two addresses, the upper-layer packet
+    /// length, three zero octets, and the next-header field. The addresses are
+    /// four octets for IPv4 and sixteen for IPv6, because that is what the
+    /// implementation on the other end summed.
     pub fn add_pseudo_header(&mut self, source: IpAddr, destination: IpAddr, message_len: usize) {
-        self.add_bytes(&to_v6_octets(source));
-        self.add_bytes(&to_v6_octets(destination));
+        match (source, destination) {
+            (IpAddr::V4(source), IpAddr::V4(destination)) => {
+                self.add_bytes(&source.octets());
+                self.add_bytes(&destination.octets());
+            }
+            (source, destination) => {
+                self.add_bytes(&to_v6_octets(source));
+                self.add_bytes(&to_v6_octets(destination));
+            }
+        }
         self.add_word(u16::try_from(message_len).unwrap_or(u16::MAX));
         self.add_word(0);
         self.add_bytes(&[0, 0, 0, VRRP_PROTOCOL]);
@@ -168,6 +225,25 @@ fn to_v6_octets(address: IpAddr) -> [u8; 16] {
     match address {
         IpAddr::V4(address) => address.to_ipv6_mapped().octets(),
         IpAddr::V6(address) => address.octets(),
+    }
+}
+
+/// Returns the address as IPv4, normalising an IPv6-mapped form.
+fn to_v4(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V4(address) => IpAddr::V4(address),
+        IpAddr::V6(address) => match address.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(address),
+        },
+    }
+}
+
+/// Returns the address as IPv6, normalising an IPv4 address to its mapped form.
+fn to_v6(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V4(v4) => IpAddr::V6(v4.to_ipv6_mapped()),
+        IpAddr::V6(address) => IpAddr::V6(address),
     }
 }
 
@@ -439,15 +515,19 @@ mod tests {
     }
 
     #[test]
-    fn the_ipv6_default_scope_is_undecidable_rather_than_wrong() {
+    fn no_family_has_a_default_scope_because_every_one_needs_addresses() {
+        // The pseudo-header is required for both families, so there is no
+        // address-free scope to reach for, and `for_family` says so instead of
+        // returning a checksum that no other implementation would accept.
         assert_eq!(
             ChecksumScope::for_family(IpFamily::V4),
-            ChecksumScope::MessageOnly
+            ChecksumScope::Undecidable
         );
         assert_eq!(
             ChecksumScope::for_family(IpFamily::V6),
             ChecksumScope::Undecidable
         );
+        assert!(checksum(&message(), 6, ChecksumScope::for_family(IpFamily::V4)).is_err());
         assert!(checksum(&message(), 6, ChecksumScope::for_family(IpFamily::V6)).is_err());
     }
 
@@ -466,5 +546,58 @@ mod tests {
             12,
         );
         assert_ne!(accumulator.finish(), 0);
+    }
+
+    /// The vector that decided `SPEC.md` A-43, checked as a receiver would.
+    ///
+    /// If the scope is right, this verifies. If it is the message alone, it does
+    /// not — and neither does any packet from a real implementation, which is
+    /// how the two nodes in a mixed deployment end up each believing the other
+    /// is silent.
+    #[test]
+    fn a_keepalived_ipv4_advertisement_verifies() {
+        let scope = ChecksumScope::for_packet(
+            IpFamily::V4,
+            "192.0.2.12".parse().expect("valid"),
+            "192.0.2.11".parse().expect("valid"),
+        );
+        assert!(
+            verify(&KEEPALIVED_V4_ADVERTISEMENT, 6, scope),
+            "an IPv4 advertisement from a real implementation must verify"
+        );
+
+        // And the scope is the thing that makes it verify: the message alone
+        // does not, which is precisely the bug this vector was captured for.
+        assert!(
+            !verify(&KEEPALIVED_V4_ADVERTISEMENT, 6, ChecksumScope::MessageOnly),
+            "the message alone is not what the peer computed"
+        );
+    }
+
+    /// The same advertisement, re-encoded, must produce the same bytes.
+    ///
+    /// A receiver that accepts a peer's packet and a sender that produces one it
+    /// would reject are two different bugs, and this is what keeps them one.
+    #[test]
+    fn an_encoded_ipv4_advertisement_matches_the_keepalived_bytes() {
+        let bytes = super::KEEPALIVED_V4_ADVERTISEMENT;
+        let advertisement = crate::message::Advertisement::new(
+            crate::Vrid::new(42).expect("valid"),
+            crate::Priority::new(100).expect("representable"),
+            crate::MaxAdverInt::from_duration(std::time::Duration::from_secs(1)).expect("in range"),
+            vec!["192.0.2.100".parse().expect("valid")],
+        )
+        .expect("valid");
+        let encoded = advertisement
+            .encode_with_checksum(
+                IpFamily::V4,
+                ChecksumScope::for_packet(
+                    IpFamily::V4,
+                    "192.0.2.12".parse().expect("valid"),
+                    "192.0.2.11".parse().expect("valid"),
+                ),
+            )
+            .expect("encodes");
+        assert_eq!(encoded, bytes, "byte-for-byte with a real implementation");
     }
 }

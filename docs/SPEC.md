@@ -2019,6 +2019,12 @@ documentation, packaging.
 Exit (`M-09`): every `L-nn` is asserted by a test; `docs/user/threat-model.md` covers every
 `S-nn`; compatibility tests pass in both directions.
 
+The IPv4 direction passes today in `crates/highland-daemon/tests/interop.rs`, against
+Keepalived 2.3.3 in two namespaces on a bridge: Highland master with Keepalived backup
+(the backup's staying a backup is the proof that it understood the advertisements), and
+Keepalived master with Highland backup, handing the address over when the master is
+killed. The suite needs the `keepalived` binary and reports a skip without it.
+
 ### Milestone 9 — 1.0 candidate `[1]`
 
 Stable configuration subset, stable crate APIs, upgrade documentation, release artifacts,
@@ -2294,7 +2300,7 @@ resolution, so a later change can be traced.
 | A-40 | §5 and §13.3 treated `Skew_Time` as a constant allowance of at most 0.01s, which is the VRRPv2 model | RFC 5798 §6.1 defines `Skew_Time` as `((256 − priority) × Master_Adver_Interval) / 256` and `Master_Down_Interval` as `3 × Master_Adver_Interval + Skew_Time`. The takeover delay is therefore between three and four intervals, not a fixed 3.06s |
 | A-41 | `I-44` said repeated advertisements reset the master-down timer, without exception | RFC 5798 §6.4.2 requires a lower-priority advertisement to be **discarded** when preemption is enabled, and a priority-zero advertisement to set the timer to `Skew_Time`. Both are now specified and implemented |
 | A-42 | §9.2 implied the IPv4 and IPv6 message layouts differ, as in the VRRPv2-era IPv6 draft | RFC 5798 §5.1 defines **one** format for both families, with a 4-bit reserved field sharing an octet with the 12-bit interval. The decoder accepts a non-zero reserved nibble, as the RFC requires of a receiver |
-| A-43 | §5.2.8 was read as requiring the IPv6 pseudo-header checksum for IPv4 as well | The RFC does not distinguish, and interoperating implementations compute the plain message checksum for IPv4. The scope is now an explicit parameter, `ChecksumScope`, whose IPv6 default is `Undecidable` rather than a value that would not interoperate. Milestone 8 settles it against a real implementation |
+| A-43 | §5.2.8 was read as requiring the pseudo-header checksum for IPv6 but not for IPv4, on the grounds that the IPv4 header "carries a checksum of its own" | The RFC says the checksum covers "the entire VRRP message ... and a \"pseudo-header\" as defined in Section 8.1 of [RFC2460]. The next header field in the \"pseudo-header\" should be set to 112 (decimal) for VRRP", with no family distinction. Settled in Milestone 8 by running against Keepalived 2.3.3: its IPv4 advertisements carry a pseudo-header — source, destination, upper-layer length, 112 — and Highland, which summed the message alone, discarded every one of them as `bad_checksum`. Both families now use the pseudo-header, with addresses in their own family's width. The captured packet is `KEEPALIVED_V4_ADVERTISEMENT` in `highland-vrrp` |
 | A-44 | §9.3 declared `NetworkBackend` synchronous, with a note that the production implementation would run on a blocking thread | Netlink is an asynchronous socket, so a synchronous trait forces a blocking wrapper on a runtime thread, which `I-38` forbids. The trait is now `async`; a scripted backend is unaffected because its futures complete immediately |
 | A-45 | §14.3 and §11.4 left the receiver-side checks to the daemon, and the executor had no way to confirm an action | Packet validation, peer filtering, and rate limiting live in `highland-net::vrrp`, and the executor answers every action with its outcome, so the two-phase ownership handshake is the only path to `MASTER` |
 

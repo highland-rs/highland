@@ -36,6 +36,9 @@
 
 mod backend;
 mod error;
+
+#[cfg(all(target_os = "linux", feature = "netlink-tests"))]
+pub mod frames;
 pub mod gratuitous;
 mod testing;
 mod types;
@@ -62,9 +65,10 @@ pub use types::{
     PrefixLenError,
 };
 pub use vrrp::{
-    Accepted, AllowedSources, DEFAULT_ACCEPT_RATE, Datagram, Destinations, MAX_DATAGRAM, PeerSet,
-    Peering, REQUIRED_TTL, RateWindow, Rejection, VRRP_IP_PROTOCOL, build, default_interval,
-    fixture_advertisement, validate,
+    Accepted, AllowedSources, DEFAULT_ACCEPT_RATE, Datagram, Destinations, FIXTURE_DESTINATION,
+    FIXTURE_SOURCE, MAX_DATAGRAM, PeerSet, Peering, REQUIRED_TTL, RateWindow, Rejection,
+    VRRP_IP_PROTOCOL, build, default_interval, fixture_advertisement,
+    fixture_advertisement_between, validate,
 };
 
 #[cfg(target_os = "linux")]

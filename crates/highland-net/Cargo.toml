@@ -50,6 +50,10 @@ tokio = { workspace = true, features = ["net", "io-util", "rt", "time"] }
 tokio = { workspace = true, features = ["net", "io-util", "rt", "time"] }
 
 [dev-dependencies]
+# The frame capture in `tests/frames.rs` needs a packet socket, which is what
+# `socket2` is for, and `socket2`'s read API hands back uninitialised memory that
+# the test initialises by hand. The daemon never captures, so this is test-only.
+socket2 = { version = "0.6", features = ["all"] }
 futures-util.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 

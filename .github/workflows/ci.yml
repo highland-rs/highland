@@ -160,6 +160,21 @@ jobs:
   # bounded recovery and bounded event volume. They need the same namespaces and
   # the same bridge as the failover suite, so they run here rather than in a job
   # of their own.
+  # Keepalived is the implementation interoperability is tested against. It
+  # found a real protocol defect: an IPv4 checksum scope that no other
+  # implementation agreed with.
+  interop:
+    name: interoperability
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install test tooling
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 keepalived
+      - name: highland and keepalived, both directions
+        run: sudo -E env "PATH=$PATH" cargo test -p highland-daemon --features netlink-tests --test interop -- --test-threads=1
+
   chaos:
     name: chaos scenarios
     runs-on: ubuntu-latest

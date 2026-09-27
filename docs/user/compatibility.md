@@ -3,8 +3,9 @@
 ## What Highland claims
 
 - **Protocol compatibility.** Highland implements VRRPv3 and interoperates with
-  standard implementations, verified by capture-based tests and, from Milestone 8,
-  by running against Keepalived in isolated namespaces.
+  standard implementations. This is tested by running it against Keepalived in
+  two network namespaces, in both directions, rather than by asserting that two
+  implementations that have only ever spoken to each other agree.
 - **Not configuration compatibility.** Keepalived configuration is not
   supported directly. A documented subset can be imported, and the importer
   reports everything it could not translate.
@@ -37,7 +38,15 @@ IPVS, and the LVS integration.
   `((256 - priority) / 256) * adver_int`. At a one-second interval that is 3.41s
   behind a priority-150 master, not a fixed figure. Keepalived's practical
   behavior is the same.
-- **Multicast TTL.** Must be 255. Highland refuses any other value (`V-24`).
+- **Multicast TTL.** Must be 255. Highland refuses any other value (`V-24`), and
+  sets `IP_MULTICAST_TTL` and `IPV6_MULTICAST_HOPS` explicitly: they are separate
+  socket options from the unicast TTL and both default to 1, which every receiver
+  discards.
+- **The checksum.** RFC 5798 §5.2.8 covers the VRRP message **and** a pseudo-header
+  whose next-header field is 112, for both address families, with the addresses in
+  their own family's width. Highland originally skipped the pseudo-header for IPv4
+  and could not hear Keepalived at all; the packet that settled it is a golden
+  vector in the codec (`KEEPALIVED_V4_ADVERTISEMENT`).
 - **Mixed families.** An instance is single-family (`V-03`). Split the
   configuration if you need both: one instance per family, with the addresses
   split between them.
@@ -46,13 +55,15 @@ IPVS, and the LVS integration.
   take over an existing master.
 - **Degraded advertisement.** Highland never advertises master without owning
   the VIPs. There is no compatibility switch for this (`I-04`).
-- **No cross-implementation run yet.** Highland carries VRRPv3 on a real socket
-  and the two-node suite runs it over IPv4 and IPv6, unicast and multicast, but
-  nothing has been run against Keepalived. Treat the claims on this page as the
-  design plus what the codec and receiver rules are tested to, not as a report of
-  interoperability. Running both implementations against each other in isolated
-  namespaces is the next milestone, and the IPv4 checksum scope is settled
-  there.
+- **IPv4 unicast is tested against Keepalived, in both directions.** A Highland
+  master holds the address against a Keepalived backup, and a Keepalived master
+  hands the address over to a Highland backup when it is killed. Both are in
+  `crates/highland-daemon/tests/interop.rs` and both run in CI.
+- **IPv6 and multicast have not been run against another implementation.** The
+  two-node suite covers them between two Highland nodes, and the IPv6 checksum
+  scope is answered by the RFC text and by the IPv4 finding — the same
+  pseudo-header for both families — but a second implementation has not been on
+  the other end of an IPv6 or multicast segment.
 
 ## Capture-based diagnosis
 

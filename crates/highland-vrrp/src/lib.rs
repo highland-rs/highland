@@ -45,7 +45,9 @@ mod error;
 mod message;
 mod types;
 
-pub use checksum::{CHECKSUM_UNCOMPUTED, Checksum, ChecksumScope, checksum, verify};
+pub use checksum::{
+    CHECKSUM_UNCOMPUTED, Checksum, ChecksumScope, KEEPALIVED_V4_ADVERTISEMENT, checksum, verify,
+};
 pub use error::{ChecksumScopeError, DecodeError, EncodeError, ProtocolError, Result};
 pub use message::{Advertisement, AdvertisementError, CHECKSUM_OFFSET, MAX_ADDRESSES, Peek};
 pub use types::{

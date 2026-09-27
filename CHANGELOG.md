@@ -556,6 +556,48 @@ set `preempt = true` on the peer. The namespace test says so explicitly, because
 "my check failed and nothing happened" is the most likely way to be surprised by
 this.
 
+### Interoperability, and a protocol defect it found
+
+`crates/highland-daemon/tests/interop.rs` runs Highland and Keepalived 2.3.3 in two
+namespaces on a bridge, in both directions: Highland master with a Keepalived
+backup, and Keepalived master with a Highland backup that takes the address over
+when the master is killed. The suite needs the `keepalived` binary and reports a
+skip without it; the Linux gate and a CI job install it.
+
+Before this, Highland had only ever spoken to itself. The first run produced two
+masters and a full subnet's worth of silence between them, and the diagnosis took
+a `KEEPALIVED_V4_ADVERTISEMENT` constant, a frame capture, and the RFC:
+
+**The IPv4 checksum was wrong.** RFC 5798 §5.2.8 requires the checksum to cover
+"the entire VRRP message ... and a 'pseudo-header' as defined in Section 8.1 of
+[RFC2460]. The next header field in the 'pseudo-header' should be set to 112
+(decimal) for VRRP" — for both families, with no carve-out for IPv4. Highland had
+read the IPv4 header's own checksum as a reason to skip the pseudo-header, and
+`SPEC.md` A-43 recorded that reading as a decision to be settled later.
+
+Keepalived computes the pseudo-header, with the addresses in their own family's
+width. Highland summed the message alone, so every advertisement the other side
+sent was discarded as `bad_checksum`, both nodes timed out, and both became
+master. The two implementations had been silently ignoring each other.
+
+The fix is one function, and the evidence is three: a golden vector from a real
+implementation in the codec, a suite that runs the two against each other, and the
+count of discarded packets — which is now zero in both directions.
+
+Also, and because it is the same failure: **the daemon now logs the first packet
+it discards for each reason**, and every thousandth after that. The defect was
+invisible for a whole milestone because the count only reached a metric
+endpoint, and a metric nobody has enabled is not an explanation.
+
+### A capture that works, because `tcpdump` did not
+
+`tcpdump` sees nothing in this container's networking, and neither does an
+`AF_PACKET` socket — which is why a capture-based interoperability test was not
+an option and the bytes had to come from the socket that was already receiving
+them. That is now a test-only module, `highland_net::frames`, and a probe that
+prints a live peer's frames field by field. One audited `unsafe`, the
+initialisation of bytes a packet socket has just written.
+
 ### Not delivered, and why
 
 ### Known limitations

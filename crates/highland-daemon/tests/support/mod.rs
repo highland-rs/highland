@@ -841,3 +841,226 @@ pub fn bridge() -> BridgeGuard {
     run(&["link", "set", &name, "up"], false);
     BridgeGuard { name }
 }
+
+/// A node running Keepalived instead of Highland.
+///
+/// This exists so interoperability is a test rather than a claim. Keepalived is
+/// the implementation everyone actually deploys, and a VRRP implementation that
+/// has only ever spoken to itself has not been tested.
+///
+/// Two details are not obvious and both cost an afternoon:
+///
+/// - Keepalived locks `/run/bfd.pid` even with BFD unconfigured, so two
+///   instances sharing one `/run` refuse to start. Each node gets a private
+///   `tmpfs` on `/run`.
+/// - Keepalived's `chdir("/")` happens early, so every path it is given must be
+///   absolute. A relative path resolves against `/` and the configuration is
+///   reported as missing.
+pub struct Keepalived {
+    namespace: String,
+    directory: PathBuf,
+    address: String,
+    priority: u16,
+    vrid: u8,
+    process: Option<std::process::Child>,
+}
+
+impl Keepalived {
+    /// Creates the namespace and writes Keepalived's configuration.
+    #[must_use]
+    pub fn create(
+        namespace: &str,
+        address: &str,
+        vip: &str,
+        bridge: &str,
+        priority: u16,
+        vrid: u8,
+        peer: &str,
+    ) -> Self {
+        let name = Node::name(namespace);
+        run(&["netns", "del", &name], true);
+        let local_end = format!("{name}-l");
+        let peer_end = format!("{name}-p");
+        run(&["link", "del", &local_end], true);
+        run(&["link", "del", &peer_end], true);
+        run(&["netns", "add", &name], false);
+        run(
+            &[
+                "link", "add", &local_end, "type", "veth", "peer", "name", &peer_end,
+            ],
+            false,
+        );
+        run(&["link", "set", &local_end, "master", bridge], false);
+        run(&["link", "set", &local_end, "up"], false);
+        run(&["link", "set", &peer_end, "netns", &name], false);
+        run(
+            &[
+                "netns", "exec", &name, "ip", "link", "set", &peer_end, "name", INTERFACE,
+            ],
+            false,
+        );
+        run(
+            &["netns", "exec", &name, "ip", "link", "set", "lo", "up"],
+            false,
+        );
+        run(
+            &[
+                "netns", "exec", &name, "ip", "addr", "add", address, "dev", INTERFACE,
+            ],
+            false,
+        );
+        run(
+            &["netns", "exec", &name, "ip", "link", "set", INTERFACE, "up"],
+            false,
+        );
+
+        let directory = std::env::temp_dir().join(format!("highland-{name}"));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("the node directory can be created");
+
+        // `version 3` is not optional: without it Keepalived speaks VRRPv2, and
+        // a version-3-only receiver discards the result as `bad_version`. The
+        // first interoperability failure was exactly that.
+        let configuration = format!(
+            "vrrp_instance VI_{vrid} {{
+    state BACKUP
+    version 3
+    interface {INTERFACE}
+    virtual_router_id {vrid}
+    priority {priority}
+    advert_int 1
+    unicast_src_ip {address}
+    unicast_peer {{ {peer} }}
+    authentication {{ auth_type PASS
+        auth_pass highland }}
+    virtual_ipaddress {{ {vip} dev {INTERFACE} }}
+}}\n"
+        );
+        let path = directory.join("keepalived.conf");
+        std::fs::write(&path, configuration).expect("the configuration can be written");
+
+        Self {
+            namespace: name,
+            directory,
+            address: address.to_owned(),
+            priority,
+            vrid,
+            process: None,
+        }
+    }
+
+    /// Starts Keepalived and waits until it has reported a state.
+    ///
+    /// # Panics
+    ///
+    /// Panics when Keepalived exits, with its log: a node that will not start is
+    /// a configuration error, and its log says which line.
+    pub fn start(&mut self) {
+        let log_path = self.directory.join("keepalived.log");
+        let log = std::fs::File::create(&log_path).expect("the log file can be created");
+        let errors = log.try_clone().expect("the log can be duplicated");
+        let child = Command::new("ip")
+            .args(["netns", "exec", &self.namespace, "sh", "-c"])
+            .arg(format!(
+                "mount -t tmpfs tmpfs /run && exec keepalived -n -f {config} \
+                 -p {pid} -r {vrrp} -c {main} --log-console",
+                config = self.directory.join("keepalived.conf").display(),
+                pid = self.directory.join("keepalived.pid").display(),
+                vrrp = self.directory.join("keepalived.vrrp").display(),
+                main = self.directory.join("keepalived.main").display(),
+            ))
+            .stdout(Stdio::from(log))
+            .stderr(Stdio::from(errors))
+            .spawn();
+        assert!(child.is_ok(), "keepalived must be runnable");
+        self.process = child.ok();
+
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(10) {
+            let text = self.log();
+            if text.contains("MASTER STATE") || text.contains("BACKUP STATE") {
+                return;
+            }
+            assert!(
+                !(text.contains("Configuration error") || text.contains("Stopped Keepalived")),
+                "keepalived refused its own configuration:\n{text}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!("keepalived never reported a state:\n{}", self.log());
+    }
+
+    /// Kills Keepalived, which is what a node failure looks like to its peer.
+    pub fn kill(&mut self) {
+        if let Some(mut process) = self.process.take() {
+            let _ = process.kill();
+            let _ = process.wait();
+        }
+    }
+
+    /// Returns Keepalived's own log, with terminal colour removed.
+    #[must_use]
+    pub fn log(&self) -> String {
+        let raw =
+            std::fs::read_to_string(self.directory.join("keepalived.log")).unwrap_or_default();
+        strip_ansi(&raw)
+    }
+
+    /// Returns `true` when Keepalived says it is the master.
+    #[must_use]
+    pub fn says_master(&self) -> bool {
+        self.log().contains("Entering MASTER STATE")
+    }
+
+    /// Returns `true` when the kernel says this node holds `address`.
+    #[must_use]
+    pub fn holds_address(&self, address: &str) -> bool {
+        let wanted = address.split('/').next().unwrap_or(address);
+        let output = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &self.namespace,
+                "ip",
+                "-o",
+                "-4",
+                "addr",
+                "show",
+                INTERFACE,
+            ])
+            .output()
+            .expect("ip runs");
+        String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+            // `ip -o addr` prints `inet 192.0.2.100/24`, so the prefix is
+            // stripped from the field as well as from the wanted address.
+            line.split_whitespace()
+                .any(|field| field.split('/').next().unwrap_or(field) == wanted)
+        })
+    }
+
+    /// The address this node sends from.
+    #[must_use]
+    pub fn address(&self) -> &str {
+        &self.address
+    }
+
+    /// The priority this node advertises.
+    #[must_use]
+    pub fn priority(&self) -> u16 {
+        self.priority
+    }
+
+    /// The VRID this node serves.
+    #[must_use]
+    pub fn vrid(&self) -> u8 {
+        self.vrid
+    }
+}
+
+impl Drop for Keepalived {
+    fn drop(&mut self) {
+        self.kill();
+        run(&["netns", "del", &self.namespace], true);
+        let _ = std::fs::remove_dir_all(&self.directory);
+    }
+}

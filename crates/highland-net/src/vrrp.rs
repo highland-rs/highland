@@ -181,23 +181,28 @@ pub struct Datagram<'a> {
 ///
 /// # Examples
 ///
+///
 /// ```
 /// use highland_net::{Accepted, AllowedSources, Datagram, PeerSet, validate};
 /// use std::net::IpAddr;
 /// use std::time::Duration;
 ///
 /// let peers = PeerSet::new([IpAddr::from([192, 0, 2, 11])]);
+/// // Encoded for the addresses below, because the pseudo-header is part of the
+/// // checksum and the fixture has to be built for what it will be checked as.
 /// let bytes = highland_net::fixture_advertisement();
+/// let source: IpAddr = highland_net::FIXTURE_SOURCE.parse().expect("valid");
+/// let destination: IpAddr = highland_net::FIXTURE_DESTINATION.parse().expect("valid");
 ///
 /// let accepted = validate(
 ///     Datagram {
 ///         bytes: &bytes,
-///         source: IpAddr::from([192, 0, 2, 11]),
+///         source,
 ///         ttl: 255,
 ///         destination: None,
 ///     },
 ///     &AllowedSources::Peers(peers),
-///     IpAddr::from([192, 0, 2, 11]),
+///     destination,
 ///     42,
 ///     Duration::ZERO,
 ///     None,
@@ -533,14 +538,47 @@ pub fn default_interval() -> MaxAdverInt {
 /// range.
 #[must_use]
 pub fn fixture_advertisement() -> Vec<u8> {
+    fixture_advertisement_between(FIXTURE_SOURCE, FIXTURE_DESTINATION)
+}
+
+/// The source a [`fixture_advertisement`] is encoded for.
+pub const FIXTURE_SOURCE: &str = "192.0.2.11";
+
+/// The destination a [`fixture_advertisement`] is encoded for.
+pub const FIXTURE_DESTINATION: &str = "192.0.2.12";
+
+/// A fixture advertisement encoded for a specific source and destination.
+///
+/// The pseudo-header is part of the checksum, so a fixture that is to be
+/// *validated* has to be encoded for the addresses it will be validated against.
+/// Encoding with the message alone produces bytes that no implementation
+/// accepts, which is the defect this fixture's family once had.
+///
+/// # Panics
+///
+/// Panics when either address is unparseable or the family of one disagrees with
+/// the other, which for a fixture is a mistake in the test rather than a
+/// condition to handle.
+#[must_use]
+pub fn fixture_advertisement_between(source: &str, destination: &str) -> Vec<u8> {
     let advertisement = Advertisement::new(
         highland_vrrp::Vrid::new(42).expect("42 is a valid VRID"),
         highland_vrrp::Priority::new(150).expect("150 is representable"),
         default_interval(),
-        vec!["192.0.2.10".parse().expect("valid address")],
+        vec!["192.0.2.100".parse().expect("valid address")],
     )
     .expect("the fixture is valid");
-    advertisement.encode_v4().expect("the fixture encodes")
+    let family = highland_vrrp::IpFamily::of(&source.parse().expect("a valid source address"));
+    advertisement
+        .encode_with_checksum(
+            family,
+            ChecksumScope::for_packet(
+                family,
+                source.parse().expect("a valid source address"),
+                destination.parse().expect("a valid destination address"),
+            ),
+        )
+        .expect("the fixture encodes")
 }
 
 #[cfg(test)]

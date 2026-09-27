@@ -79,10 +79,12 @@ fn two_nodes_elect_one_master_and_the_vip_moves_when_it_dies() {
             first.addresses(),
             second.addresses()
         );
-        assert!(
-            !first.holds_vip(),
-            "the dead node cannot still hold the address"
-        );
+        // The dead node still holds the address, and that is not a defect: a
+        // process that was killed cannot remove it, and nothing in VRRP tells
+        // the survivor to do it. It is the fencing limitation §21.2 records, and
+        // it is why the announcement on takeover exists — the neighbour's cache
+        // is what actually moves, not the address on the dead host. Asserting
+        // the opposite here would be asserting a guarantee VRRP does not make.
     } else {
         second.kill();
         let moved = wait_for("the VIP moved to the survivor", MASTER_DOWN_BUDGET, || {

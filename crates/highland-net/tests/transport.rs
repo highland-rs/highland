@@ -10,17 +10,20 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use highland_net::{
-    Accepted, AllowedSources, Datagram, PeerSet, RateWindow, Rejection, fixture_advertisement,
-    validate,
-};
+use highland_net::{Accepted, AllowedSources, Datagram, PeerSet, RateWindow, Rejection, validate};
 use highland_vrrp::{Advertisement, IpFamily, MaxAdverInt, Priority, Vrid};
 
-const PEER: [u8; 4] = [192, 0, 2, 11];
 const VRID: u8 = 42;
 
 fn peer() -> IpAddr {
-    IpAddr::from(PEER)
+    highland_net::FIXTURE_SOURCE
+        .parse()
+        .expect("the fixture source is valid")
+}
+
+/// The fixture encoded for the addresses this test validates against.
+fn fixture() -> Vec<u8> {
+    highland_net::fixture_advertisement()
 }
 
 fn peers() -> PeerSet {
@@ -39,9 +42,13 @@ fn datagram(bytes: &[u8]) -> Datagram<'_> {
 /// The address a unicast datagram is treated as having been sent to.
 ///
 /// A unicast transport knows this without being told: it is the address its
-/// socket is bound to, which is the receiver's own address.
+/// socket is bound to, which is the receiver's own address. The fixture is
+/// encoded for the same address, because the pseudo-header is part of the
+/// checksum and a fixture encoded for a different one does not verify.
 fn destination() -> IpAddr {
-    "192.0.2.12".parse().expect("valid")
+    highland_net::FIXTURE_DESTINATION
+        .parse()
+        .expect("the fixture destination is valid")
 }
 
 fn allowed(peers: PeerSet) -> AllowedSources {
@@ -64,14 +71,30 @@ fn advertisement(priority: u8) -> Advertisement {
         Vrid::new(VRID).expect("valid"),
         Priority::new(priority).expect("representable"),
         MaxAdverInt::from_duration(Duration::from_secs(1)).expect("in range"),
-        vec!["192.0.2.10".parse().expect("valid address")],
+        vec!["192.0.2.100".parse().expect("valid address")],
     )
     .expect("valid")
 }
 
+/// An advertisement encoded for the addresses this file validates against.
+///
+/// The pseudo-header is part of the checksum, so "encode and then validate" is
+/// only meaningful when the two agree on the addresses — and `encode_v4`, which
+/// sums the message alone, is now a *wrong* encoder rather than a shortcut.
+fn encoded(priority: u8) -> Vec<u8> {
+    advertisement(priority)
+        .encode_with_checksum(IpFamily::V4, scope())
+        .expect("encodes")
+}
+
+/// The scope a packet from this file's peer to this file's destination has.
+fn scope() -> highland_vrrp::ChecksumScope {
+    highland_vrrp::ChecksumScope::for_packet(IpFamily::V4, peer(), destination())
+}
+
 #[test]
 fn a_well_formed_advertisement_from_a_peer_is_accepted() {
-    let bytes = fixture_advertisement();
+    let bytes = fixture();
     let outcome = accepted(&bytes);
 
     let accepted = outcome.advertisement().expect("accepted");
@@ -82,7 +105,7 @@ fn a_well_formed_advertisement_from_a_peer_is_accepted() {
 
 #[test]
 fn a_ttl_other_than_255_is_rejected() {
-    let bytes = fixture_advertisement();
+    let bytes = fixture();
     for ttl in [0u8, 1, 64, 254] {
         let outcome = validate(
             Datagram {
@@ -103,7 +126,7 @@ fn a_ttl_other_than_255_is_rejected() {
 
 #[test]
 fn an_advertisement_from_a_stranger_is_rejected() {
-    let bytes = fixture_advertisement();
+    let bytes = fixture();
     let outcome = validate(
         Datagram {
             bytes: &bytes,
@@ -122,7 +145,7 @@ fn an_advertisement_from_a_stranger_is_rejected() {
 
 #[test]
 fn an_empty_peer_list_accepts_nothing() {
-    let bytes = fixture_advertisement();
+    let bytes = fixture();
     let outcome = validate(
         datagram(&bytes),
         &allowed(PeerSet::default()),
@@ -136,7 +159,7 @@ fn an_empty_peer_list_accepts_nothing() {
 
 #[test]
 fn an_advertisement_for_another_vrid_is_rejected() {
-    let bytes = advertisement(150).encode_v4().expect("encodes");
+    let bytes = encoded(150);
     let outcome = validate(
         datagram(&bytes),
         &allowed(peers()),
@@ -150,14 +173,14 @@ fn an_advertisement_for_another_vrid_is_rejected() {
 
 #[test]
 fn a_version_two_packet_is_rejected() {
-    let mut bytes = fixture_advertisement();
+    let mut bytes = fixture();
     bytes[0] = 0x21;
     assert_eq!(accepted(&bytes).rejection(), Some(Rejection::BadVersion));
 }
 
 #[test]
 fn an_unknown_type_is_rejected() {
-    let mut bytes = fixture_advertisement();
+    let mut bytes = fixture();
     bytes[0] = 0x32;
     assert_eq!(accepted(&bytes).rejection(), Some(Rejection::BadType));
 }
@@ -165,7 +188,7 @@ fn an_unknown_type_is_rejected() {
 #[test]
 fn a_short_datagram_is_rejected_without_reading_past_it() {
     for length in 0..8 {
-        let bytes = fixture_advertisement();
+        let bytes = fixture();
         assert_eq!(
             accepted(&bytes[..length]).rejection(),
             Some(Rejection::TooShort),
@@ -176,21 +199,21 @@ fn a_short_datagram_is_rejected_without_reading_past_it() {
 
 #[test]
 fn a_count_that_exceeds_the_message_is_rejected_without_allocating() {
-    let mut bytes = fixture_advertisement();
+    let mut bytes = fixture();
     bytes[3] = 255;
     assert_eq!(accepted(&bytes).rejection(), Some(Rejection::BadLength));
 }
 
 #[test]
 fn a_trailing_octet_is_rejected() {
-    let mut bytes = fixture_advertisement();
+    let mut bytes = fixture();
     bytes.push(0);
     assert_eq!(accepted(&bytes).rejection(), Some(Rejection::BadLength));
 }
 
 #[test]
 fn a_corrupted_checksum_is_rejected() {
-    let mut bytes = fixture_advertisement();
+    let mut bytes = fixture();
     bytes[7] ^= 0xff;
     assert_eq!(accepted(&bytes).rejection(), Some(Rejection::BadChecksum));
 }
@@ -205,7 +228,7 @@ fn a_datagram_above_the_bound_is_rejected() {
 fn the_relinquishing_advertisement_is_accepted_as_an_advertisement() {
     // Priority zero is a normal advertisement carrying a special value. The
     // transport's job is to accept it; the state machine decides what it means.
-    let bytes = advertisement(0).encode_v4().expect("encodes");
+    let bytes = encoded(0);
     let outcome = accepted(&bytes);
     let accepted = outcome.advertisement().expect("accepted");
     assert!(accepted.priority().is_relinquish());
@@ -213,7 +236,7 @@ fn the_relinquishing_advertisement_is_accepted_as_an_advertisement() {
 
 #[test]
 fn a_zero_interval_is_rejected() {
-    let mut bytes = fixture_advertisement();
+    let mut bytes = fixture();
     bytes[4] = 0;
     bytes[5] = 0;
     assert_eq!(accepted(&bytes).rejection(), Some(Rejection::BadLength));
@@ -221,7 +244,7 @@ fn a_zero_interval_is_rejected() {
 
 #[test]
 fn the_rate_window_drops_the_excess() {
-    let bytes = fixture_advertisement();
+    let bytes = fixture();
     let mut window = RateWindow::per_second(2);
 
     assert!(matches!(
@@ -276,7 +299,7 @@ fn the_rate_window_drops_the_excess() {
 
 #[test]
 fn the_rate_limit_is_checked_before_the_expensive_checks() {
-    let bytes = fixture_advertisement();
+    let bytes = fixture();
     let mut window = RateWindow::per_second(0);
     assert_eq!(
         validate(
@@ -349,8 +372,10 @@ fn an_advertisement_is_built_for_the_wire_with_a_scope() {
 /// was delivered.
 #[test]
 fn a_group_instance_accepts_a_source_that_is_not_on_any_list() {
-    let bytes = fixture_advertisement();
     let group = IpAddr::V4(std::net::Ipv4Addr::new(224, 0, 0, 18));
+    // Encoded for this stranger's address, because the pseudo-header is part of
+    // the checksum: bytes built for one sender are not the bytes another sent.
+    let bytes = highland_net::fixture_advertisement_between("192.0.2.99", &group.to_string());
     let outcome = validate(
         Datagram {
             bytes: &bytes,
@@ -378,7 +403,7 @@ fn a_group_instance_accepts_a_source_that_is_not_on_any_list() {
 /// sees datagrams sent to the host itself, and nothing else distinguishes them.
 #[test]
 fn a_group_instance_rejects_a_datagram_addressed_to_the_host() {
-    let bytes = fixture_advertisement();
+    let bytes = fixture();
     let group = IpAddr::V4(std::net::Ipv4Addr::new(224, 0, 0, 18));
     let outcome = validate(
         Datagram {

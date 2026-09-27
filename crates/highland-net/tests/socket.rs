@@ -89,6 +89,14 @@ impl Drop for Node {
     }
 }
 
+/// The checksum scope for a packet sent from `source` to `destination`.
+fn scope_for(
+    source: std::net::IpAddr,
+    destination: std::net::IpAddr,
+) -> highland_vrrp::ChecksumScope {
+    highland_vrrp::ChecksumScope::for_packet(IpFamily::V4, source, destination)
+}
+
 /// An advertisement a node would send.
 fn advertisement(vrid: u8, priority: u8) -> Advertisement {
     Advertisement::new(
@@ -123,7 +131,9 @@ async fn an_advertisement_travels_and_keeps_its_ttl() {
     let receiver =
         highland_net::VrrpSocket::bind(IpFamily::V4, "lo", address).expect("the receiver binds");
 
-    let bytes = advertisement(42, 150).encode_v4().expect("encodes");
+    let bytes = advertisement(42, 150)
+        .encode_with_checksum(IpFamily::V4, scope_for(address, address))
+        .expect("encodes");
     sender
         .send_to(&bytes, address)
         .expect("the advertisement is written to the socket");
@@ -155,7 +165,9 @@ async fn a_packet_that_did_not_travel_with_255_is_discarded() {
     let receiver =
         highland_net::VrrpSocket::bind(IpFamily::V4, "lo", address).expect("the receiver binds");
 
-    let bytes = advertisement(42, 150).encode_v4().expect("encodes");
+    let bytes = advertisement(42, 150)
+        .encode_with_checksum(IpFamily::V4, scope_for(address, address))
+        .expect("encodes");
     sender
         .send_to(&bytes, address)
         .expect("the packet is written");
@@ -199,7 +211,12 @@ async fn an_advertisement_that_passes_every_check_is_accepted() {
     let sender = highland_net::VrrpSocket::bind(IpFamily::V4, "lo", address).expect("binds");
     let receiver = highland_net::VrrpSocket::bind(IpFamily::V4, "lo", address).expect("binds");
 
-    let bytes = advertisement(42, 150).encode_v4().expect("encodes");
+    // Encoded for the addresses the receiver will validate against, because the
+    // pseudo-header is part of the checksum: a packet built by summing the
+    // message alone is one no implementation accepts.
+    let bytes = advertisement(42, 150)
+        .encode_with_checksum(IpFamily::V4, scope_for(address, address))
+        .expect("encodes");
     sender.send_to(&bytes, address).expect("written");
 
     let arrival = receiver

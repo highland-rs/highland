@@ -11,6 +11,7 @@
 //! | The backend contract | [`NetworkBackend`] |
 //! | The VRRP transport: validation, peer filtering, rate limiting | [`validate`], [`PeerSet`], [`RateWindow`], [`Rejection`] |
 //! | The Linux Netlink implementation | `NetlinkBackend`, on Linux only |
+//! | The raw VRRP socket | `VrrpSocket`, on Linux only |
 //! | The backend used elsewhere | `UnsupportedBackend`, on other platforms |
 //! | A scripted backend for tests | [`ScriptedBackend`] |
 //!
@@ -34,6 +35,9 @@ mod vrrp;
 #[cfg(target_os = "linux")]
 mod netlink;
 
+#[cfg(target_os = "linux")]
+mod socket;
+
 #[cfg(not(target_os = "linux"))]
 mod unsupported;
 
@@ -53,6 +57,8 @@ pub use vrrp::{
 
 #[cfg(target_os = "linux")]
 pub use netlink::{LinkEvent, NetlinkBackend};
+#[cfg(target_os = "linux")]
+pub use socket::{Received, VrrpSocket};
 
 #[cfg(not(target_os = "linux"))]
 pub use unsupported::UnsupportedBackend;

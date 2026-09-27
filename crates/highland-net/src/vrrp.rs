@@ -9,6 +9,16 @@
 //!
 //! Peer filtering lives here rather than in the codec, because the codec is a
 //! pure function of bytes and a peer list is not (SPEC.md, §9.2).
+//!
+//! # Why the socket is built the way it is
+//!
+//! A raw IP socket for protocol 112 does not include the IP header on receive,
+//! so the TTL cannot be read from the datagram. The kernel offers it as
+//! ancillary data, which needs `recvmsg`, which `socket2` does not expose. So the
+//! socket is created and sent through `socket2`, and received through `nix`.
+//! Both are actively maintained, and neither needs `unsafe` in this crate.
+//! `pnet_datalink` would have covered this too, but it has been unmaintained
+//! since May 2024.
 
 use std::net::IpAddr;
 use std::time::Duration;
@@ -19,8 +29,7 @@ use highland_vrrp::{
 
 use crate::error::{NetError, Result};
 
-/// The IP protocol number assigned to VRRP, as the signed value a socket
-/// constructor takes.
+/// The IP protocol number assigned to VRRP, as a socket constructor takes it.
 pub const VRRP_IP_PROTOCOL: i32 = VRRP_PROTOCOL as i32;
 
 /// The TTL or hop limit a VRRP packet must carry (RFC 5798 §5.1.1.3, §5.1.2.3).
@@ -121,16 +130,16 @@ pub struct Datagram<'a> {
     /// The source address of the packet, which is the address the VRRP header was
     /// sent from and is therefore the peer's identity.
     pub source: IpAddr,
-    /// The TTL or hop limit, read from the IP header by the platform.
+    /// The TTL or hop limit, read from the IP header by the kernel.
     pub ttl: u8,
 }
 
 /// Validates a received datagram against the instance it belongs to.
 ///
-/// The order is deliberate and cheap: the length and the header first, then the
-/// TTL, then the peer list, and only then the checksum, which is the most
-/// expensive check. Nothing here allocates from the packet's own count field
-/// before the length has been checked against it.
+/// The order is deliberate and cheap: the rate limit and the TTL first, then the
+/// length and the header, then the peer list, and only then the checksum, which
+/// is the most expensive check. Nothing here allocates from the packet's own
+/// count field before the length has been checked against it.
 ///
 /// # Examples
 ///
@@ -172,7 +181,8 @@ pub fn validate(
         return Accepted::Rejected(Rejection::TooShort);
     }
 
-    let header = match Peek::read(datagram.bytes, IpFamily::of(&datagram.source)) {
+    let family = IpFamily::of(&datagram.source);
+    let header = match Peek::read(datagram.bytes, family) {
         Ok(header) => header,
         Err(DecodeError::Truncated { .. }) => return Accepted::Rejected(Rejection::TooShort),
         Err(error) => return Accepted::Rejected(rejection_for(&error)),
@@ -187,12 +197,8 @@ pub fn validate(
         return Accepted::Rejected(Rejection::UnknownPeer);
     }
 
-    let scope = ChecksumScope::for_packet(
-        IpFamily::of(&datagram.source),
-        datagram.source,
-        IpFamily::of(&datagram.source).default_group(),
-    );
-    match Advertisement::decode(datagram.bytes, IpFamily::of(&datagram.source), scope) {
+    let scope = ChecksumScope::for_packet(family, datagram.source, family.default_group());
+    match Advertisement::decode(datagram.bytes, family, scope) {
         Ok(advertisement) => Accepted::Advertisement(advertisement),
         Err(error) => Accepted::Rejected(rejection_for(&error)),
     }
@@ -200,7 +206,6 @@ pub fn validate(
 
 fn rejection_for(error: &DecodeError) -> Rejection {
     match error {
-        DecodeError::Truncated { .. } => Rejection::TooShort,
         DecodeError::ChecksumMismatch { .. } => Rejection::BadChecksum,
         DecodeError::UnexpectedPacketType { .. } => Rejection::BadType,
         DecodeError::InvalidField { field, .. } if *field == "version" => Rejection::BadVersion,
@@ -364,8 +369,8 @@ pub fn build(
 ///
 /// # Panics
 ///
-/// Never. The value is a constant, and the assertion documents that it is in the
-/// range the wire field allows.
+/// Never. One second is inside the range the wire field allows, and the
+/// assertion documents that.
 #[must_use]
 pub fn default_interval() -> MaxAdverInt {
     MaxAdverInt::from_duration(Duration::from_secs(1)).expect("one second is in range")
@@ -398,4 +403,16 @@ pub fn fixture_advertisement() -> Vec<u8> {
     )
     .expect("the fixture is valid");
     advertisement.encode_v4().expect("the fixture encodes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_protocol_constants_match_the_rfc() {
+        assert_eq!(VRRP_IP_PROTOCOL, 112, "RFC 5798 section 5.1.1.4");
+        assert_eq!(REQUIRED_TTL, 255, "RFC 5798 section 5.1.1.3");
+        assert_eq!(MAX_DATAGRAM, 4096, "a VRRP message is at most 8 + 255 * 16");
+    }
 }

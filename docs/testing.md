@@ -139,6 +139,20 @@ self-contained and two runs cannot collide:
 | `removing_an_address_that_is_not_there_is_idempotent` | A repeated release cannot fault |
 | `the_link_subscription_reports_an_address_change` | A subscription that installs and then never delivers would leave a node holding an address on a link that had gone away |
 
+## Tests that touch the kernel
+
+Two test binaries create interfaces and claim addresses, and they run at the
+same time. Two things follow, both learned by having them fail:
+
+- **They must not share an address range.** The backend refuses an address
+  another local interface already holds, so two tests claiming `192.0.2.10` fail
+  for a correct reason at the wrong moment. `tests/netlink.rs` uses
+  `192.0.2.0/24` and `tests/socket.rs` uses `198.51.100.0/24`.
+- **They must not share a loopback address either.** Every packet on loopback is
+  visible to every socket bound to it, so a test asserting "nothing arrives" fails
+  if a parallel test is sending. Each socket test takes its own address out of
+  `127/8`.
+
 ## Network-namespace tests
 
 These arrive with Milestone 4. The harness will build:

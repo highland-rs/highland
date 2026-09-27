@@ -1,0 +1,521 @@
+// Rust guideline compliant 2026-09-27
+
+//! The raw VRRP socket.
+//!
+//! Linux-only, because `AF_INET` raw sockets for IP protocol 112 are. Sending
+//! uses `socket2`, which is enough: a raw socket without `IP_HDRINCL` has the
+//! kernel build the IP header, and the socket's TTL is ours to set. Receiving
+//! needs `recvmsg`, because a raw socket receives the payload without the IP
+//! header and the TTL only arrives as ancillary data, so that half uses `nix`.
+//! Neither crate requires `unsafe` in this workspace.
+//!
+//! # What this module guarantees
+//!
+//! - Every packet sent carries TTL or hop limit 255, as RFC 5798 requires, and
+//!   the TTL is set on the socket rather than trusted to a default.
+//! - A datagram received from a different source address than the kernel reports
+//!   is impossible, so the source used for peer filtering is the kernel's.
+//! - The receive buffer is bounded, so a hostile peer cannot make the kernel
+//!   copy more than [`MAX_DATAGRAM`](crate::MAX_DATAGRAM) bytes.
+
+use std::io::IoSliceMut;
+use std::net::IpAddr;
+use std::os::fd::AsRawFd;
+
+use highland_vrrp::IpFamily;
+use nix::sys::socket::sockopt::{Ipv4RecvTtl, Ipv6RecvHopLimit};
+use nix::sys::socket::{MsgFlags, SockaddrIn, SockaddrIn6};
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
+
+use crate::error::{NetError, Result};
+use crate::vrrp::{MAX_DATAGRAM, REQUIRED_TTL, VRRP_IP_PROTOCOL};
+
+/// The address a socket binds to, before it becomes a [`SockAddr`].
+#[derive(Debug, Clone, Copy)]
+enum SocketAddrV4Bound {
+    /// An IPv4 address.
+    V4(std::net::Ipv4Addr),
+    /// An IPv6 address.
+    V6(std::net::Ipv6Addr),
+}
+
+/// A raw socket for VRRP, bound to one interface and one address family.
+#[derive(Debug)]
+pub struct VrrpSocket {
+    socket: Socket,
+    family: IpFamily,
+    interface: String,
+}
+
+/// A datagram read from the socket, with everything the transport needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Received {
+    /// The VRRP payload, with any IP header removed.
+    pub payload: Vec<u8>,
+    /// The address the packet came from, which is the peer's identity.
+    pub source: IpAddr,
+    /// The TTL or hop limit the kernel saw.
+    pub ttl: u8,
+    /// Whether the datagram arrived with its IP header still attached.
+    ///
+    /// A raw IP socket usually receives the payload with the header stripped and
+    /// the header's fields delivered as ancillary data, but a packet that has
+    /// been through the loopback path arrives whole. Both shapes occur, so both
+    /// are handled and both are tested.
+    pub header_attached: bool,
+}
+
+impl VrrpSocket {
+    /// Binds a raw VRRP socket to `interface`, sending from `source`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Io`] when the socket cannot be created, which needs
+    /// `CAP_NET_RAW`, or when the interface cannot be bound, which needs it
+    /// too.
+    pub fn bind(family: IpFamily, interface: &str, source: IpAddr) -> Result<Self> {
+        Self::bind_with_ttl(family, interface, source, REQUIRED_TTL)
+    }
+
+    /// Binds a raw VRRP socket that sends with an arbitrary TTL.
+    ///
+    /// The TTL is a parameter only so a test can produce a packet the receiver
+    /// must reject. The daemon has no reason to send anything but 255, and
+    /// [`VrrpSocket::bind`] is the entry point it uses.
+    ///
+    /// # Errors
+    ///
+    /// As [`VrrpSocket::bind`].
+    pub fn bind_with_ttl(
+        family: IpFamily,
+        interface: &str,
+        source: IpAddr,
+        ttl: u8,
+    ) -> Result<Self> {
+        // The socket is created for one family and bound to one of that
+        // family's addresses, so a mismatch is a configuration error rather than
+        // something to paper over.
+        let (domain, bound_source) = match (family, source) {
+            (IpFamily::V4, IpAddr::V4(address)) => (Domain::IPV4, SocketAddrV4Bound::V4(address)),
+            (IpFamily::V6, IpAddr::V6(address)) => (Domain::IPV6, SocketAddrV4Bound::V6(address)),
+            (family, other) => {
+                return Err(NetError::Encode {
+                    family,
+                    reason: format!("{other} is not an {family} address"),
+                });
+            }
+        };
+
+        let socket = Socket::new(domain, Type::RAW, Some(Protocol::from(VRRP_IP_PROTOCOL)))
+            .map_err(|source| NetError::Io {
+                operation: "creating a VRRP socket",
+                source,
+            })?;
+
+        // The TTL is set on the socket so the kernel puts 255 in the header it
+        // builds. RFC 5798 requires it and a peer discards anything else.
+        let ttl = u32::from(ttl);
+        match family {
+            IpFamily::V4 => socket.set_ttl_v4(ttl),
+            IpFamily::V6 => socket.set_unicast_hops_v6(ttl),
+            // `IpFamily` is `#[non_exhaustive]`, so a family added later lands
+            // here rather than failing to compile.
+            _ => {
+                return Err(NetError::Unsupported {
+                    operation: "this address family",
+                });
+            }
+        }
+        .map_err(|source| NetError::Io {
+            operation: "setting the VRRP TTL",
+            source,
+        })?;
+
+        // Asking the kernel for the TTL of incoming packets. A raw socket
+        // receives the payload only, so without this the check RFC 5798
+        // requires cannot be made at all.
+        //
+        // Only the option matching the socket's family is set: the kernel
+        // answers ENOPROTOOPT when an IPv6 option is set on an IPv4 socket, and
+        // vice versa. Setting both, which looks harmless, is not.
+        let result = match family {
+            IpFamily::V4 => nix::sys::socket::setsockopt(&socket, Ipv4RecvTtl, &true),
+            IpFamily::V6 => nix::sys::socket::setsockopt(&socket, Ipv6RecvHopLimit, &true),
+            _ => {
+                return Err(NetError::Unsupported {
+                    operation: "this address family",
+                });
+            }
+        };
+        result.map_err(|error| NetError::Io {
+            operation: "asking the kernel for the received TTL",
+            source: std::io::Error::from_raw_os_error(error as i32),
+        })?;
+
+        socket
+            .bind(&match bound_source {
+                SocketAddrV4Bound::V4(address) => {
+                    SockAddr::from(std::net::SocketAddrV4::new(address, 0))
+                }
+                SocketAddrV4Bound::V6(address) => {
+                    SockAddr::from(std::net::SocketAddrV6::new(address, 0, 0, 0))
+                }
+            })
+            .map_err(|source| NetError::Io {
+                operation: "binding a VRRP socket",
+                source,
+            })?;
+        socket
+            .bind_device(Some(interface.as_bytes()))
+            .map_err(|source| NetError::Io {
+                operation: "binding a VRRP socket to an interface",
+                source,
+            })?;
+
+        Ok(Self {
+            socket,
+            family,
+            interface: interface.to_owned(),
+        })
+    }
+
+    /// Returns the family this socket speaks.
+    #[must_use]
+    pub fn family(&self) -> IpFamily {
+        self.family
+    }
+
+    /// Returns the interface this socket is bound to.
+    #[must_use]
+    pub fn interface(&self) -> &str {
+        &self.interface
+    }
+
+    /// Sends one VRRP payload to `destination`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Io`] when the datagram cannot be written, for
+    /// example when the route to the peer is missing.
+    pub fn send_to(&self, payload: &[u8], destination: IpAddr) -> Result<usize> {
+        let target = match destination {
+            IpAddr::V4(address) => SockAddr::from(std::net::SocketAddrV4::new(address, 0)),
+            IpAddr::V6(address) => SockAddr::from(std::net::SocketAddrV6::new(address, 0, 0, 0)),
+        };
+        self.socket
+            .send_to(payload, &target)
+            .map_err(|source| NetError::Io {
+                operation: "sending a VRRP advertisement",
+                source,
+            })
+    }
+
+    /// Reads one datagram without blocking.
+    ///
+    /// Returns `Ok(None)` when nothing is waiting, which is the normal case and
+    /// not an error: the caller has other work to do.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Io`] when the read fails for a reason other than
+    /// there being nothing to read.
+    pub fn receive(&self) -> Result<Option<Received>> {
+        let mut buffer = vec![0u8; MAX_DATAGRAM];
+        let mut control = vec![0u8; 128];
+        let fd = self.socket.as_raw_fd();
+
+        // The borrow of `buffer` by the read is released before the payload is
+        // copied out, so the caller never sees a buffer tied to the socket.
+        let (length, source, ttl) = match self.family {
+            IpFamily::V4 => {
+                let mut iov = [IoSliceMut::new(&mut buffer)];
+                match nix::sys::socket::recvmsg::<SockaddrIn>(
+                    fd,
+                    &mut iov,
+                    Some(&mut control),
+                    MsgFlags::MSG_DONTWAIT,
+                ) {
+                    Ok(outcome) => {
+                        let length = outcome.bytes;
+                        let source = address_v4(outcome.address)?;
+                        let ttl = hop_limit_v4(&outcome).unwrap_or(0);
+                        (length, source, ttl)
+                    }
+                    Err(error) => return Self::nothing_yet(error),
+                }
+            }
+            IpFamily::V6 => {
+                let mut iov = [IoSliceMut::new(&mut buffer)];
+                match nix::sys::socket::recvmsg::<SockaddrIn6>(
+                    fd,
+                    &mut iov,
+                    Some(&mut control),
+                    MsgFlags::MSG_DONTWAIT,
+                ) {
+                    Ok(outcome) => {
+                        let length = outcome.bytes;
+                        let source = address_v6(outcome.address)?;
+                        let ttl = hop_limit_v6(&outcome).unwrap_or(0);
+                        (length, source, ttl)
+                    }
+                    Err(error) => return Self::nothing_yet(error),
+                }
+            }
+            // `IpFamily` is `#[non_exhaustive]`, so a family added later lands
+            // here rather than failing to compile.
+            _ => {
+                return Err(NetError::Unsupported {
+                    operation: "this address family",
+                });
+            }
+        };
+
+        let length = length.min(buffer.len());
+        Ok(Some(strip_header(&buffer[..length], source, ttl)))
+    }
+
+    /// Turns "there was nothing to read" into `Ok(None)`, and anything else
+    /// into an error.
+    fn nothing_yet(error: nix::errno::Errno) -> Result<Option<Received>> {
+        match error {
+            nix::errno::Errno::EAGAIN | nix::errno::Errno::EINTR => Ok(None),
+            other => Err(NetError::Io {
+                operation: "receiving a VRRP advertisement",
+                source: std::io::Error::from_raw_os_error(other as i32),
+            }),
+        }
+    }
+
+    /// Waits up to `timeout` for a datagram.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Io`] when the read fails for a reason other than
+    /// there being nothing to read.
+    pub fn receive_timeout(&self, timeout: std::time::Duration) -> Result<Option<Received>> {
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            if let Some(received) = self.receive()? {
+                return Ok(Some(received));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(None);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+}
+
+/// Removes the IP header if the datagram still carries one.
+///
+/// A raw socket normally delivers the payload alone, with the header's fields
+/// arriving as ancillary data. A packet that came back through the loopback
+/// device arrives whole, header and all, and handing that to the codec would
+/// fail every field check for reasons that have nothing to do with the packet's
+/// contents. So the header is recognized and removed here, and its values are
+/// preferred over the ancillary ones when it is present.
+fn strip_header(datagram: &[u8], ancillary_source: IpAddr, ancillary_ttl: u8) -> Received {
+    if let Some(stripped) = strip_ipv4_header(datagram) {
+        return stripped;
+    }
+    Received {
+        payload: datagram.to_vec(),
+        source: ancillary_source,
+        ttl: ancillary_ttl,
+        header_attached: false,
+    }
+}
+
+/// Parses and removes an IPv4 header, if that is what the datagram starts with.
+fn strip_ipv4_header(datagram: &[u8]) -> Option<Received> {
+    let first = *datagram.first()?;
+    if first >> 4 != 4 {
+        return None;
+    }
+    let header_len = usize::from(first & 0x0f) * 4;
+    // A header shorter than 20 octets, or longer than the datagram, is not one.
+    if !(20..=60).contains(&header_len) || datagram.len() < header_len {
+        return None;
+    }
+    let total_len = usize::from(u16::from_be_bytes([datagram[2], datagram[3]]));
+    let protocol = datagram[9];
+    // The total length must describe this datagram, and the protocol must be
+    // VRRP: anything else means these octets are a payload that happens to start
+    // with 0x4, and stripping them would corrupt a valid advertisement.
+    if total_len != datagram.len() || protocol != u8::try_from(VRRP_IP_PROTOCOL).unwrap_or(112) {
+        return None;
+    }
+
+    let source = IpAddr::from(<[u8; 4]>::try_from(&datagram[12..16]).ok()?);
+    let ttl = datagram[8];
+    Some(Received {
+        payload: datagram[header_len..].to_vec(),
+        source,
+        ttl,
+        header_attached: true,
+    })
+}
+
+/// Extracts the source address from an IPv4 read.
+fn address_v4(address: Option<SockaddrIn>) -> Result<IpAddr> {
+    address
+        .map(|address| IpAddr::V4(address.ip()))
+        .ok_or_else(|| NetError::Io {
+            operation: "receiving a VRRP advertisement",
+            source: std::io::Error::other("the kernel did not report a source address"),
+        })
+}
+
+/// Extracts the source address from an IPv6 read.
+fn address_v6(address: Option<SockaddrIn6>) -> Result<IpAddr> {
+    address
+        .map(|address| IpAddr::V6(address.ip()))
+        .ok_or_else(|| NetError::Io {
+            operation: "receiving a VRRP advertisement",
+            source: std::io::Error::other("the kernel did not report a source address"),
+        })
+}
+
+/// Reads the TTL out of the ancillary data of an IPv4 read.
+///
+/// `IP_RECVTTL` has no variant of its own in `nix`, so it arrives as an unknown
+/// control message carrying the header and the bytes. Reaching for it that way is
+/// deliberate: the alternative is a raw `recvmsg` in this crate.
+fn hop_limit_v4(outcome: &nix::sys::socket::RecvMsg<'_, '_, SockaddrIn>) -> Option<u8> {
+    first_unknown_byte(outcome, nix::libc::IP_TTL)
+}
+
+/// Reads the hop limit out of the ancillary data of an IPv6 read.
+fn hop_limit_v6(outcome: &nix::sys::socket::RecvMsg<'_, '_, SockaddrIn6>) -> Option<u8> {
+    first_unknown_byte(outcome, nix::libc::IPV6_RECVHOPLIMIT)
+}
+
+/// Returns the first byte of the control message of type `cmsg_type`.
+fn first_unknown_byte<S>(
+    outcome: &nix::sys::socket::RecvMsg<'_, '_, S>,
+    cmsg_type: libc::c_int,
+) -> Option<u8>
+where
+    S: nix::sys::socket::SockaddrLike,
+{
+    use nix::sys::socket::ControlMessageOwned;
+
+    for message in outcome.cmsgs().ok()? {
+        if let ControlMessageOwned::Unknown(unknown) = message
+            && unknown.cmsg_header.cmsg_type == cmsg_type
+        {
+            return unknown.data_bytes.first().copied();
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vrrp::fixture_advertisement;
+
+    /// An IPv4 header with the given TTL, source, and payload length.
+    fn ipv4_datagram(ttl: u8, source: [u8; 4], payload: &[u8]) -> Vec<u8> {
+        let total = 20 + payload.len();
+        let mut header = vec![
+            0x45,
+            0x00,
+            u8::try_from(total >> 8).unwrap_or(0),
+            u8::try_from(total & 0xff).unwrap_or(0),
+            0x00,
+            0x01,
+            0x40,
+            0x00,
+            ttl,
+            u8::try_from(VRRP_IP_PROTOCOL).unwrap_or(112),
+            0x00,
+            0x00,
+        ];
+        header.extend_from_slice(&source);
+        header.extend_from_slice(&[127, 0, 0, 1]);
+        header.extend_from_slice(payload);
+        header
+    }
+
+    #[test]
+    fn a_datagram_without_a_header_is_left_alone() {
+        let payload = fixture_advertisement();
+        let received = strip_header(&payload, "192.0.2.11".parse().expect("valid"), 255);
+
+        assert_eq!(received.payload, payload, "a bare payload is not touched");
+        assert!(!received.header_attached);
+        assert_eq!(
+            received.source,
+            "192.0.2.11".parse::<IpAddr>().expect("valid")
+        );
+        assert_eq!(received.ttl, 255, "the ancillary values are used");
+    }
+
+    #[test]
+    fn an_attached_ipv4_header_is_removed_and_its_values_win() {
+        let payload = fixture_advertisement();
+        let datagram = ipv4_datagram(64, [192, 0, 2, 11], &payload);
+        let received = strip_header(&datagram, "10.0.0.1".parse().expect("valid"), 255);
+
+        assert_eq!(
+            received.payload, payload,
+            "the header is gone and the payload is intact"
+        );
+        assert!(received.header_attached);
+        assert_eq!(
+            received.source,
+            "192.0.2.11".parse::<IpAddr>().expect("valid")
+        );
+        assert_eq!(
+            received.ttl, 64,
+            "the header's TTL is the one that was actually used"
+        );
+    }
+
+    #[test]
+    fn a_payload_that_merely_looks_like_a_header_is_left_alone() {
+        // A VRRP advertisement always starts 0x31, but a codec must not depend
+        // on that, and neither must the transport.
+        let mut payload = fixture_advertisement();
+        payload[0] = 0x45;
+
+        let received = strip_header(&payload, "192.0.2.11".parse().expect("valid"), 255);
+        assert!(
+            !received.header_attached,
+            "the length and protocol did not match a header"
+        );
+        assert_eq!(received.payload, payload);
+    }
+
+    #[test]
+    fn a_header_for_another_protocol_is_left_alone() {
+        let payload = fixture_advertisement();
+        let mut datagram = ipv4_datagram(255, [192, 0, 2, 11], &payload);
+        datagram[9] = 17; // UDP
+
+        let received = strip_header(&datagram, "192.0.2.11".parse().expect("valid"), 255);
+        assert!(!received.header_attached, "only a VRRP header is stripped");
+        assert_eq!(received.payload, datagram);
+    }
+
+    #[test]
+    fn a_truncated_header_is_left_alone() {
+        let payload = fixture_advertisement();
+        let mut datagram = ipv4_datagram(255, [192, 0, 2, 11], &payload);
+        datagram.truncate(12);
+
+        let received = strip_header(&datagram, "192.0.2.11".parse().expect("valid"), 255);
+        assert!(
+            !received.header_attached,
+            "a header shorter than 20 octets is not a header"
+        );
+    }
+
+    #[test]
+    fn an_empty_datagram_is_handled() {
+        let received = strip_header(&[], "192.0.2.11".parse().expect("valid"), 255);
+        assert!(received.payload.is_empty());
+        assert!(!received.header_attached);
+    }
+}

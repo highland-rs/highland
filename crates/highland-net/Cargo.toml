@@ -30,6 +30,8 @@ netlink-tests = []
 [dependencies]
 futures-util.workspace = true
 highland-vrrp.workspace = true
+libc.workspace = true
+nix.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]

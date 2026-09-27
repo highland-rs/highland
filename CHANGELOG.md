@@ -6,9 +6,9 @@ All notable changes to Highland are recorded here. The format follows
 
 ## [Unreleased]
 
-Milestones 0 through 3 have landed. No virtual IP moves on a real network yet:
-the raw VRRP socket is the one missing piece, and the daemon refuses to start
-rather than run a process that claims to be a VRRP router while sending nothing.
+Milestones 0 through 3 have landed, and the raw VRRP socket now exists. A virtual
+IP still does not move on a real network: the transport is not yet wired into the
+daemon, and the namespace harness is Milestone 4's remaining work.
 
 ### Added — Milestone 0, the repository
 
@@ -136,6 +136,37 @@ rather than run a process that claims to be a VRRP router while sending nothing.
   sharing an octet with the interval. The decoder ignores a non-zero reserved
   nibble, as the RFC requires of a receiver.
 
+### The raw VRRP socket
+
+`highland-net` has a real socket at last, so the daemon can carry VRRP:
+
+- A `SOCK_RAW` socket for IP protocol 112, bound to the instance's interface and
+  source address, with the TTL set on the socket so the kernel puts 255 in the
+  header it builds (RFC 5798 §5.1.1.3).
+- `recvmsg` for receives, because a raw socket receives the payload with the IP
+  header stripped and the TTL only arrives as ancillary data. The check RFC 5798
+  requires cannot be made without it.
+- `nix` for that half and `socket2` for the rest, so no `unsafe` is needed in
+  this workspace. `pnet_datalink` would have covered it too, but it has been
+  unmaintained since May 2024.
+- The datagram may arrive with its IP header still attached, which is what
+  happens on the loopback path. Both shapes are handled and both are tested,
+  because a transport that only assumed one of them would corrupt a valid
+  advertisement on the other.
+- `bind_with_ttl` exists so a test can produce a packet the receiver must
+  reject. The daemon has no reason to send anything but 255.
+
+Six socket tests against a real kernel, behind `netlink-tests`.
+
+Two more bugs only a live socket found, both invisible in the types:
+
+  - `IPV6_RECVHOPLIMIT` was being set on IPv4 sockets, which the kernel
+    answers with `ENOPROTOOPT`. Setting both options looks harmless and is not.
+    This is also what caused the `ENOPROTOOPT` I had earlier attributed to
+    loopback addresses; that attribution was wrong.
+  - A raw socket's receive buffer can carry the whole IP packet, not just the
+    payload, so the header is parsed and removed rather than assumed absent.
+
 ### Fixed, by running it on Linux
 
 The Netlink backend had never been compiled, because it is `cfg`'d out on
@@ -155,6 +186,8 @@ Also corrected: the `rtnetlink` feature is `tokio_socket`, not `tokio`, and
 
 - `scripts/linux-tests.sh`: the whole gate in a container with `CAP_NET_ADMIN`,
   which is how the Linux-only code gets compiled and executed from a Mac.
+- `crates/highland-net/tests/socket.rs`: six tests of the socket against a real
+  kernel, and five unit tests of the header handling.
 - Seven Netlink tests against a real kernel, behind the `netlink-tests` feature,
   each creating its own dummy interface. They assert `I-19` directly: a
   successful add means the kernel state changed, read back from the kernel.
@@ -166,10 +199,10 @@ Also corrected: the `rtnetlink` feature is `tokio_socket`, not `tokio`, and
 
 ### Not delivered, and why
 
-- **The raw VRRP socket.** It needs `SOCK_RAW` for IP protocol 112, and reading a
-  peer's TTL back needs ancillary data. Both are Linux-specific, and this
-  milestone was built on macOS, where neither can be compiled or verified. The
-  daemon therefore refuses to start (`TRANSPORT_AVAILABLE` is `false`).
+- **Wiring the socket into the daemon.** The socket is built and tested against a
+  real kernel, but the transport is not yet the one the actor uses, so the daemon
+  still refuses to start (`TRANSPORT_AVAILABLE` is `false`). This is the next
+  slice of Milestone 4.
 - **Gratuitous ARP**, which needs an `AF_PACKET` socket whose `sockaddr_ll` has no
   safe representation. It returns `NetError::Unsupported`, and the state machine
   already treats that failure as non-fatal.
@@ -179,7 +212,7 @@ Also corrected: the `rtnetlink` feature is `tokio_socket`, not `tokio`, and
 
 ### Known limitations
 
-- `highland run` exits non-zero: `the VRRP transport is not implemented; the
+- `highland run` exits non-zero: `the VRRP transport is not wired in yet; the
   daemon will not start`.
 - No VRRP traffic is sent or received, so no address moves between machines.
 - No control socket listener, so every `highland` command except `version` and

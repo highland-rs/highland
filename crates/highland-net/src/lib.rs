@@ -62,9 +62,9 @@ pub use types::{
     PrefixLenError,
 };
 pub use vrrp::{
-    Accepted, DEFAULT_ACCEPT_RATE, Datagram, Destinations, MAX_DATAGRAM, PeerSet, REQUIRED_TTL,
-    RateWindow, Rejection, VRRP_IP_PROTOCOL, build, default_interval, fixture_advertisement,
-    validate,
+    Accepted, AllowedSources, DEFAULT_ACCEPT_RATE, Datagram, Destinations, MAX_DATAGRAM, PeerSet,
+    Peering, REQUIRED_TTL, RateWindow, Rejection, VRRP_IP_PROTOCOL, build, default_interval,
+    fixture_advertisement, validate,
 };
 
 #[cfg(target_os = "linux")]

@@ -23,7 +23,10 @@ use std::net::IpAddr;
 use std::os::fd::AsRawFd;
 
 use highland_vrrp::IpFamily;
-use nix::sys::socket::sockopt::{Ipv4RecvTtl, Ipv6RecvHopLimit};
+use nix::sys::socket::sockopt::{
+    IpAddMembership, IpDropMembership, IpMulticastTtl, Ipv4RecvTtl, Ipv6AddMembership,
+    Ipv6DropMembership, Ipv6MulticastHops, Ipv6RecvHopLimit,
+};
 use nix::sys::socket::{MsgFlags, SockaddrIn, SockaddrIn6};
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
@@ -44,7 +47,13 @@ enum SocketAddrV4Bound {
 pub struct VrrpSocket {
     socket: Socket,
     family: IpFamily,
+    /// The address this socket sends from, which also names the interface when a
+    /// multicast membership is requested.
+    source: IpAddr,
     interface: String,
+    /// The kernel index of the interface, which an IPv6 multicast destination
+    /// needs as its scope: a link-local group has no meaning without one.
+    index: u32,
 }
 
 /// A datagram read from the socket, with everything the transport needs.
@@ -63,6 +72,18 @@ pub struct Received {
     /// been through the loopback path arrives whole. Both shapes occur, so both
     /// are handled and both are tested.
     pub header_attached: bool,
+}
+
+/// Returns the kernel index of an interface by name.
+///
+/// `if_nametoindex` rather than a Netlink round trip: the socket is bound to the
+/// interface by name already, and an index of 0 would silently turn an IPv6
+/// multicast send into a send with no scope.
+fn interface_index(interface: &str) -> Result<u32> {
+    nix::net::if_::if_nametoindex(interface).map_err(|error| NetError::Io {
+        operation: "resolving the interface for a VRRP socket",
+        source: std::io::Error::from_raw_os_error(error as i32),
+    })
 }
 
 impl VrrpSocket {
@@ -172,10 +193,125 @@ impl VrrpSocket {
                 source,
             })?;
 
+        let index = interface_index(interface)?;
+
         Ok(Self {
             socket,
             family,
+            source,
             interface: interface.to_owned(),
+            index,
+        })
+    }
+
+    /// Joins a multicast group on this socket's interface.
+    ///
+    /// Two options are set, and the second is the one that is easy to miss:
+    ///
+    /// - the membership, which is what the kernel filters incoming groups
+    ///   against;
+    /// - the multicast TTL, which is a *different* socket option from the unicast
+    ///   TTL set at bind time and defaults to **1**. A VRRP advertisement sent
+    ///   with a multicast hop limit of 1 is rejected by every receiver, because
+    ///   RFC 5798 requires 255, and the node would never be heard of again. This
+    ///   is the single most likely way to get multicast mode subtly wrong.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Io`] when the membership cannot be joined, and
+    /// [`NetError::Encode`] when the group is not of this socket's family.
+    pub fn join_group(&self, group: IpAddr, ttl: u8) -> Result<()> {
+        self.set_multicast_ttl(ttl, "joining a VRRP multicast group")?;
+        match (self.family, group) {
+            (IpFamily::V4, IpAddr::V4(address)) => {
+                // The IPv4 membership request names the interface by address, so
+                // the source address this socket is bound to is what identifies
+                // it.
+                let IpAddr::V4(source) = self.source else {
+                    return Err(NetError::Encode {
+                        family: self.family,
+                        reason: "the socket has no IPv4 source to name the interface with"
+                            .to_owned(),
+                    });
+                };
+                let request = nix::sys::socket::IpMembershipRequest::new(address, Some(source));
+                nix::sys::socket::setsockopt(&self.socket, IpAddMembership, &request)
+            }
+            (IpFamily::V6, IpAddr::V6(address)) => {
+                let request = nix::sys::socket::Ipv6MembershipRequest::new(address);
+                nix::sys::socket::setsockopt(&self.socket, Ipv6AddMembership, &request)
+            }
+            (family, other) => {
+                return Err(NetError::Encode {
+                    family,
+                    reason: format!("{other} is not an {family} group"),
+                });
+            }
+        }
+        .map_err(|error| NetError::Io {
+            operation: "joining a VRRP multicast group",
+            source: std::io::Error::from_raw_os_error(error as i32),
+        })
+    }
+
+    /// Leaves a multicast group joined by [`VrrpSocket::join_group`].
+    ///
+    /// Called when the instance is torn down, so a reloaded or stopped instance
+    /// does not keep receiving a group it no longer speaks for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Io`] when the membership cannot be left, and
+    /// [`NetError::Encode`] when the group is not of this socket's family.
+    pub fn leave_group(&self, group: IpAddr) -> Result<()> {
+        match (self.family, group) {
+            (IpFamily::V4, IpAddr::V4(address)) => {
+                let IpAddr::V4(source) = self.source else {
+                    return Err(NetError::Encode {
+                        family: self.family,
+                        reason: "the socket has no IPv4 source to name the interface with"
+                            .to_owned(),
+                    });
+                };
+                let request = nix::sys::socket::IpMembershipRequest::new(address, Some(source));
+                nix::sys::socket::setsockopt(&self.socket, IpDropMembership, &request)
+            }
+            (IpFamily::V6, IpAddr::V6(address)) => {
+                let request = nix::sys::socket::Ipv6MembershipRequest::new(address);
+                nix::sys::socket::setsockopt(&self.socket, Ipv6DropMembership, &request)
+            }
+            (family, other) => {
+                return Err(NetError::Encode {
+                    family,
+                    reason: format!("{other} is not an {family} group"),
+                });
+            }
+        }
+        .map_err(|error| NetError::Io {
+            operation: "leaving a VRRP multicast group",
+            source: std::io::Error::from_raw_os_error(error as i32),
+        })
+    }
+
+    /// Sets the TTL a multicast datagram is sent with.
+    ///
+    /// Separate from the unicast TTL at bind time, and one for each family:
+    /// `IP_MULTICAST_TTL` and `IPV6_MULTICAST_HOPS`.
+    fn set_multicast_ttl(&self, ttl: u8, operation: &'static str) -> Result<()> {
+        let result = match self.family {
+            IpFamily::V4 => nix::sys::socket::setsockopt(&self.socket, IpMulticastTtl, &ttl),
+            IpFamily::V6 => {
+                nix::sys::socket::setsockopt(&self.socket, Ipv6MulticastHops, &i32::from(ttl))
+            }
+            _ => {
+                return Err(NetError::Unsupported {
+                    operation: "this address family",
+                });
+            }
+        };
+        result.map_err(|error| NetError::Io {
+            operation,
+            source: std::io::Error::from_raw_os_error(error as i32),
         })
     }
 
@@ -183,6 +319,18 @@ impl VrrpSocket {
     #[must_use]
     pub fn family(&self) -> IpFamily {
         self.family
+    }
+
+    /// Returns the address this socket sends from.
+    #[must_use]
+    pub fn source(&self) -> IpAddr {
+        self.source
+    }
+
+    /// Returns the kernel index of the interface this socket is bound to.
+    #[must_use]
+    pub fn interface_index(&self) -> u32 {
+        self.index
     }
 
     /// Returns the interface this socket is bound to.
@@ -200,7 +348,12 @@ impl VrrpSocket {
     pub fn send_to(&self, payload: &[u8], destination: IpAddr) -> Result<usize> {
         let target = match destination {
             IpAddr::V4(address) => SockAddr::from(std::net::SocketAddrV4::new(address, 0)),
-            IpAddr::V6(address) => SockAddr::from(std::net::SocketAddrV6::new(address, 0, 0, 0)),
+            // The scope is the interface: a link-local multicast destination
+            // such as `ff02::12` has no meaning without one, and the kernel
+            // cannot infer it for a raw socket bound to a unicast address.
+            IpAddr::V6(address) => {
+                SockAddr::from(std::net::SocketAddrV6::new(address, 0, 0, self.index))
+            }
         };
         self.socket
             .send_to(payload, &target)

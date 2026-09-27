@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use highland_vrrp::{Advertisement, IpFamily};
 
 use crate::error::{NetError, Result};
-use crate::vrrp::{Accepted, Datagram, Destinations, PeerSet, RateWindow, VRRP_IP_PROTOCOL};
+use crate::vrrp::{Accepted, Datagram, Destinations, Peering, RateWindow, VRRP_IP_PROTOCOL};
 
 /// What one send achieved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,7 +35,7 @@ pub struct Sent {
 pub struct SocketTransport {
     socket: crate::VrrpSocket,
     family: IpFamily,
-    peers: PeerSet,
+    peering: Peering,
     destinations: Destinations,
     source: IpAddr,
 }
@@ -47,16 +47,71 @@ impl SocketTransport {
     ///
     /// Returns [`NetError::Io`] when the socket cannot be created or bound,
     /// which needs `CAP_NET_RAW`.
-    pub fn bind(family: IpFamily, interface: &str, source: IpAddr, peers: PeerSet) -> Result<Self> {
+    pub fn bind(
+        family: IpFamily,
+        interface: &str,
+        source: IpAddr,
+        peering: Peering,
+    ) -> Result<Self> {
         let socket = crate::VrrpSocket::bind(family, interface, source)?;
-        let destinations = Destinations::new(peers.of_family(family));
+        let destinations = match &peering {
+            Peering::Unicast(peers) => Destinations::new(peers.of_family(family)),
+            Peering::Multicast { group, ttl } => {
+                if IpFamily::of(group) != family {
+                    return Err(NetError::Encode {
+                        family,
+                        reason: format!("{group} is not an {family} group"),
+                    });
+                }
+                // Joined here rather than by the daemon, so a transport that
+                // exists has already joined what it intends to speak for: a
+                // membership that is remembered somewhere else is a membership
+                // that is forgotten.
+                socket.join_group(*group, *ttl)?;
+                Destinations::new([*group])
+            }
+        };
         Ok(Self {
             socket,
             family,
-            peers,
+            peering,
             destinations,
             source,
         })
+    }
+
+    /// Returns how this transport reaches its peers.
+    pub fn peering(&self) -> &Peering {
+        &self.peering
+    }
+
+    /// Leaves any multicast group this transport joined.
+    ///
+    /// Called when the instance is torn down, so a stopped or reloaded instance
+    /// stops being addressed by the group it no longer answers for.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NetError::Io`] when the membership cannot be left. A unicast
+    /// transport has nothing to leave and returns `Ok`.
+    pub fn leave(&self) -> Result<()> {
+        match &self.peering {
+            Peering::Unicast(_) => Ok(()),
+            Peering::Multicast { group, .. } => self.socket.leave_group(*group),
+        }
+    }
+
+    /// Returns the peer addresses this transport validates against.
+    ///
+    /// In multicast mode there is no peer list, because a member of the group is
+    /// a peer. This is empty then, and the transport is still reachable: what
+    /// arrives is validated by interface, VRID, and TTL instead.
+    #[must_use]
+    pub fn peers(&self) -> &[IpAddr] {
+        match &self.peering {
+            Peering::Unicast(peers) => peers.list(),
+            Peering::Multicast { .. } => &[],
+        }
     }
 
     /// Returns the family this transport speaks.
@@ -92,16 +147,22 @@ impl SocketTransport {
     /// peer has been tried, because one unreachable peer is not a reason to stop
     /// telling the others that this node is master.
     pub fn send(&self, advertisement: &Advertisement) -> Result<Sent> {
-        let bytes = crate::vrrp::build(
-            advertisement,
-            self.family,
-            self.source,
-            self.family.default_group(),
-        )?;
-
         let mut delivered = 0_usize;
         let mut first_failure: Option<NetError> = None;
         for peer in self.destinations.peers() {
+            // Built per destination, because an IPv6 advertisement's checksum
+            // covers the pseudo-header and therefore the address the packet is
+            // sent to. One build reused across destinations would produce
+            // packets that no IPv6 receiver could validate.
+            let bytes = match crate::vrrp::build(advertisement, self.family, self.source, *peer) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    if first_failure.is_none() {
+                        first_failure = Some(error);
+                    }
+                    continue;
+                }
+            };
             match self.socket.send_to(&bytes, *peer) {
                 Ok(_) => delivered += 1,
                 Err(error) => {
@@ -137,13 +198,25 @@ impl SocketTransport {
         let Some(received) = self.socket.receive()? else {
             return Ok(None);
         };
+        // The destination is needed for an IPv6 checksum, and it is known rather
+        // than guessed: a multicast datagram arrived at the group this transport
+        // joined, and a unicast one at the address this socket is bound to.
+        let destination = match &self.peering {
+            Peering::Unicast(_) => self.source,
+            Peering::Multicast { group, .. } => *group,
+        };
+        let allowed = match &self.peering {
+            Peering::Unicast(peers) => crate::vrrp::AllowedSources::Peers(peers.clone()),
+            Peering::Multicast { .. } => crate::vrrp::AllowedSources::Group,
+        };
         let outcome = crate::vrrp::validate(
             Datagram {
                 bytes: &received.payload,
                 source: received.source,
                 ttl: received.ttl,
             },
-            &self.peers,
+            &allowed,
+            destination,
             vrid,
             now,
             Some(rate),

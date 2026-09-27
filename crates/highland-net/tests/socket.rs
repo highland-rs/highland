@@ -171,14 +171,16 @@ async fn a_packet_that_did_not_travel_with_255_is_discarded() {
 
     // A packet that arrived with the wrong TTL must never reach the state
     // machine, which is what this rejection enforces.
-    let peers = highland_net::PeerSet::new([address]);
+    // A unicast loopback exchange, so the source is the configured peer and the
+    // destination is the address the sockets are bound to.
     let outcome = highland_net::validate(
         highland_net::Datagram {
             bytes: &arrival.payload,
             source: arrival.source,
             ttl: arrival.ttl,
         },
-        &peers,
+        &highland_net::AllowedSources::Peers(highland_net::PeerSet::new([address])),
+        address,
         42,
         Duration::ZERO,
         None,
@@ -204,14 +206,14 @@ async fn an_advertisement_that_passes_every_check_is_accepted() {
         .expect("the read does not fail")
         .expect("the packet arrives");
 
-    let peers = highland_net::PeerSet::new([address]);
     let outcome = highland_net::validate(
         highland_net::Datagram {
             bytes: &arrival.payload,
             source: arrival.source,
             ttl: arrival.ttl,
         },
-        &peers,
+        &highland_net::AllowedSources::Peers(highland_net::PeerSet::new([address])),
+        address,
         42,
         Duration::ZERO,
         None,

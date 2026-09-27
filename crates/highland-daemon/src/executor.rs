@@ -23,7 +23,16 @@
 use std::sync::Arc;
 
 use highland_core::state::{Action, ActionKind, Event};
+use std::net::IpAddr;
+
 use highland_net::{Call, IpCidr, NetworkBackend, PeerSet, ScriptedBackend};
+
+/// How an instance reaches its peers.
+///
+/// Re-exported rather than redefined, so the daemon and the socket agree by
+/// construction: a mode that existed only in the daemon would be a mode the
+/// socket could not honour.
+pub(crate) use highland_net::Peering;
 use highland_vrrp::{Advertisement, IpFamily, MaxAdverInt, Priority, Vrid};
 
 use crate::options::InstancePlan;
@@ -35,18 +44,40 @@ pub struct Ownership {
     pub interface: String,
     /// The addresses to add when the instance becomes master.
     pub addresses: Vec<IpCidr>,
+    /// How the instance reaches its peers: a list, or a group.
+    pub peering: Peering,
     /// The peers allowed to speak VRRP to this instance.
+    ///
+    /// Empty in multicast mode, where membership of the group is the
+    /// authorisation and there is no list to be in.
     pub peers: PeerSet,
 }
 
 impl Ownership {
-    /// Creates an ownership description.
+    /// Creates an ownership description for a unicast instance.
     #[must_use]
     pub fn new(interface: impl Into<String>, addresses: Vec<IpCidr>, peers: PeerSet) -> Self {
         Self {
             interface: interface.into(),
             addresses,
+            peering: Peering::Unicast(peers.clone()),
             peers,
+        }
+    }
+
+    /// Creates an ownership description for a multicast instance.
+    #[must_use]
+    pub fn multicast(
+        interface: impl Into<String>,
+        addresses: Vec<IpCidr>,
+        group: IpAddr,
+        ttl: u8,
+    ) -> Self {
+        Self {
+            interface: interface.into(),
+            addresses,
+            peering: Peering::Multicast { group, ttl },
+            peers: PeerSet::default(),
         }
     }
 

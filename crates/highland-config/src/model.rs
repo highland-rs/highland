@@ -7,7 +7,7 @@
 //! silently ignored setting (SPEC.md, `I-08`).
 
 use std::collections::BTreeSet;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -126,27 +126,54 @@ impl Default for ControlConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MulticastConfig {
-    /// The group address, per family.
-    #[serde(default = "default_multicast_group")]
-    pub group: IpAddr,
+    /// The group address, or `None` for the RFC's default *for the instance's
+    /// family*.
+    ///
+    /// An unset group is per family (`224.0.0.18` for IPv4, `ff02::12` for IPv6),
+    /// which is why this is not a plain `IpAddr` with a default value: a single
+    /// default would be the wrong family for half the instances, and a
+    /// configuration that silently joined the wrong group would look healthy
+    /// while hearing nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<IpAddr>,
     /// The TTL. Must be 255 (`V-24`).
     #[serde(default = "default_multicast_ttl")]
     pub ttl: u8,
 }
 
-impl Default for MulticastConfig {
-    fn default() -> Self {
-        Self {
-            group: default_multicast_group(),
-            ttl: default_multicast_ttl(),
+impl MulticastConfig {
+    /// Returns the group an instance of `family` speaks for.
+    ///
+    /// A configured group of that family is used; anything else is the RFC's
+    /// default for the family, which is what validation refuses a mismatched
+    /// group for.
+    ///
+    /// # Panics
+    ///
+    /// Never. The two defaults are literals, and the address they are parsed
+    /// into cannot fail to parse.
+    #[must_use]
+    pub fn group_for(&self, family: Family) -> IpAddr {
+        match (family, self.group) {
+            (Family::V4, Some(IpAddr::V4(address))) => IpAddr::V4(address),
+            (Family::V6, Some(IpAddr::V6(address))) => IpAddr::V6(address),
+            (Family::V4, _) => "224.0.0.18"
+                .parse()
+                .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+            (Family::V6, _) => "ff02::12"
+                .parse()
+                .unwrap_or(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
         }
     }
 }
 
-fn default_multicast_group() -> IpAddr {
-    "224.0.0.18"
-        .parse()
-        .expect("the default group is a valid address")
+impl Default for MulticastConfig {
+    fn default() -> Self {
+        Self {
+            group: None,
+            ttl: default_multicast_ttl(),
+        }
+    }
 }
 
 fn default_multicast_ttl() -> u8 {

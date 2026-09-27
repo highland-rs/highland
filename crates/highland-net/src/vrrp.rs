@@ -166,7 +166,7 @@ pub struct Datagram<'a> {
 /// # Examples
 ///
 /// ```
-/// use highland_net::{Accepted, Datagram, PeerSet, validate};
+/// use highland_net::{Accepted, AllowedSources, Datagram, PeerSet, validate};
 /// use std::net::IpAddr;
 /// use std::time::Duration;
 ///
@@ -175,7 +175,8 @@ pub struct Datagram<'a> {
 ///
 /// let accepted = validate(
 ///     Datagram { bytes: &bytes, source: IpAddr::from([192, 0, 2, 11]), ttl: 255 },
-///     &peers,
+///     &AllowedSources::Peers(peers),
+///     IpAddr::from([192, 0, 2, 11]),
 ///     42,
 ///     Duration::ZERO,
 ///     None,
@@ -183,9 +184,70 @@ pub struct Datagram<'a> {
 /// assert!(matches!(accepted, Accepted::Advertisement(_)));
 /// ```
 #[must_use]
+/// How an instance reaches its peers.
+///
+/// The two modes differ in more than the address list, which is why this is a
+/// sum type rather than a flag: a multicast instance joins a group on its socket
+/// and sends one datagram, while a unicast instance names its peers and sends one
+/// datagram each. The mode also decides whether a peer list is required at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Peering {
+    /// An explicit list of peer addresses. Peers of the other family are
+    /// ignored, which is what makes a mixed-family list legal.
+    Unicast(PeerSet),
+    /// One multicast group, joined on the socket and sent to with the TTL VRRP
+    /// requires.
+    Multicast {
+        /// The group to join and send to, which must be of the instance's family.
+        group: IpAddr,
+        /// The TTL, which RFC 5798 requires to be 255.
+        ttl: u8,
+    },
+}
+
+impl Peering {
+    /// Returns the mode's name, for a diagnostic.
+    #[must_use]
+    pub fn mode(&self) -> &'static str {
+        match self {
+            Peering::Unicast(_) => "unicast",
+            Peering::Multicast { .. } => "multicast",
+        }
+    }
+}
+
+/// Who is allowed to speak VRRP to this instance.
+///
+/// A sum type rather than a flag, because the two modes enforce different rules
+/// and a flag would make "no peers" mean both "allow nobody" and "allow anybody".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AllowedSources {
+    /// Exactly the configured peers (`I-43`). An empty set allows nothing.
+    ///
+    /// Owned rather than borrowed: the set is a handful of addresses, and a
+    /// borrow would tie every caller's validation to the lifetime of a
+    /// configuration it does not otherwise need.
+    Peers(PeerSet),
+    /// Any source that reached the group. In multicast mode the group membership
+    /// *is* the authorisation: a node on the segment that joined the group is a
+    /// node on the segment, and there is no list to be in.
+    Group,
+}
+
+/// Validates one datagram against the protocol and the instance's rules.
+///
+/// `destination` is the address the datagram was sent to, which an IPv6 checksum
+/// covers: the pseudo-header includes it, so a receiver that guessed wrong would
+/// reject every valid advertisement.
+///
+/// # Errors
+///
+/// This function cannot fail; every outcome is a typed [`Accepted`].
+#[must_use]
 pub fn validate(
     datagram: Datagram<'_>,
-    peers: &PeerSet,
+    allowed: &AllowedSources,
+    destination: IpAddr,
     vrid: u8,
     now: Duration,
     limiter: Option<&mut RateWindow>,
@@ -215,11 +277,13 @@ pub fn validate(
     if header.vrid.get() != vrid {
         return Accepted::Rejected(Rejection::WrongVrid);
     }
-    if !peers.contains(&datagram.source) {
+    if let AllowedSources::Peers(peers) = allowed
+        && !peers.contains(&datagram.source)
+    {
         return Accepted::Rejected(Rejection::UnknownPeer);
     }
 
-    let scope = ChecksumScope::for_packet(family, datagram.source, family.default_group());
+    let scope = ChecksumScope::for_packet(family, datagram.source, destination);
     match Advertisement::decode(datagram.bytes, family, scope) {
         Ok(advertisement) => Accepted::Advertisement(AcceptedAdvertisement {
             advertisement,

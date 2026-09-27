@@ -7,10 +7,9 @@
 
 use crate::shutdown::{ShutdownPlan, ShutdownReason};
 use crate::{Daemon, DaemonError, Options};
-#[cfg(target_os = "linux")]
-use std::net::IpAddr;
 
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -18,6 +17,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use highland_config::{Config, InstanceConfig, ValidationContext, load, validate};
 use highland_net::{IpCidr, PeerSet};
 use highland_observe::EventSink as _;
+use highland_vrrp::IpFamily;
 
 use crate::executor::Ownership;
 use crate::options::InstancePlan;
@@ -217,7 +217,7 @@ async fn start_instances(
                 &plan,
                 &ownership.interface,
                 source,
-                ownership.peers.clone(),
+                ownership.peering.clone(),
                 std::sync::Arc::clone(metrics),
             )
             .map_err(|error| DaemonError::Runtime(format!("instance {}: {error}", plan.name)))?,
@@ -627,18 +627,69 @@ impl ReloadHandle {
     }
 }
 
-/// The addresses one configured instance manages.
+/// The addresses and peers one configured instance manages.
+///
+/// A multicast instance needs no peer list, so the mode decides which of the two
+/// descriptions applies. Where the mode and the group disagree — an IPv4
+/// instance with an IPv6 group, or a group that is not a multicast address — the
+/// group is the RFC's default for the instance's family rather than a refusal:
+/// the alternative is a node that joins a group nobody is advertising to.
 fn ownership_for(instance: &InstanceConfig) -> crate::executor::Ownership {
-    let addresses = instance
+    let addresses: Vec<IpCidr> = instance
         .vip_addresses()
         .iter()
         .filter_map(|text| IpCidr::parse(text).ok())
         .collect();
-    crate::executor::Ownership::new(
-        instance.interface.clone(),
-        addresses,
-        PeerSet::new(instance.network.peers.clone()),
-    )
+
+    match instance.network.mode {
+        highland_config::NetworkMode::Unicast => crate::executor::Ownership::new(
+            instance.interface.clone(),
+            addresses,
+            PeerSet::new(instance.network.peers.clone()),
+        ),
+        highland_config::NetworkMode::Multicast => {
+            let group = multicast_group(instance, &addresses);
+            crate::executor::Ownership::multicast(
+                instance.interface.clone(),
+                addresses,
+                group,
+                instance.network.multicast.ttl,
+            )
+        }
+    }
+}
+
+/// The group a multicast instance speaks for: the configured one when it is of
+/// the instance's family, and the RFC's default for that family otherwise.
+fn multicast_group(instance: &InstanceConfig, addresses: &[IpCidr]) -> IpAddr {
+    match ownership_family(addresses) {
+        // The per-family default, or the configured override when it is of this
+        // family. Validation refuses a configured group of the wrong family, so
+        // what reaches here is either right or unset.
+        Some(IpFamily::V4) => instance
+            .network
+            .multicast
+            .group_for(highland_config::Family::V4),
+        Some(IpFamily::V6) => instance
+            .network
+            .multicast
+            .group_for(highland_config::Family::V6),
+        // A family this build does not know, or no addresses at all: the
+        // instance is refused by validation or by the socket before it can
+        // matter, and the configured group is the best guess available.
+        Some(_) | None => instance
+            .network
+            .multicast
+            .group
+            .unwrap_or_else(|| IpFamily::V4.default_group()),
+    }
+}
+
+/// The family of the first address in a list, or `None` when there is none.
+fn ownership_family(addresses: &[highland_net::IpCidr]) -> Option<IpFamily> {
+    addresses
+        .first()
+        .map(|address| IpFamily::of(&address.address()))
 }
 
 fn announce(daemon: &Daemon, reason: &'static str) {
@@ -695,11 +746,27 @@ fn plan_for(instance: &InstanceConfig) -> Result<(InstancePlan, Ownership), Stri
         preempt_delay: instance.preempt_delay.as_duration(),
         startup_delay: instance.startup_delay.as_duration(),
     };
-    let ownership = Ownership::new(
-        instance.interface.clone(),
-        addresses,
-        PeerSet::new(instance.network.peers.clone()),
-    );
+    let ownership = match instance.network.mode {
+        highland_config::NetworkMode::Unicast => Ownership::new(
+            instance.interface.clone(),
+            addresses,
+            PeerSet::new(instance.network.peers.clone()),
+        ),
+        highland_config::NetworkMode::Multicast => {
+            let group = multicast_group(instance, &addresses);
+            if !group.is_multicast() {
+                return Err(format!(
+                    "the multicast group {group} is not a multicast address"
+                ));
+            }
+            Ownership::multicast(
+                instance.interface.clone(),
+                addresses,
+                group,
+                instance.network.multicast.ttl,
+            )
+        }
+    };
     Ok((plan, ownership))
 }
 

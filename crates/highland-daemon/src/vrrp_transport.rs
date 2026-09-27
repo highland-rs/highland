@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use highland_core::state::{Event, PeerAdvertisement};
-use highland_net::{Accepted, PeerSet, RateWindow, SocketTransport};
+use highland_net::{Accepted, Peering, RateWindow, SocketTransport};
 
 use crate::executor::{Transport, TransportError};
 use crate::options::InstancePlan;
@@ -57,18 +57,21 @@ impl VrrpTransport {
         plan: &InstancePlan,
         interface: &str,
         source: IpAddr,
-        peers: PeerSet,
+        peering: Peering,
         metrics: Arc<crate::Metrics>,
     ) -> Result<Self, TransportError> {
         // The instance speaks the family of the address it owns, and a
         // configuration with no peer in that family is refused rather than
-        // bound to a socket that could never send (`V-07`).
+        // bound to a socket that could never send (`V-07`). A multicast instance
+        // needs no peer list: the group is where the peers are.
         let family = highland_vrrp::IpFamily::of(&source);
-        if peers.of_family(family).is_empty() {
+        if let Peering::Unicast(peers) = &peering
+            && peers.of_family(family).is_empty()
+        {
             return Err(TransportError::NoPeers { family });
         }
 
-        let inner = SocketTransport::bind(family, interface, source, peers).map_err(|error| {
+        let inner = SocketTransport::bind(family, interface, source, peering).map_err(|error| {
             TransportError::Unavailable {
                 reason: error.to_string(),
             }
@@ -92,6 +95,12 @@ impl VrrpTransport {
             highland_vrrp::IpFamily::V6 => "v6",
             _ => "other",
         }
+    }
+
+    /// Returns the mode this transport speaks in, for a diagnostic.
+    #[must_use]
+    pub fn peering_mode(&self) -> &'static str {
+        self.inner.peering().mode()
     }
 
     /// Returns the peers this transport sends to.

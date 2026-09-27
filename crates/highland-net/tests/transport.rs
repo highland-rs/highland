@@ -11,7 +11,8 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use highland_net::{
-    Accepted, Datagram, PeerSet, RateWindow, Rejection, fixture_advertisement, validate,
+    Accepted, AllowedSources, Datagram, PeerSet, RateWindow, Rejection, fixture_advertisement,
+    validate,
 };
 use highland_vrrp::{Advertisement, IpFamily, MaxAdverInt, Priority, Vrid};
 
@@ -34,8 +35,27 @@ fn datagram(bytes: &[u8]) -> Datagram<'_> {
     }
 }
 
+/// The address a unicast datagram is treated as having been sent to.
+///
+/// A unicast transport knows this without being told: it is the address its
+/// socket is bound to, which is the receiver's own address.
+fn destination() -> IpAddr {
+    "192.0.2.12".parse().expect("valid")
+}
+
+fn allowed(peers: PeerSet) -> AllowedSources {
+    AllowedSources::Peers(peers)
+}
+
 fn accepted(bytes: &[u8]) -> Accepted {
-    validate(datagram(bytes), &peers(), VRID, Duration::ZERO, None)
+    validate(
+        datagram(bytes),
+        &allowed(peers()),
+        destination(),
+        VRID,
+        Duration::ZERO,
+        None,
+    )
 }
 
 fn advertisement(priority: u8) -> Advertisement {
@@ -69,7 +89,8 @@ fn a_ttl_other_than_255_is_rejected() {
                 source: peer(),
                 ttl,
             },
-            &peers(),
+            &allowed(peers()),
+            destination(),
             VRID,
             Duration::ZERO,
             None,
@@ -87,7 +108,8 @@ fn an_advertisement_from_a_stranger_is_rejected() {
             source: "192.0.2.99".parse().expect("valid"),
             ttl: 255,
         },
-        &peers(),
+        &allowed(peers()),
+        destination(),
         VRID,
         Duration::ZERO,
         None,
@@ -100,7 +122,8 @@ fn an_empty_peer_list_accepts_nothing() {
     let bytes = fixture_advertisement();
     let outcome = validate(
         datagram(&bytes),
-        &PeerSet::default(),
+        &allowed(PeerSet::default()),
+        destination(),
         VRID,
         Duration::ZERO,
         None,
@@ -111,7 +134,14 @@ fn an_empty_peer_list_accepts_nothing() {
 #[test]
 fn an_advertisement_for_another_vrid_is_rejected() {
     let bytes = advertisement(150).encode_v4().expect("encodes");
-    let outcome = validate(datagram(&bytes), &peers(), 7, Duration::ZERO, None);
+    let outcome = validate(
+        datagram(&bytes),
+        &allowed(peers()),
+        destination(),
+        7,
+        Duration::ZERO,
+        None,
+    );
     assert_eq!(outcome.rejection(), Some(Rejection::WrongVrid));
 }
 
@@ -194,7 +224,8 @@ fn the_rate_window_drops_the_excess() {
     assert!(matches!(
         validate(
             datagram(&bytes),
-            &peers(),
+            &allowed(peers()),
+            destination(),
             VRID,
             Duration::ZERO,
             Some(&mut window)
@@ -204,7 +235,8 @@ fn the_rate_window_drops_the_excess() {
     assert!(matches!(
         validate(
             datagram(&bytes),
-            &peers(),
+            &allowed(peers()),
+            destination(),
             VRID,
             Duration::from_millis(10),
             Some(&mut window)
@@ -214,7 +246,8 @@ fn the_rate_window_drops_the_excess() {
     assert_eq!(
         validate(
             datagram(&bytes),
-            &peers(),
+            &allowed(peers()),
+            destination(),
             VRID,
             Duration::from_millis(20),
             Some(&mut window)
@@ -228,7 +261,8 @@ fn the_rate_window_drops_the_excess() {
     assert!(matches!(
         validate(
             datagram(&bytes),
-            &peers(),
+            &allowed(peers()),
+            destination(),
             VRID,
             Duration::from_millis(1020),
             Some(&mut window)
@@ -244,7 +278,8 @@ fn the_rate_limit_is_checked_before_the_expensive_checks() {
     assert_eq!(
         validate(
             datagram(&bytes),
-            &peers(),
+            &allowed(peers()),
+            destination(),
             VRID,
             Duration::ZERO,
             Some(&mut window)

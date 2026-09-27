@@ -335,13 +335,43 @@ fn validate_vips(
                 Family::V6 => "IPv6",
             })
             .collect();
+        // A mixed-family *address list* is refused in both modes, and the reason
+        // differs: in multicast there is one group, and a group cannot serve two
+        // families; in unicast the instance would need a second socket, a second
+        // source address, and a second advertisement, which is a larger change
+        // than a configuration key.
+        //
+        // A mixed-family *peer list* is fine, and is not what this rule is about:
+        // peers of the other family are simply not this instance's business.
+        let reason = if instance.network.mode == NetworkMode::Multicast {
+            "one multicast group cannot serve both families"
+        } else {
+            "an instance speaks one family per socket, and one source address"
+        };
         violations.push((
             "V-03",
             format!(
-                "{key}: an instance may not mix {} in this release; split it into one instance per family",
+                "{key}: an instance may not hold {} addresses, because {reason}; use one instance per family",
                 families.join(" and ")
             ),
         ));
+    }
+}
+
+/// The one family in a set, or `None` when it is empty or has more than one.
+fn single_family(families: &std::collections::BTreeSet<Family>) -> Option<Family> {
+    if families.len() == 1 {
+        families.iter().next().copied()
+    } else {
+        None
+    }
+}
+
+/// The operator-facing name of a family.
+fn family_label(family: Family) -> &'static str {
+    match family {
+        Family::V4 => "IPv4",
+        Family::V6 => "IPv6",
     }
 }
 
@@ -367,14 +397,41 @@ fn validate_network(
         }
     }
 
-    if instance.network.mode == NetworkMode::Multicast && instance.network.multicast.ttl != 255 {
-        violations.push((
-            "V-24",
-            format!(
-                "{key}.network.multicast.ttl: {} is invalid; VRRP requires 255",
-                instance.network.multicast.ttl
-            ),
-        ));
+    if instance.network.mode == NetworkMode::Multicast {
+        if instance.network.multicast.ttl != 255 {
+            violations.push((
+                "V-24",
+                format!(
+                    "{key}.network.multicast.ttl: {} is invalid; VRRP requires 255",
+                    instance.network.multicast.ttl
+                ),
+            ));
+        }
+        // Only a *configured* group can be wrong. An unset group is the RFC's
+        // default for the instance's family, which is a different address per
+        // family, so there is nothing to check.
+        if let Some(group) = instance.network.multicast.group {
+            if !group.is_multicast() {
+                violations.push((
+                    "V-24",
+                    format!("{key}.network.multicast.group: {group} is not a multicast address"),
+                ));
+            }
+            // A group of the wrong family is a refusal rather than a warning: the
+            // node would join a group nobody advertises to, and would look
+            // healthy while hearing nothing.
+            if let Some(family) = single_family(&instance.vip_families())
+                && !family.matches(&group)
+            {
+                violations.push((
+                    "V-24",
+                    format!(
+                        "{key}.network.multicast.group: {group} is not a group for an instance holding {} addresses",
+                        family_label(family)
+                    ),
+                ));
+            }
+        }
     }
 
     if instance.network.mode == NetworkMode::Unicast {

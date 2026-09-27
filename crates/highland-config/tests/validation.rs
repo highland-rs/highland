@@ -711,3 +711,127 @@ address = "192.0.2.10/24"
         std::time::Duration::from_secs(1)
     );
 }
+
+// ----- multicast mode (`V-24`, and the group rules that go with it) ---------
+
+/// A multicast instance with the RFC's defaults is valid, and needs no peer
+/// list: the group is where the peers are.
+#[test]
+fn a_multicast_instance_needs_no_peer_list() {
+    let text = r#"
+schema_version = 1
+[node]
+name = "node-a"
+[[instance]]
+name = "api"
+interface = "eth0"
+vrid = 42
+advertisement_interval = "1s"
+[instance.network]
+mode = "multicast"
+[[instance.vip]]
+address = "192.0.2.10/24"
+"#;
+    assert_no_rules(text);
+}
+
+/// The TTL is 255 because a receiver discards anything else, so this is a
+/// refusal rather than a value the daemon quietly corrects.
+#[test]
+fn v24_rejects_a_multicast_ttl_of_one_hundred_and_sixty_four() {
+    let text = r#"
+schema_version = 1
+[node]
+name = "node-a"
+[[instance]]
+name = "api"
+interface = "eth0"
+vrid = 42
+advertisement_interval = "1s"
+[instance.network]
+mode = "multicast"
+[instance.network.multicast]
+ttl = 64
+[[instance.vip]]
+address = "192.0.2.10/24"
+"#;
+    assert_rule(text, "V-24");
+}
+
+/// A group that is not a multicast address cannot be joined, and the kernel
+/// would answer at bind time with an error an operator would have to decode.
+#[test]
+fn v24_rejects_a_group_that_is_not_a_multicast_address() {
+    let text = r#"
+schema_version = 1
+[node]
+name = "node-a"
+[[instance]]
+name = "api"
+interface = "eth0"
+vrid = 42
+advertisement_interval = "1s"
+[instance.network]
+mode = "multicast"
+[instance.network.multicast]
+group = "192.0.2.18"
+[[instance.vip]]
+address = "192.0.2.10/24"
+"#;
+    assert_rule(text, "V-24");
+}
+
+/// A group of the wrong family is a refusal, not a warning: the node would join a
+/// group nobody advertises to and would look healthy while hearing nothing.
+#[test]
+fn v24_rejects_a_group_of_the_wrong_family() {
+    let text = r#"
+schema_version = 1
+[node]
+name = "node-a"
+[[instance]]
+name = "api"
+interface = "eth0"
+vrid = 42
+advertisement_interval = "1s"
+[instance.network]
+mode = "multicast"
+[instance.network.multicast]
+group = "ff02::12"
+[[instance.vip]]
+address = "192.0.2.10/24"
+"#;
+    assert_rule(text, "V-24");
+}
+
+/// An IPv6 multicast instance, which is the other half of `G-01`.
+#[test]
+fn an_ipv6_multicast_instance_is_valid() {
+    let text = r#"
+schema_version = 1
+[node]
+name = "node-a"
+[[instance]]
+name = "api6"
+interface = "eth0"
+vrid = 43
+advertisement_interval = "1s"
+[instance.network]
+mode = "multicast"
+[[instance.vip]]
+address = "2001:db8:10::10/64"
+"#;
+    assert_no_rules(text);
+}
+
+/// A mixed-family *peer list* is not the same thing as a mixed-family address
+/// list, and it is legal: peers of the other family are not this instance's
+/// business, and a segment that has both families is a real thing.
+#[test]
+fn a_mixed_family_peer_list_is_allowed() {
+    let text = VALID.replace(
+        "peers = [\"192.0.2.11\"]",
+        "peers = [\"192.0.2.11\", \"2001:db8::11\"]",
+    );
+    assert_no_rules(&text);
+}

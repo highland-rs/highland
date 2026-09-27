@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+# OpenRC service script for Highland (SPEC.md, `R-32`).
+
+name="highland"
+description="Highland VRRP failover daemon"
+command="/usr/bin/highland"
+command_args="run --config /etc/highland/config.toml"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+command_user="root:root"
+
+depend() {
+	need net
+	use logger
+	after firewall
+}
+
+reload() {
+	ebegin "Reloading ${name}"
+	start-stop-daemon --signal HUP --pidfile "${pidfile}"
+	eend $?
+}

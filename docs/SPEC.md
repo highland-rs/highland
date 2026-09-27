@@ -735,7 +735,7 @@ corresponding unit test and a fixture in `tests/integration/config/`.
 | `V-17` | `failure_policy = "manual"` together with `minimum_effective_priority` or `all_checks_required` |
 | `V-18` | `all_checks_required` or `send_zero_priority_advert` is set with a policy other than `fail_closed` |
 | `V-19` | A check is electoral (non-zero `weight`) while the policy is `manual` |
-| `V-20` | The sum of electoral `weight` values is 0 or above 255 |
+| `V-20` | The sum of `weight` values in one instance is above 255 |
 | `V-21` | `type = "command"` without the feature flag enabled, without `allow_paths`, or with a non-absolute or non-allow-listed path |
 | `V-22` | A requested interface does not exist and `defer_interface_binding` is false |
 | `V-23` | A check of type `http`/`https` has no `url`; `tcp` has no `address`; `expected_status` is empty for `http`/`https` |
@@ -746,6 +746,8 @@ corresponding unit test and a fixture in `tests/integration/config/`.
 | `V-28` | `schema_version` is absent or unsupported |
 | `V-29` | A referenced check name, metric, or control path duplicates another in a way that is not a valid scope (for example two checks with the same name in one instance) |
 | `V-30` | `metrics.listen` is set while `metrics.enabled` is false, or is missing while enabled |
+| `V-31` | The document configures no instances at all |
+| `V-32` | `node.name` is absent or blank |
 
 ### 10.5 Reload semantics `[I]`
 
@@ -1984,6 +1986,10 @@ resolution, so a later change can be traced.
 | A-24 | Milestones had no exit criteria | Each milestone has numbered, checkable exit criteria (§27) |
 | A-25 | The systemd unit had no reload path | `ExecReload` with `SIGHUP` mapped onto the reload path (`R-30`) |
 | A-26 | `docs/SPEC.md` and ADRs were absent from the workspace listing | Added (§8) |
+| A-27 | No rule required an instance to exist or a node name to be set | Added `V-31` and `V-32` during Milestone 0 |
+| A-28 | `V-20` rejected a total check weight of 0, which would forbid an instance from having only observational checks | `V-20` now rejects only a total above 255 |
+| A-29 | §18 sketches one `HighlandError` aggregating every subsystem, but the dependency graph gives the CLI no access to the network or check errors | Each crate owns one error type; see `docs/architecture.md` |
+| A-30 | §8 places tests at the workspace root, where cargo cannot compile them | Integration tests live in `crates/<crate>/tests/`; `tests/` holds shared fixtures |
 
 ## Appendix B — Open Questions
 

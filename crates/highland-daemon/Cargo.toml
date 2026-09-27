@@ -1,0 +1,37 @@
+[package]
+name = "highland-daemon"
+description = "The Highland VRRP failover daemon."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+categories.workspace = true
+keywords.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Mirrors the highland-checks feature so the daemon can report whether command
+# checks are available in this build (`V-21`).
+command-checks = ["highland-checks/command-checks"]
+
+[dependencies]
+anyhow.workspace = true
+highland-config.workspace = true
+highland-control.workspace = true
+highland-checks.workspace = true
+highland-core.workspace = true
+highland-observe.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

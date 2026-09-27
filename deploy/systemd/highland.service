@@ -1,0 +1,33 @@
+# Highland VRRP failover daemon.
+#
+# A starting point, not universally correct (SPEC.md, `R-31`). In particular,
+# `Before=keepalived.service` is only right when the two are meant to run on the
+# same node during a migration, and `AmbientCapabilities` must cover what your
+# deployment actually opens.
+[Unit]
+Description=Highland VRRP failover daemon
+Documentation=file:///usr/share/doc/highland/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/highland run --config /etc/highland/config.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=2s
+
+# CAP_NET_ADMIN adds and removes addresses; CAP_NET_RAW is needed for packet
+# sockets and gratuitous ARP / unsolicited Neighbor Advertisements.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RuntimeDirectory=highland
+StateDirectory=highland
+ConfigurationDirectory=highland
+
+[Install]
+WantedBy=multi-user.target

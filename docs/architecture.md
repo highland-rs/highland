@@ -1,0 +1,180 @@
+# Architecture
+
+This document describes how the crates fit together, why the dependency edges
+run the way they do, and which specification requirement each design choice
+serves. The normative behavior lives in [`SPEC.md`](SPEC.md); this document
+explains the shape of the implementation.
+
+## Design rules
+
+1. The protocol implementation knows nothing about Linux.
+2. The state machine knows nothing about the async runtime.
+3. Network side effects live behind traits and explicit executors.
+4. Invalid states are hard to represent.
+5. Nothing is hidden: ownership changes and failures are always explained.
+
+These are `D-01` through `D-13` in `SPEC.md` §31.
+
+## Crate graph
+
+```text
+highland-cli        highland-daemon
+     |                    |
+     |                    +---- highland-observe
+     |                    +---- highland-control
+     |                    +---- highland-config
+     +---- highland-control        |
+     +---- highland-config         +---- highland-net
+                                   +---- highland-checks
+                                   +---- highland-core
+                                   +---- highland-vrrp
+```
+
+Rules:
+
+- A crate may depend only on crates listed below it in `SPEC.md` §9. Cycles are
+  forbidden.
+- `highland-core` and `highland-vrrp` depend on nothing. That is what makes the
+  state machine and the codec testable without Linux, without a network, and
+  without a runtime.
+- Configuration does not depend on checks. Checks are built from configuration,
+  not the other way round, which keeps the configuration layer free to be reused
+  by importers and by the control API.
+
+### The dependency graph as built in Milestone 0
+
+Crates declare only the dependencies they actually use, which is a subset of the
+target graph in `SPEC.md` §9:
+
+| Crate | Declares |
+|---|---|
+| `highland-core` | `thiserror` |
+| `highland-vrrp` | `thiserror` |
+| `highland-net` | `thiserror` |
+| `highland-checks` | `highland-core`, `thiserror` |
+| `highland-config` | `serde`, `thiserror`, `toml` |
+| `highland-observe` | `serde`, `tracing`, `thiserror` |
+| `highland-control` | `serde`, `serde_json`, `thiserror` |
+| `highland-daemon` | `anyhow`, `tokio`, `tracing`, `tracing-subscriber`, `highland-core`, `highland-config`, `highland-checks`, `highland-control`, `highland-observe` |
+| `highland-cli` | `anyhow`, `clap`, `serde_json`, `tokio`, `highland-config`, `highland-control` |
+
+Edges that the target graph does not have yet, and when they appear:
+
+- `highland-checks` → `highland-config`, when the check builder reads typed
+  configuration (Milestone 6).
+- `highland-observe` → `highland-core`, when metrics and events carry
+  `Generation` and `Role` directly (Milestone 7).
+- `highland-net` → `highland-vrrp`, when the socket layer encodes and decodes
+  advertisements (Milestone 3).
+
+## The state machine
+
+`highland-core` owns role. The state machine is synchronous, deterministic, and
+performs no I/O: it consumes `Event` values and returns `Action` values.
+
+```text
+external event ──▶ InstanceStateMachine::handle ──▶ Vec<Action> ──▶ executor
+                          │                            │
+                          └── role, reasons             └── outcome
+                                                              │
+                                          Event::ActionFailed ──┘
+```
+
+Executor failures come back as events rather than being logged and dropped
+(`I-45`). That is the whole reason `Action` and `ActionKind` are separate types.
+
+Time enters only through `Clock`. `ManualClock` exists so a test can assert an
+exact deadline:
+
+```rust
+let clock = ManualClock::new();
+let mut machine = InstanceStateMachine::new(config, clock.clone());
+machine.handle(Event::Startup);
+assert_eq!(machine.deadline_of(TimerId::MasterDown), Some(Duration::from_millis(3010)));
+```
+
+`Master_Down_Interval` is `3 * adver_int + 10ms`, from RFC 5798. The state
+machine uses a saturating form because the interval has already been bounded by
+`V-04`; the fallible `master_down_interval` is the public API for callers that
+have not validated their input.
+
+## Errors
+
+`SPEC.md` §18 sketches a single `HighlandError` aggregating every subsystem.
+That is not what the code does, and the reason is the dependency graph: the CLI
+depends on `highland-config` and `highland-control` only, so an aggregate that
+mentions `NetworkError` and `CheckError` would force the CLI to depend on
+`highland-net` and `highland-checks` for no benefit.
+
+Each crate therefore owns one error type:
+
+| Crate | Error |
+|---|---|
+| `highland-core` | `CoreError` |
+| `highland-vrrp` | `ProtocolError`, `EncodeError`, `DecodeError`, `AdvertisementError` |
+| `highland-net` | `NetError` |
+| `highland-checks` | `CheckError` |
+| `highland-config` | `ConfigError` |
+| `highland-control` | `ControlError` |
+| `highland-daemon` | `DaemonError` |
+
+The invariants that matter are preserved: libraries use `thiserror`, variants
+carry structured fields, and every message a user sees names the instance, the
+interface, the address, and the cause (`R-23`).
+
+## Configuration
+
+Loading is three steps so a failure is attributable:
+
+1. read the bytes, enforcing the size limit and the permission check (`L-06`,
+   `V-26`),
+2. parse into the typed model, rejecting unknown keys,
+3. validate semantically, collecting every `V-nn` violation.
+
+Every semantic rule lives in `highland-config/src/validation.rs` and has a named
+test in `crates/highland-config/tests/validation.rs`. A rule without a test is a
+defect; `every_implemented_rule_has_a_test` checks the two lists against each
+other.
+
+Durations are written with an explicit unit. `1000` is rejected rather than
+assumed to mean a thousand seconds.
+
+Unknown configuration keys are an error, not a warning. A typo that silently does
+nothing is exactly the failure mode typed configuration exists to prevent.
+
+## Observability
+
+Events are values. `EventName` is a closed enum because dashboards and alerting
+depend on the spelling (`R-17`). The event ring is bounded at 4096 entries and
+counts what it drops, so a flood costs memory nothing and hides nothing
+(`L-08`).
+
+Redaction happens at the observability boundary, not at each call site, so a
+careless call site cannot leak a secret into a log (`S-01`).
+
+## Concurrency
+
+The async runtime is not chosen yet (`B-01`). The code so far is runtime-agnostic
+except for the two binaries and `highland-cli`'s socket client, which use Tokio.
+`highland-core` and `highland-vrrp` do not depend on any runtime, and that is
+asserted by the dependency table above rather than by a comment.
+
+Per-instance actors, the executor contract, and the event loop are specified in
+`SPEC.md` §20 and §21 and arrive with Milestone 1 and 3.
+
+## Feature flags
+
+| Feature | Default | Meaning |
+|---|---|---|
+| `command-checks` (in `highland-checks`, mirrored in `highland-daemon`) | off | Allows `type = "command"` checks. Requires an explicit allow-list in configuration as well (`R-06`, `V-21`) |
+| `netns-tests` (planned) | off | Enables tests that create network namespaces and need root (`R-01`) |
+
+A `[F]` feature MUST be behind an explicit default-off flag, and the daemon MUST
+run correctly with every `[F]` feature disabled (`SPEC.md` §3.4).
+
+## What Milestone 0 deliberately does not do
+
+- No VRRP packets are encoded or decoded.
+- No sockets are opened, no addresses are added, no netlink is spoken.
+- The control socket has a message model but no listener.
+- The daemon starts, loads its configuration, waits for a signal, and stops.

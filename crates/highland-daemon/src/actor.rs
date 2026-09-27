@@ -131,6 +131,10 @@ where
         if generation < self.machine.generation() {
             return false;
         }
+        // The health policy is carried across, not defaulted: the reload planner
+        // classifies a health change as reloadable, and a reconfigure that
+        // rebuilt the machine with the default policy would accept the change
+        // and then keep the old one.
         self.machine.reconfigure(
             InstanceConfig {
                 name: plan.name.clone(),
@@ -140,6 +144,7 @@ where
                 startup_delay: plan.startup_delay,
                 preempt: plan.preempt,
                 preempt_delay: plan.preempt_delay,
+                health: plan.health,
                 ..InstanceConfig::default()
             },
             generation,

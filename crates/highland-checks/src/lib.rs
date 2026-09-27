@@ -38,7 +38,11 @@ pub use check::{Check, CheckKind, CheckSpec, Debouncer, Stability};
 pub use error::{CheckError, Result};
 pub use http::{HttpCheck, MAX_RESPONSE_BYTES, Response, Url, parse_status_line};
 pub use interface::{InterfaceCheck, LinkProbe, LinkState};
-pub use result::{CheckResult, CheckStatus, HealthSummary};
+pub use result::{CheckResult, CheckStatus};
+// The summary the state machine consumes, re-exported rather than redefined: two
+// summaries with the same name and different fields is a conversion somebody has
+// to remember to write, and forgetting it fails silently.
+pub use highland_core::health::HealthSummary;
 pub use scheduler::{HealthReport, Scheduler, Verdict};
 pub use tcp::TcpCheck;
 pub use unix::UnixCheck;

@@ -187,11 +187,12 @@ pub fn classify(running: &InstanceConfig, candidate: &InstanceConfig) -> Change 
     if running.health != candidate.health {
         reloadable.push("health".to_owned());
     }
-    // Any difference in the check list is a reloadable change, so the list is
-    // compared rather than each field: a check is identified by its name and
-    // its type, and anything else about it is detail.
+    // A change in the check list needs a restart for now, and saying so is the
+    // honest classification: the running scheduler holds probes it built from the
+    // old list, and a reload that reported "applied" while leaving those probes
+    // in place would be a reload that did nothing.
     if running.checks != candidate.checks {
-        reloadable.push("check".to_owned());
+        restart.push("check".to_owned());
     }
 
     if !restart.is_empty() {
@@ -207,15 +208,7 @@ pub fn classify(running: &InstanceConfig, candidate: &InstanceConfig) -> Change 
 /// Converts a configured instance into the plan the executor applies.
 #[must_use]
 pub fn plan_for(instance: &InstanceConfig) -> InstancePlan {
-    InstancePlan {
-        name: instance.name.clone(),
-        vrid: instance.vrid,
-        priority: instance.priority,
-        advertisement_interval: instance.advertisement_interval.as_duration(),
-        preempt: instance.preempt,
-        preempt_delay: instance.preempt_delay.as_duration(),
-        startup_delay: instance.startup_delay.as_duration(),
-    }
+    InstancePlan::from_config(instance)
 }
 
 #[cfg(test)]

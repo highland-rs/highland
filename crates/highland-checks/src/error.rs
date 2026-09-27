@@ -38,6 +38,19 @@ pub enum CheckError {
         threshold: &'static str,
     },
 
+    /// A key the check's type requires is missing from its configuration.
+    ///
+    /// Reported when the check is built rather than on every probe: a check that
+    /// can never work should stop the daemon, not demote a node on every
+    /// interval.
+    #[error("check {check} needs a {key}, which is not configured")]
+    MissingKey {
+        /// The check whose configuration is incomplete.
+        check: String,
+        /// The key its type requires.
+        key: &'static str,
+    },
+
     /// A check's target could not be used as configured.
     ///
     /// This is a configuration error found when the check is built, not a probe

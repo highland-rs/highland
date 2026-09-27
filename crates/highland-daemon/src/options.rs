@@ -86,6 +86,94 @@ pub struct InstancePlan {
     pub preempt_delay: Duration,
     /// The delay between startup and entering election.
     pub startup_delay: Duration,
+    /// The health checks, already validated, in configuration order.
+    pub checks: Vec<CheckPlan>,
+    /// The health policy the state machine applies to them.
+    pub health: highland_core::health::HealthPolicyConfig,
+}
+
+/// The health policy in force, with the instance's own total weight as the
+/// ceiling (`I-24`).
+fn health_policy(
+    instance: &highland_config::InstanceConfig,
+) -> highland_core::health::HealthPolicyConfig {
+    use highland_config::FailurePolicy;
+    let health = &instance.health;
+    highland_core::health::HealthPolicyConfig {
+        policy: match health.failure_policy {
+            FailurePolicy::FailClosed => highland_core::health::HealthPolicy::FailClosed,
+            FailurePolicy::Weighted => highland_core::health::HealthPolicy::Weighted,
+            FailurePolicy::Manual => highland_core::health::HealthPolicy::Manual,
+        },
+        minimum_effective_priority: health.minimum_effective_priority,
+        all_checks_required: health.all_checks_required,
+        send_zero_priority_advert: health.send_zero_priority_advert,
+        total_weight: instance.electoral_weight(),
+    }
+}
+
+/// One configured health check, in the terms the checks crate needs.
+///
+/// The same shape as the configuration, without the document: a plan is what
+/// the daemon runs, and a plan must not be able to be wrong in a way the
+/// configuration layer already refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckPlan {
+    /// The check's name, unique within the instance (`V-29`).
+    pub name: String,
+    /// The probe type, as the configuration spells it.
+    pub check_type: String,
+    /// The priority penalty while failing. Zero is observational (`R-14`).
+    pub weight: u16,
+    /// How often the probe runs.
+    pub interval: Duration,
+    /// How long a probe may take.
+    pub timeout: Duration,
+    /// Consecutive failures required to enter the failing state.
+    pub failure_threshold: u32,
+    /// Consecutive successes required to recover.
+    pub success_threshold: u32,
+    /// Failures are ignored for this long after the check starts.
+    pub initial_grace_period: Duration,
+    /// The target address, for `tcp`.
+    pub address: Option<String>,
+    /// The target URL, for `http` and `https`.
+    pub url: Option<String>,
+    /// The accepted status codes, for `http` and `https`.
+    pub expected_status: Option<Vec<u16>>,
+    /// The socket path, for `unix`.
+    pub path: Option<String>,
+    /// The interface name, for `interface`.
+    pub interface: Option<String>,
+    /// The address an `interface` check must find.
+    pub expected_address: Option<String>,
+}
+
+impl CheckPlan {
+    /// Converts one configured check into a plan.
+    #[must_use]
+    pub fn from_config(check: &highland_config::CheckConfig) -> Self {
+        Self {
+            name: check.name.clone(),
+            check_type: check.check_type.clone(),
+            weight: check.weight,
+            interval: check.interval.as_duration(),
+            timeout: check.timeout.as_duration(),
+            failure_threshold: check.failure_threshold,
+            success_threshold: check.success_threshold,
+            initial_grace_period: check.initial_grace_period.as_duration(),
+            address: check.address.clone(),
+            url: check.url.clone(),
+            expected_status: check.expected_status.clone(),
+            path: check.path.clone(),
+            interface: check.interface.clone(),
+            // An `interface` check may also require an address, which the
+            // configuration spells in the same `address` key: a check watching
+            // "this link, holding 192.0.2.10" is written that way naturally, and
+            // it catches a link that is up but unconfigured.
+            expected_address: check.address.clone(),
+        }
+    }
 }
 
 impl InstancePlan {
@@ -100,6 +188,28 @@ impl InstancePlan {
             preempt: true,
             preempt_delay: Duration::ZERO,
             startup_delay: Duration::ZERO,
+            checks: Vec::new(),
+            health: highland_core::health::HealthPolicyConfig::default(),
+        }
+    }
+
+    /// Converts a configured instance into a plan.
+    ///
+    /// The one conversion from configuration to plan, so the daemon, the reload
+    /// planner, and a test all see the same instance. Two copies of this is how a
+    /// reloaded field quietly keeps its old value.
+    #[must_use]
+    pub fn from_config(instance: &highland_config::InstanceConfig) -> Self {
+        Self {
+            name: instance.name.clone(),
+            vrid: instance.vrid,
+            priority: instance.priority,
+            advertisement_interval: instance.advertisement_interval.as_duration(),
+            preempt: instance.preempt,
+            preempt_delay: instance.preempt_delay.as_duration(),
+            startup_delay: instance.startup_delay.as_duration(),
+            checks: instance.checks.iter().map(CheckPlan::from_config).collect(),
+            health: health_policy(instance),
         }
     }
 }

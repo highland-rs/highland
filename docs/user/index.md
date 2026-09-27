@@ -81,8 +81,11 @@ including the announcement that tells the segment the address moved — is drive
 end to end between two network namespaces in the test suite.
 
 IPv6 and multicast are done as well: the same two-node suite runs IPv4 unicast,
-IPv4 multicast, IPv6 unicast, and IPv6 multicast. What is not finished is holding
-both families in one instance, health probes, and Keepalived interoperability.
+IPv4 multicast, IPv6 unicast, and IPv6 multicast. Health checks run:
+`tcp`, `http`, `unix`, and `interface`, with thresholds, weights, and a
+demotion that says which check failed. What is not finished is holding both
+families in one instance, the remaining check types, and Keepalived
+interoperability.
 
 The documentation describes the finished product, and marks anything that does
 not work yet. The [command reference](cli.md), the

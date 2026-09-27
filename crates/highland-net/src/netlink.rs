@@ -487,6 +487,51 @@ impl NetworkBackend for NetlinkBackend {
     }
 }
 
+/// The link-state reading a health check needs, over the same Netlink socket the
+/// daemon already opens.
+///
+/// One implementation, used by the interface probe, so a check and the daemon
+/// cannot disagree about whether a link is up: two readers of the kernel that
+/// answer differently are one bug waiting for an incident.
+impl highland_checks::LinkProbe for NetlinkBackend {
+    fn state(
+        &self,
+        interface: &str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = core::result::Result<
+                        highland_checks::LinkState,
+                        highland_checks::CheckError,
+                    >,
+                > + Send
+                + '_,
+        >,
+    > {
+        // The interface name is owned for the future's lifetime, so the future
+        // does not borrow it: the health task holds no borrow of its
+        // configuration while a probe is in flight.
+        let interface = interface.to_owned();
+        Box::pin(async move {
+            let found = self.interface(&interface).await.map_err(|error| {
+                highland_checks::CheckError::InterfaceUnreadable {
+                    interface: interface.clone(),
+                    detail: error.to_string(),
+                }
+            })?;
+            // `is_usable` means "up and carrying", which is one test for the
+            // case an operator is actually diagnosing: a link that is
+            // administratively up with a dead cable behind it.
+            Ok(highland_checks::LinkState {
+                present: true,
+                up: found.is_usable(),
+                carrier: found.is_usable(),
+                addresses: found.addresses.iter().map(ToString::to_string).collect(),
+            })
+        })
+    }
+}
+
 impl NetlinkBackend {
     async fn answer_gratuitous_update(
         &self,

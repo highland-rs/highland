@@ -29,6 +29,7 @@ netlink-tests = []
 
 [dependencies]
 futures-util.workspace = true
+highland-checks.workspace = true
 highland-vrrp.workspace = true
 libc.workspace = true
 nix.workspace = true

@@ -197,27 +197,6 @@ impl CheckResult {
     }
 }
 
-/// The aggregated health of one instance, as consumed by the state machine.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct HealthSummary {
-    /// The sum of the weights of the checks currently failing.
-    pub penalty: u16,
-    /// The number of checks currently failing.
-    pub failing: usize,
-    /// The number of checks currently passing.
-    pub passing: usize,
-    /// The number of checks whose result has been discarded as stale.
-    pub stale_discarded: usize,
-}
-
-impl HealthSummary {
-    /// Returns `true` when nothing is failing.
-    #[must_use]
-    pub fn is_healthy(&self) -> bool {
-        self.failing == 0
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

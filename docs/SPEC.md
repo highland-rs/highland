@@ -1994,6 +1994,17 @@ demotion.
 Exit (`M-07`): every check type has unit, netns, and failure-mode tests; `I-23` through
 `I-26` hold.
 
+Implemented: `tcp`, `http`, `unix`, and `interface`, each tested against a real socket or
+a real link, plus the scheduler that bounds, debounces, and reduces them. A namespace
+test drives the whole chain — a failing check lowers a master's effective priority and the
+peer's preemption moves the address — and a second one asserts that a check this build
+cannot run is refused *by name* at startup rather than failing on every interval.
+
+Not implemented, and refused by name rather than degraded: `https` (which needs a TLS
+stack and certificate validation, `§15.1`), `dns`, `process`, `file`, and `composite`.
+The per-instance concurrency limit in §15.4 is not a configured number: one instance's
+checks run on one task.
+
 ### Milestone 7 — Operations interface `[1]`
 
 Control socket, status API, metrics, reload, pause and resume, relinquish, event stream.

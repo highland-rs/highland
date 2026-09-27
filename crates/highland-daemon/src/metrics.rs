@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use highland_observe::{Counter, Histogram, Kind, Series, Snapshot};
 
@@ -166,6 +167,35 @@ impl Metrics {
     /// Records a failed address removal.
     pub fn record_vip_remove_failure(&self, instance: &str) {
         self.with_instance(instance, |metrics| metrics.vip_remove_failures.increment());
+    }
+
+    /// Records one probe: a failure counter and the probe's duration.
+    ///
+    /// The duration is recorded whether the probe passed or failed, because a
+    /// check that is slow while passing is the thing an operator sees before it
+    /// sees a failure. The counter only moves on a failure, so a dashboard can
+    /// read "how often is this check unhappy" without dividing.
+    pub fn record_check(
+        &self,
+        instance: &str,
+        check: &str,
+        failing: bool,
+        latency: Option<Duration>,
+    ) {
+        if failing {
+            let key = (instance.to_owned(), check.to_owned());
+            Self::lock(&self.check_failures)
+                .entry(key)
+                .or_default()
+                .increment();
+        }
+        if let Some(latency) = latency {
+            let key = (instance.to_owned(), check.to_owned());
+            Self::lock(&self.check_duration)
+                .entry(key)
+                .or_default()
+                .observe(latency.as_secs_f64());
+        }
     }
 
     /// Records a reload outcome.

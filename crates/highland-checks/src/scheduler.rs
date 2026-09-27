@@ -24,8 +24,9 @@ use std::time::{Duration, Instant};
 
 use highland_core::state::Generation;
 
+use crate::HealthSummary;
 use crate::check::{Check, Debouncer, Stability};
-use crate::result::{CheckResult, HealthSummary};
+use crate::result::CheckResult;
 
 /// One check's debounced state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -183,6 +184,15 @@ impl Scheduler {
         }
     }
 
+    /// The last result a check produced, for a metric or a log line.
+    #[must_use]
+    pub fn last_result(&self, name: &str) -> Option<&CheckResult> {
+        self.entries
+            .iter()
+            .find(|entry| entry.check.spec().name == name)
+            .and_then(|entry| entry.last.as_ref())
+    }
+
     /// The instant at which the next check is due, or `None` when none is.
     #[must_use]
     pub fn next_due(&self) -> Option<Instant> {
@@ -323,7 +333,13 @@ fn summarise(entries: &[Entry], generation: Generation) -> HealthSummary {
         match entry.verdict {
             Verdict::Failing(weight) => {
                 summary.penalty = summary.penalty.saturating_add(weight);
-                summary.failing = summary.failing.saturating_add(1);
+                summary.total_failures = summary.total_failures.saturating_add(1);
+                // A weight of zero is observational (`R-14`): the check is
+                // visibly failing and costs nothing, which is a different thing
+                // from passing and is why the two counts are separate.
+                if weight > 0 {
+                    summary.electoral_failures = summary.electoral_failures.saturating_add(1);
+                }
             }
             Verdict::Passing => summary.passing = summary.passing.saturating_add(1),
             Verdict::Unknown => {}

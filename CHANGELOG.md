@@ -503,26 +503,60 @@ as is one that is not a multicast address. A multicast instance needs no peer
 list. A mixed-family *peer* list is legal, and a test says so, because it is a
 different thing from a mixed-family address list and used to be confused with it.
 
-### Not delivered, and why
+### Health checks that run
 
-- **Both address families in one instance** is refused rather than supported
-  (`V-03`): an instance speaks one family per socket and one source address, so it
-  would need a second socket, a second source address, and a second
-  advertisement. Two instances, one per family, is the arrangement that works.
-- **Health probes are not scheduled by the daemon.** The check model and the
-  policy arithmetic exist and the machine consumes their verdicts, but nothing
-  runs probes on a timer yet, so a check cannot yet demote a running node.
-- **Keepalived interoperability** is Milestone 8, and the packet vectors are
-  encoder-produced rather than captured. The IPv6 checksum scope — whether
-  interoperability needs the pseudo-header at all — is settled there, against a
-  real implementation rather than against the RFC's wording.
-- **`--yes` is accepted and ignored.** The confirmation prompt is not
-  implemented; the exit code is, and a refused command exits non-zero.
-- **Adding an instance that did not exist before a reload** is classified and the
-  reload is applied, but the instance itself is started at startup only. That is
-  a gap between the planner and the runner, not between the planner and the
-  operator.
-- **Hold-down and retry are fixed, not configurable**, as Appendix B records.
+The check model, the debounce thresholds, and the policy arithmetic have existed
+since Milestone 1; what did not exist was anything that ran a probe. Now there
+are four — `tcp`, `http`, `unix`, and `interface` — a scheduler that bounds and
+debounces them, and one task per instance that drives it.
+
+The probes have no new dependency. `http` is a request line, a status line, and
+a bounded read, because a health check that reads an unbounded body from a
+misbehaving service is how a monitor becomes an amplifier. `interface` reads the
+link through a `LinkProbe` trait, so a check and the daemon share one Netlink
+socket and cannot disagree about whether a link is up — and so its three failure
+modes are tested without three namespaces.
+
+`https` is refused rather than downgraded. A TLS handshake is not something to
+reimplement, and a check that connected to port 443 without validating a
+certificate would report a service as healthy on the strength of a plaintext
+exchange. It is refused *by name*, at startup, with the reason — a check that
+cannot be built is a configuration error, and a check that fails on every
+interval forever is a quieter way to take a node out of service than a refusal.
+
+The scheduler owns the three things a probe must not get wrong: the timeout, the
+thresholds, and staleness. A probe that hangs leaves the instance believing a
+verdict that stopped being true, so the bound is the scheduler's and a timeout
+counts as a failure. A blip must not move a priority on a live segment, so the
+thresholds are not advisory. And a result from an older generation, or one that
+finished after a newer result, never overwrites it (`I-26`).
+
+The task sits beside the actor, not inside it: a probe waits on a socket, and a
+state machine that waited on a socket would stop deciding anything while a service
+was slow (`I-38`, `R-05`).
+
+### Two more defects, both in the reload path
+
+- **A health change on reload was accepted and then discarded.** The reload
+  planner classifies `health` as reloadable, and the actor's reconfigure rebuilt
+  the machine with the *default* health policy — so the change was reported as
+  applied and the old policy stayed. The policy is carried across now.
+- **A change to the check list was classified reloadable and could not be.** The
+  running scheduler holds probes built from the old list, so it is classified as
+  needing a restart instead. Saying "restart" is the honest answer; saying
+  "applied" and leaving the old probes in place would be a reload that did
+  nothing.
+
+### A note on `preempt`
+
+A demoted master does not give the address up by itself. RFC 5798 has it keep
+advertising, and a backup only takes over from a live master when preemption is
+enabled — so a deployment that wants a failing check to move the address has to
+set `preempt = true` on the peer. The namespace test says so explicitly, because
+"my check failed and nothing happened" is the most likely way to be surprised by
+this.
+
+### Not delivered, and why
 
 ### Known limitations
 

@@ -15,10 +15,12 @@
 #![forbid(unsafe_code)]
 
 mod actor;
+mod checks;
 mod control;
 mod driver;
 mod events;
 mod executor;
+mod health_task;
 mod logging;
 mod metrics;
 mod metrics_server;

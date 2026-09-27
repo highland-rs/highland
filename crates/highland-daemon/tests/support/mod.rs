@@ -110,6 +110,25 @@ impl Node {
         prefix: u8,
         peer: Option<&str>,
     ) -> Self {
+        Self::create_with_checks(
+            namespace, address, bridge, preempt, priority, vip, prefix, peer, "",
+        )
+    }
+
+    /// As [`Node::create_full`], with extra configuration appended to the
+    /// instance, which is how a test adds a health check.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_checks(
+        namespace: &str,
+        address: &str,
+        bridge: &str,
+        preempt: bool,
+        priority: u8,
+        vip: &str,
+        prefix: u8,
+        peer: Option<&str>,
+        extra: &str,
+    ) -> Self {
         // The address and the virtual address share a prefix length, because
         // they are on the same segment; a test that wanted otherwise would be
         // building a topology, not a node.
@@ -176,7 +195,10 @@ impl Node {
 
         let directory = std::env::temp_dir().join(format!("highland-{name}"));
         std::fs::create_dir_all(&directory).expect("the instance directory can be created");
-        let config = configuration(namespace, &directory, preempt, vip, prefix, priority, peer);
+        let config = format!(
+            "{}{extra}",
+            configuration(namespace, &directory, preempt, vip, prefix, priority, peer)
+        );
         std::fs::write(directory.join("config.toml"), config)
             .expect("the configuration can be written");
 
@@ -234,9 +256,14 @@ impl Node {
             .to_owned()
     }
 
-    /// Returns this node's daemon output.
+    /// Returns this node's daemon output, with terminal colour removed.
+    ///
+    /// The daemon writes structured fields, and a test asserting on one of them
+    /// wants the field's value rather than the escape sequence the writer put
+    /// around it: `to=Failing` is not a substring of a coloured `to=\e[33m…`.
     pub fn log(&self) -> String {
-        std::fs::read_to_string(self.directory.join("daemon.log")).unwrap_or_default()
+        let raw = std::fs::read_to_string(self.directory.join("daemon.log")).unwrap_or_default();
+        strip_ansi(&raw)
     }
 
     /// Kills the daemon, the way a node failure looks to its peer.
@@ -407,6 +434,26 @@ address = "{vip}/{prefix}"
         priority = priority,
         socket = directory.join("control.sock").display(),
     )
+}
+
+/// Removes terminal colour codes from captured output.
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut characters = text.chars();
+    while let Some(character) = characters.next() {
+        if character != '\u{1b}' {
+            out.push(character);
+            continue;
+        }
+        // An escape sequence ends at the first letter, which is how the
+        // sequences a tracing writer emits are shaped.
+        for next in characters.by_ref() {
+            if next.is_ascii_alphabetic() {
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Polls `condition` until it has held for `window` in a row, or the budget runs

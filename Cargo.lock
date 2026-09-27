@@ -349,6 +349,7 @@ name = "highland-net"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "highland-checks",
  "highland-vrrp",
  "libc",
  "nix 0.31.3",

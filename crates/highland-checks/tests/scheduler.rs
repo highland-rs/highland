@@ -140,7 +140,7 @@ async fn one_failure_does_not_demote_and_the_threshold_does() {
     let report = scheduler.tick(now + Duration::from_millis(10)).await;
     assert_eq!(report.summary.penalty, 0, "two failures of three");
     assert_eq!(report.summary.passing, 0);
-    assert_eq!(report.summary.failing, 0);
+    assert_eq!(report.summary.total_failures, 0);
 
     // A success resets the failure count, and a check that starts unknown needs
     // `success_threshold` successes to be declared passing: one success of two
@@ -167,7 +167,7 @@ async fn one_failure_does_not_demote_and_the_threshold_does() {
     }
     let report = scheduler.tick(now + Duration::from_millis(30)).await;
     assert_eq!(report.summary.penalty, 100, "the weight is the cost");
-    assert_eq!(report.summary.failing, 1);
+    assert_eq!(report.summary.total_failures, 1);
     assert_eq!(scheduler.verdicts(), vec![("api", Verdict::Failing(100))]);
 
     let change = report
@@ -204,19 +204,22 @@ async fn recovery_requires_consecutive_successes() {
     let now = Instant::now();
 
     let report = scheduler.tick(now).await;
-    assert_eq!(report.summary.failing, 1, "one failure of one is a failure");
+    assert_eq!(
+        report.summary.total_failures, 1,
+        "one failure of one is a failure"
+    );
 
     // A single success does not recover it: the success threshold is what stops
     // a flapping service from taking the address back and forth.
     let report = scheduler.tick(now + Duration::from_millis(10)).await;
-    assert_eq!(report.summary.failing, 1, "one success of three");
+    assert_eq!(report.summary.total_failures, 1, "one success of three");
     let report = scheduler.tick(now + Duration::from_millis(20)).await;
     assert_eq!(
-        report.summary.failing, 1,
+        report.summary.total_failures, 1,
         "the success count was reset by a failure"
     );
     let report = scheduler.tick(now + Duration::from_millis(30)).await;
-    assert_eq!(report.summary.failing, 1, "two of three");
+    assert_eq!(report.summary.total_failures, 1, "two of three");
     let report = scheduler.tick(now + Duration::from_millis(40)).await;
     assert_eq!(
         report.summary.passing, 1,
@@ -245,7 +248,7 @@ async fn a_probe_that_overruns_is_a_failure_and_does_not_stall_the_scheduler() {
         "the tick returned at {elapsed:?}, so the timeout bounds the probe"
     );
     assert_eq!(
-        report.summary.failing, 1,
+        report.summary.total_failures, 1,
         "a timeout is a failure, not a separate state (§15.3)"
     );
 }
@@ -283,7 +286,7 @@ async fn a_result_from_a_previous_generation_never_overwrites_a_newer_one() {
     // The next result is stamped with the new generation and is accepted.
     let report = scheduler.tick(now + Duration::from_millis(20)).await;
     assert_eq!(
-        report.summary.failing, 1,
+        report.summary.total_failures, 1,
         "the new generation's result is used"
     );
     assert_eq!(
@@ -366,7 +369,7 @@ async fn the_grace_period_ignores_failures_entirely() {
     // a node that never joins the election.
     let report = scheduler.tick(started).await;
     assert_eq!(
-        report.summary.failing, 0,
+        report.summary.total_failures, 0,
         "the grace period ignores results"
     );
     assert_eq!(report.summary.penalty, 0);
@@ -375,7 +378,7 @@ async fn the_grace_period_ignores_failures_entirely() {
     // having one: it bounds the service's startup, not the check's judgement.
     let report = scheduler.tick(started + Duration::from_millis(60)).await;
     assert_eq!(
-        report.summary.failing, 1,
+        report.summary.total_failures, 1,
         "after the grace period it counts"
     );
 }
@@ -398,7 +401,7 @@ async fn the_summary_sums_the_weights_of_the_failing_checks() {
     let now = Instant::now();
 
     let report = scheduler.tick(now).await;
-    assert_eq!(report.summary.failing, 3, "three checks are failing");
+    assert_eq!(report.summary.total_failures, 3, "three checks are failing");
     assert_eq!(
         report.summary.penalty, 100,
         "and only the weighted ones cost priority: a weight of zero is observational (`R-14`)"

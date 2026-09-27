@@ -256,11 +256,46 @@ async fn start_instances(
         registry.publish(actor.publish_status());
         log.record_instance(&daemon.config().node.name, &actor.publish_status());
         service.register(plan.name.clone(), sender.clone());
-        reload.register(plan.name.clone(), sender);
+        reload.register(plan.name.clone(), sender.clone());
 
         let reader = transport.spawn_reader(reader_sender);
         let watch = shutdown_signal.clone();
         let name = plan.name.clone();
+
+        // The health task, beside the actor rather than inside it: a probe waits
+        // on a socket, and a state machine that waited on a socket would stop
+        // deciding anything while a service was slow (`I-38`, `R-05`).
+        //
+        // It shares the backend, so an interface check and the daemon read the
+        // same Netlink socket and cannot disagree about whether a link is up.
+        let health_links: std::sync::Arc<dyn highland_checks::LinkProbe> =
+            std::sync::Arc::clone(&backend) as _;
+        let health_sender = sender.clone();
+        let health_instance = plan.name.clone();
+        let health_plans = plan.checks.clone();
+        let health_metrics = std::sync::Arc::clone(metrics);
+        let health_watch = shutdown_signal.clone();
+        let health = tokio::spawn(async move {
+            // The health task is aborted with the actor, so nothing outlives the
+            // instance that owns it (`I-41`).
+            if let Err(reason) = crate::health_task::run(
+                &health_instance,
+                &health_plans,
+                health_links,
+                health_sender,
+                health_metrics,
+                health_watch,
+            )
+            .await
+            {
+                // A check that cannot be built is a configuration error, and a
+                // node with checks it cannot run must not pretend to be
+                // participating: it is said out loud, because the alternative is
+                // a node advertising itself healthy while a check is failing to
+                // start on every interval.
+                tracing::error!(instance = %health_instance, "{reason}");
+            }
+        });
 
         let publishing_registry = std::sync::Arc::clone(registry);
         let publishing_name = plan.name.clone();
@@ -274,9 +309,10 @@ async fn start_instances(
                 Some(publishing_name),
             )
             .await;
-            // The reader stops with the actor: nothing outlives the instance
-            // that owns it (`I-41`).
+            // The reader and the health task stop with the actor: nothing
+            // outlives the instance that owns it (`I-41`).
             reader.abort();
+            health.abort();
         });
 
         tracing::info!(
@@ -737,15 +773,7 @@ fn plan_for(instance: &InstanceConfig) -> Result<(InstancePlan, Ownership), Stri
         .map(|text| IpCidr::parse(text).map_err(|error| error.to_string()))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let plan = InstancePlan {
-        name: instance.name.clone(),
-        vrid: instance.vrid,
-        priority: instance.priority,
-        advertisement_interval: instance.advertisement_interval.as_duration(),
-        preempt: instance.preempt,
-        preempt_delay: instance.preempt_delay.as_duration(),
-        startup_delay: instance.startup_delay.as_duration(),
-    };
+    let plan = InstancePlan::from_config(instance);
     let ownership = match instance.network.mode {
         highland_config::NetworkMode::Unicast => Ownership::new(
             instance.interface.clone(),

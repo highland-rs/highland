@@ -213,11 +213,12 @@ master and move the address over IPv4 or IPv6, unicast or multicast.
 | Write and validate a configuration | Hold IPv4 and IPv6 addresses in one instance |
 | Encode and decode VRRP advertisements | Configure hold-down and retry parameters |
 | Add and remove addresses, confirmed by read-back | Keepalived interoperability |
-| Fail a VIP over between two nodes, unicast or multicast | |
+| Fail a VIP over between two nodes, unicast or multicast | Use `https` or `dns` health checks |
 | Announce a takeover to the segment | |
 | Query a running node over the control socket | |
 | Read the event history, and follow it | |
 | Scrape metrics, reload without dropping the address | |
+| Run `tcp`, `http`, `unix`, and `interface` health checks | |
 
 The [command reference](cli.md) marks every command with its state. Check
 [`CHANGELOG.md`](../../CHANGELOG.md) for the current release notes.

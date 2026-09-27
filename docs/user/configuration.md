@@ -123,6 +123,53 @@ Type-specific keys, all required for the type they belong to (`V-23`):
 | `composite` | — |
 | `command` | `command`, plus `allow_paths` |
 
+### Which types run today
+
+`tcp`, `http`, `unix`, and `interface` are implemented and tested. The rest are
+**refused by name at startup**, with the reason, rather than accepted and quietly
+degraded:
+
+| Type | Why not |
+|---|---|
+| `https` | Needs a TLS stack and certificate validation. A check that connected to port 443 without validating a certificate would report a service as healthy on the strength of a plaintext exchange, so an `https` check is refused rather than downgraded to a `tcp` one. |
+| `dns` | Not implemented. |
+| `process` | Not implemented. Existence is a weak signal that says nothing about readiness. |
+| `file` | Not implemented. |
+| `composite` | Not implemented. |
+| `command` | Needs the `command-checks` feature and an `allow_paths` list. |
+
+A check that cannot be built is a **configuration error at startup**, and that is
+the point: a check that fails on every interval forever is a quieter way to take a
+node out of service than a refusal.
+
+### A failing check does not give the address up by itself
+
+A master whose effective priority drops keeps advertising, which is what RFC 5798
+requires: a backup only takes over from a *live* master when preemption is
+enabled. So if you want a failing check to move the address, set `preempt = true`
+on the peer:
+
+```toml
+# The node being watched. Its weight is what a failure costs.
+preempt = false
+
+[instance.check]
+name = "api"
+type = "tcp"
+weight = 100
+interval = "2s"
+timeout = "1s"
+failure_threshold = 3
+success_threshold = 2
+address = "10.0.0.10:8080"
+
+# And on the peer that should take over when this one is demoted:
+# preempt = true
+```
+
+`weight = 0` makes a check observational: it is reported and exported, and it
+never affects election.
+
 `command` checks additionally require a binary built with the `command-checks`
 feature, an `allow_paths` list of absolute paths, and the command itself to be in
 that list (`V-21`). This is the only way a configuration file becomes code

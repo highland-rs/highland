@@ -400,3 +400,143 @@ fn two_nodes_in_ipv6_multicast_mode_elect_one_master_and_fail_over() {
         survivor.log()
     );
 }
+
+/// A failing check takes the address away, and says why.
+///
+/// This is the whole chain in one test, and it is the thing a health check is
+/// for: a node that is master while the service behind it is gone will sit
+/// there advertising ownership to every client that tries the address, and every
+/// one of them fails. The demotion is weighted — the node's effective priority
+/// drops below its peer's — so the address moves, and the event says which check
+/// and what it said.
+#[test]
+fn a_failing_check_demotes_the_node_and_says_why() {
+    let bridge = bridge();
+    let name = bridge.name.clone();
+    let _bridge_guard = bridge;
+
+    // A TCP check against a port nothing will listen on, on the higher-priority
+    // node. Thresholds of one so the demotion is not a function of timing.
+    let checks = r#"
+[[instance.check]]
+name = "api"
+type = "tcp"
+weight = 100
+interval = "200ms"
+timeout = "200ms"
+failure_threshold = 1
+success_threshold = 1
+address = "192.0.2.99:9"
+"#;
+
+    let mut first = Node::create_with_checks(
+        "hca",
+        A_ADDRESS,
+        &name,
+        false,
+        150,
+        VIRTUAL_ADDRESS,
+        24,
+        Some(B_ADDRESS),
+        checks,
+    );
+    // The peer preempts. That is the whole configuration question: a demoted
+    // master does not give the address up by itself — RFC 5798 has it keep
+    // advertising, and a backup only takes over from a live master when
+    // preemption is enabled. A deployment that wants a failing check to move the
+    // address has to say so here, and the test says so.
+    let mut second = Node::create_with_priority("hcb", B_ADDRESS, &name, true, 100);
+    first.start();
+    second.start();
+
+    // The checked node must not end up holding the address: its own check is
+    // failing from the first probe, so its effective priority is 150 - 100 = 50,
+    // below the peer's 100, and the peer takes over.
+    let moved = wait_for(
+        "the failing check handed the address to the peer",
+        Duration::from_secs(15),
+        || second.holds_vip() && !first.holds_vip(),
+    );
+    assert!(
+        moved,
+        "a failing check did not demote the node: a={:?} b={:?}\n--- checked ---\n{}\n--- peer ---\n{}",
+        first.addresses(),
+        second.addresses(),
+        first.log(),
+        second.log()
+    );
+
+    // And the reason is in the log, because a demotion nobody can explain is a
+    // demotion nobody can act on (`D-08`). What is asserted is the *check*
+    // saying what it saw: the address moving is the machine's decision, and the
+    // test above already covers that this node is no longer holding it.
+    let log = first.log();
+    assert!(
+        log.contains("the probe did not answer") || log.contains("could not connect"),
+        "the check said what it saw:\n{log}"
+    );
+    assert!(
+        log.contains("from=Unknown to=Failing") || log.contains("to=Failing"),
+        "and the verdict it reached:\n{log}"
+    );
+}
+
+/// A check that cannot be built is a configuration error, and the node says so
+/// rather than running a probe that cannot work.
+///
+/// The alternative — a check that fails on every interval forever — is a quieter
+/// way to take a node out of service than a refusal at startup, and the refusal
+/// is what an operator needs.
+#[test]
+fn a_check_this_build_cannot_run_is_refused_by_name() {
+    let bridge = bridge();
+    let name = bridge.name.clone();
+    let _bridge_guard = bridge;
+
+    let checks = r#"
+[[instance.check]]
+name = "secure"
+type = "https"
+weight = 50
+interval = "1s"
+timeout = "1s"
+failure_threshold = 1
+success_threshold = 1
+url = "https://192.0.2.10/health"
+expected_status = [200]
+"#;
+    let mut node = Node::create_with_checks(
+        "hcc",
+        A_ADDRESS,
+        &name,
+        false,
+        150,
+        VIRTUAL_ADDRESS,
+        24,
+        None,
+        checks,
+    );
+    node.start();
+
+    // The daemon starts — an unbuildable check is not fatal to the node — and
+    // says which check and why, once, rather than every interval.
+    let said = wait_for(
+        "the unbuildable check is reported",
+        Duration::from_secs(10),
+        || {
+            let log = node.log();
+            log.contains("cannot be built") && log.contains("secure")
+        },
+    );
+    assert!(said, "the reason was not reported:\n{}", node.log());
+    let log = node.log();
+    assert!(
+        log.contains("TLS") || log.contains("https"),
+        "and it names why https is refused rather than downgraded:\n{log}"
+    );
+    assert_eq!(
+        log.matches("cannot be built").count(),
+        1,
+        "said once, not once per interval:\n{log}"
+    );
+}

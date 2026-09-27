@@ -1,0 +1,86 @@
+# Highland Documentation
+
+Everything you need to install, configure, run, and operate Highland.
+
+## Start here
+
+| If you want to | Read |
+|---|---|
+| Get it running for the first time | [Getting started](getting-started.md) |
+| Look up a configuration key or an error message | [Configuration reference](../configuration.md) |
+| Run a command and understand what it did | [Command reference](cli.md) |
+| Fix something that is wrong | [Operations guide](../operations.md) |
+| Move off Keepalived | [Compatibility](../compatibility.md) |
+| Report a vulnerability | `SECURITY.md` in the repository root |
+| Know exactly what the software promises | [Specification](../SPEC.md) |
+
+## What Highland is
+
+Highland keeps a virtual IP address available by moving it between machines. It
+speaks VRRPv3, the protocol Keepalived uses, so it works alongside existing
+implementations on the same segment.
+
+It is built around three commitments:
+
+- **It never claims an address it does not hold.** A node confirms ownership in
+  the kernel before it advertises, and says so plainly when it cannot take
+  ownership.
+- **It explains itself.** Every role change carries a reason, visible in the
+  event stream, the logs, and the metrics. You are never left inferring why an
+  address moved.
+- **It is honest about its limits.** Highland is a layer-2 tool. It survives a
+  machine failing. It does not survive a network partition that separates the
+  nodes from each other while leaving both able to reach clients, and it does not
+  pretend otherwise. Read [split-brain
+  behavior](../compatibility.md#split-brain-behavior) before you deploy.
+
+## What is here
+
+| Document | What it covers |
+|---|---|
+| [Getting started](getting-started.md) | Requirements, building, a first configuration, running on two nodes |
+| [Configuration reference](../configuration.md) | Every key, every default, and every rule that rejects a file |
+| [Command reference](cli.md) | Every command, its flags, and what it does |
+| [Operations guide](../operations.md) | Signals, events, the failure playbook, split brain, upgrade and rollback |
+| [Compatibility](../compatibility.md) | Keepalived mapping, protocol differences, IPv6, diagnosing with packet captures |
+| [Threat model](../threat-model.md) | What Highland trusts, what it refuses, and what is out of scope |
+| [Specification](../SPEC.md) | The complete requirements, with stable references for tests and issues |
+
+The [operations guide](../operations.md), [configuration
+reference](../configuration.md), and [compatibility](../compatibility.md) are
+written as runbooks: they are meant to be followed while something is happening,
+not read in advance.
+
+## Two things to know before you deploy
+
+**Ownership before advertisement.** A node confirms its addresses in the kernel
+before it advertises as their owner. If it cannot, it enters a fault state and
+tells you which interface, which address, and which kernel error. It will not
+announce an address it does not have.
+
+**Reload is all-or-nothing.** A configuration change that cannot be fully
+applied is refused in full, leaving the running configuration untouched.
+Instances that the change does not affect are never interrupted.
+
+## Current state
+
+Highland is not yet released, and not yet finished. The configuration layer and
+the failover logic are complete and tested; the parts that put packets on the
+wire and expose a control socket are still being built, so a virtual address
+does not yet move on a real network.
+
+The documentation describes the finished product, and marks anything that does
+not work yet. The [command reference](cli.md) and the
+[changelog](../../CHANGELOG.md) are the reliable places to check. If a document
+and the running software disagree, the running software wins — please report it.
+
+## Reading the rule references
+
+Configuration and event messages carry short references such as `V-01` or
+`I-04`. They are stable, so you can quote one in a bug report and it will still
+mean the same thing. Look them up in the [specification](../SPEC.md).
+
+## Reporting problems
+
+- A suspected vulnerability: `SECURITY.md`. Please do not open a public issue.
+- Anything else: the project's issue tracker.

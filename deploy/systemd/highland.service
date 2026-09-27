@@ -11,7 +11,12 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=notify
+# `Type=simple`, not `Type=notify`: the daemon does not send an sd_notify
+# readiness message, and a unit that waits for one it will never receive fails to
+# start after `TimeoutStartSec`. `Type=simple` is correct here because the daemon
+# loads and validates its configuration before it binds anything, so a process
+# that has started is a process whose configuration was accepted.
+Type=simple
 ExecStart=/usr/bin/highland run --config /etc/highland/config.toml
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

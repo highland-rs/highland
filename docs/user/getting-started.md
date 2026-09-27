@@ -141,21 +141,21 @@ lower-priority node keep it, set `preempt = false` on both.
 
 ## Run it
 
-**Today this exits immediately**, with exit code 1:
-
 ```console
 $ highland run --config /etc/highland/config.toml
-ERROR highland: the VRRP transport is not implemented; the daemon will not start
+INFO  highland started node=node-a instances=1
+INFO  role changed instance=api role=BACKUP reason=startup effective_priority=150
+INFO  instance started instance=api vrid=42 source=192.0.2.11 peers=1
 ```
 
-The refusal is deliberate. Highland has no raw VRRP socket yet, and a process
-that claims to be a VRRP router while sending nothing is worse than one that
-declines to start. The configuration is still loaded and validated first, so a
-broken file reports the broken file rather than this message.
+The configuration is loaded and validated first, so a broken file reports the
+broken file. Then the node enters election, and the higher-priority node takes
+the address within one `Master_Down_Interval` — about 3.4 seconds at priority
+150 with a one-second advertisement interval.
 
-Because of that, do not install the systemd unit yet. It has
-`Restart=on-failure`, so it would restart the daemon every two seconds forever.
-The unit becomes useful when the socket lands.
+`highland run` becomes the daemon rather than supervising one, so the process
+you start *is* the process that owns the address. Run it under systemd or
+OpenRC, not in a terminal you might close.
 
 ## Watch it
 
@@ -170,10 +170,10 @@ $ highland show api
 $ highland events --follow
 ```
 
-None of these reach a running daemon yet, because there is no control socket.
-The [operations guide](operations.md) is the runbook for when they do: what
-each event means, what to do when the address will not move, and how to upgrade
-without an outage.
+These reach the daemon over a local Unix socket, so they work from another
+terminal on the same machine and are refused from anywhere else. The
+[operations guide](operations.md) is the runbook: what each event means, what to
+do when the address will not move, and how to upgrade without an outage.
 
 ## Changing the configuration later
 
@@ -209,11 +209,11 @@ master and move the address over IPv4 or IPv6, unicast or multicast.
 
 | You can do this now | Not yet |
 |---|---|
-| Build and test the project | Fail a VIP over between two real machines |
-| Write and validate a configuration | Hold IPv4 and IPv6 addresses in one instance |
+| Build and test the project | Hold IPv4 and IPv6 addresses in one instance |
+| Write and validate a configuration | Use `https`, `dns`, or `process` health checks |
 | Encode and decode VRRP advertisements | Configure hold-down and retry parameters |
-| Add and remove addresses, confirmed by read-back | Keepalived interoperability |
-| Fail a VIP over between two nodes, unicast or multicast | Use `https` or `dns` health checks |
+| Add and remove addresses, confirmed by read-back | Keepalived interoperability (1.0) |
+| Fail a VIP over between two nodes, unicast or multicast | Change the check list without a restart |
 | Announce a takeover to the segment | |
 | Query a running node over the control socket | |
 | Read the event history, and follow it | |

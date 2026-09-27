@@ -7,8 +7,8 @@ behavior; every transition reason listed here MUST have an entry
 
 ## Requirements
 
-The daemon requires `CAP_NET_ADMIN` and `CAP_NET_RAW`. It also refuses to start
-until it has a working VRRP socket, so nothing below is reachable today.
+The daemon requires `CAP_NET_ADMIN` and `CAP_NET_RAW`, and refuses to start
+without them rather than running a VRRP router that cannot move an address.
 
 - Linux with `CAP_NET_ADMIN` and `CAP_NET_RAW`.
 - The configuration file readable by the daemon, and not world-writable.
@@ -18,9 +18,6 @@ until it has a working VRRP socket, so nothing below is reachable today.
   modifies them.
 
 ## Running
-
-Everything below describes the finished product. Today `highland run` exits
-non-zero with `the VRRP transport is not implemented`.
 
 ```console
 $ highland run --config /etc/highland/config.toml
@@ -32,9 +29,11 @@ $ highland reload
 $ highland relinquish api --yes
 ```
 
-Destructive commands print the target instance and its current role, require
-confirmation unless `--yes` is given, and produce an audit event naming the peer
-credential (`R-28`).
+Destructive commands name the target instance and its current role, and
+`--yes` is accepted so a script can be written without a prompt. The
+confirmation prompt itself is not implemented yet, so treat `--yes` as what it
+is: a way to say "I meant it". Every command produces an audit event naming the
+peer credential (`R-28`), and a refusal exits non-zero.
 
 `force-transition` is disabled unless the daemon was started with
 `--enable-force-transition` (`R-10`). It exists for breaking a stuck state
@@ -46,26 +45,23 @@ without an explicit confirmation, and the refusal is a non-zero exit.
 | Signal | Effect |
 |---|---|
 | `SIGTERM`, `SIGINT` | Graceful shutdown (`SPEC.md` §14.5) |
-| `SIGHUP` | Re-reads and re-validates the file, then logs the outcome |
+| `SIGHUP` | Applies the configuration, or refuses the whole reload |
 | A second `SIGTERM` | Ignored; shutdown stays idempotent (`I-31`) |
 
-`SIGHUP` does not apply anything yet. It reports `reload_accepted` or
-`reload_rejected`, and a rejected reload leaves the running configuration
-untouched. `highland reload` is the same operation over the control socket,
-which does not exist yet.
+`SIGHUP` reports `reload_accepted` or `reload_rejected`, and a rejected reload
+leaves the running configuration untouched. It is the same operation as
+`highland reload` — one implementation, shared — so the two cannot disagree
+about what a reload does.
 
 Shutdown order: stop accepting control requests, stop health checks, send a
 zero-priority advertisement and remove VIPs for each master, dump state, exit.
 The default budget is five seconds; exceeding it is an error, and the daemon
-names the addresses it could not remove. None of this is reachable today,
-because the daemon refuses to start; see
-[troubleshooting](troubleshooting.md#the-daemon-will-not-start).
+names the addresses it could not remove.
 
 ## Metrics
 
-There is no metrics endpoint yet: `metrics.enabled` and `metrics.listen` are
-parsed and validated, and nothing serves them. The set below is what `SPEC.md`
-§16.2 specifies and what you will get. Two rules matter operationally:
+Set `metrics.enabled = true` and a `metrics.listen` address, and the daemon
+serves Prometheus text format there. Two rules matter operationally:
 
 - `highland_instance_role` is numeric: `0` INIT, `1` BACKUP, `2` MASTER, `3`
   FAULT, `4` DISABLED (`R-19`).

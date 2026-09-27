@@ -786,11 +786,12 @@
   <p class="eyebrow reveal"><b>01</b> Honest status</p>
   <h2 class="h2 reveal">What works <em>today</em>, and what does not</h2>
   <p class="lede reveal">
-    Highland is pre-release. The state machine, the VRRPv3 codec, the
-    configuration layer, and the Linux netlink backend are finished and tested,
-    and a complete failover is exercised in the test suite. The raw VRRP socket
-    is the one missing piece, so <code class="mono">highland run</code> refuses
-    to start rather than pretend. This page will not say otherwise.
+    Highland is pre-release, and this page will not say otherwise. A whole
+    failover — election, ownership confirmed by read-back, a takeover announced
+    to the segment, and the address moving — runs in the test suite between two
+    real network namespaces, over IPv4 and IPv6, unicast and multicast, with
+    packet loss, reordering, a one-way partition, a link flap, and a frozen node
+    injected into the segment. What is left is written down, not implied.
   </p>
 
   <div class="board reveal" style="margin-block-start:2.5rem">
@@ -800,21 +801,24 @@
         <li>Configuration model, strict TOML parser, and 32 validation rules, each with its own test</li>
         <li>Deterministic state machine: roles, timers, election, health arithmetic, no runtime dependency</li>
         <li>VRRPv3 codec for IPv4 and IPv6, RFC 1071 checksums, six fuzz targets in CI</li>
-        <li>Linux netlink backend: addresses added and removed, confirmed by read-back</li>
-        <li>A whole failover driven end to end against a scripted kernel</li>
-        <li>Event model, redaction, bounded 4096-entry history</li>
-        <li><code class="mono">highland check-config</code>, fully functional</li>
+        <li>Linux netlink backend, raw VRRP sockets, and gratuitous ARP and unsolicited Neighbor Advertisements</li>
+        <li>IPv4 and IPv6, unicast and multicast, each a two-namespace suite</li>
+        <li>Five chaos scenarios: loss, partition, reordering, duplication, link flap, frozen process</li>
+        <li>Control socket, Prometheus metrics, and an event history with a cursor</li>
+        <li>Transactional reload, applied by <code class="mono">highland reload</code> or <code class="mono">SIGHUP</code> — one path, so the two cannot disagree</li>
+        <li>Native <code class="mono">tcp</code>, <code class="mono">http</code>, <code class="mono">unix</code>, and <code class="mono">interface</code> health checks, with thresholds and weighted demotion</li>
       </ul>
     </div>
     <div class="board__col board--no">
-      <h3>Not yet on the wire</h3>
+      <h3>Not yet</h3>
       <ul>
-        <li><b>The raw VRRP socket.</b> Without it the daemon refuses to start</li>
-        <li>Gratuitous ARP, and so a clean address handover</li>
-        <li>A real address moving between two machines (Milestone 4, ships as 0.1.0)</li>
-        <li>The control socket, so the CLI can query a running daemon (Milestone 7)</li>
-        <li>Health probes, so no check can demote a node (Milestone 6)</li>
-        <li>IPv6 and multicast on the wire, and Keepalived interoperability (1.0)</li>
+        <li><b>Keepalived interoperability.</b> Nothing has been run against another implementation yet; that is the next milestone, and it settles the IPv4 checksum scope</li>
+        <li>One instance holding both IPv4 and IPv6 addresses — refused, with a reason, rather than half-supported</li>
+        <li><code class="mono">https</code>, <code class="mono">dns</code>, and <code class="mono">process</code> health checks, all refused by name at startup</li>
+        <li>Changing a check list without restarting the instance</li>
+        <li>Configurable hold-down and retry, and a <code class="mono">--yes</code> confirmation prompt</li>
+        <li>An <code class="mono">sd_notify</code> readiness message, so the unit file uses <code class="mono">Type=simple</code></li>
+        <li>Fencing against split brain, which is outside the election path by design</li>
       </ul>
     </div>
   </div>
@@ -843,28 +847,31 @@
         <code>I-04</code> is structural, not a convention: there is no code path
         from <code>BACKUP</code> to <code>MASTER</code> and on to an
         advertisement except through a confirmed add. Ties break in a documented,
-        deterministic order, and a single failed probe can never move an
-        address.
+        deterministic order, and a single failed probe cannot move an address —
+        thresholds and a grace period are enforced by the scheduler, not left to
+        the probe.
       </p>
     </div>
     <div class="creed__cell" data-n="03">
       <h3>Honest about <span>split brain</span></h3>
       <p>
         Highland is a layer-2 tool. During a network partition two nodes can both
-        believe they own the address. It reports peer loss on both sides, makes
-        no claim of consensus, and documents the exposure. Fencing is post-1.0
-        and deliberately outside the election path.
+        believe they own the address — and a node that is killed, frozen, or
+        partitioned keeps holding it, because nothing can tell it otherwise. The
+        chaos suite asserts that the segment converges once the fault heals, and
+        documents the window in between rather than claiming it away. Fencing is
+        post-1.0 and deliberately outside the election path.
       </p>
     </div>
   </div>
 
   <div class="code reveal" style="margin-block-start:1.2rem">
-    <div class="code__bar"><span class="dots"><i></i><i></i><i></i></span><span>highland events --follow</span></div>
+    <div class="code__bar"><span class="dots"><i></i><i></i><i></i></span><span>journalctl -u highland -f</span></div>
 <pre><code><span class="tk-c"># the address moved, and the reason is in the log</span>
-<span class="tk-t">INFO</span>  node-a/api   <span class="tk-l">MASTER → BACKUP</span>  reason=<span class="tk-s">higher_priority_peer_advertisement</span> peer=<span class="tk-s">192.0.2.12</span> local=<span class="tk-s">50</span> remote=<span class="tk-s">100</span>
-<span class="tk-t">WARN</span>  node-a/api   effective priority <span class="tk-s">150 → 50</span>  check=<span class="tk-s">api-ready</span> weight=<span class="tk-s">100</span> policy=<span class="tk-s">weighted</span>
-<span class="tk-t">INFO</span>  node-b/net   gratuitous ARP broadcast sent (<span class="tk-s">3</span> frames)
-<span class="tk-t">INFO</span>  node-b/api   <span class="tk-l">BACKUP → MASTER</span>  reason=<span class="tk-s">higher_priority_peer_advertisement</span> vip=<span class="tk-s">192.0.2.10/24</span><span class="caret">▌</span></code></pre>
+<span class="tk-t">INFO</span>  node-a/api   role changed  role=<span class="tk-l">MASTER</span> reason=<span class="tk-s">startup</span> effective_priority=<span class="tk-s">150</span>
+<span class="tk-t">WARN</span>  node-a/api   check <span class="tk-s">api-ready</span> failing: could not connect to 10.0.0.10:8080
+<span class="tk-t">INFO</span>  node-a/api   role changed  role=<span class="tk-l">BACKUP</span> reason=<span class="tk-s">higher_priority_peer_advertisement</span> effective_priority=<span class="tk-s">50</span>
+<span class="tk-t">INFO</span>  node-b/api   role changed  role=<span class="tk-l">MASTER</span> reason=<span class="tk-s">higher_priority_peer_advertisement</span> effective_priority=<span class="tk-s">100</span><span class="caret">▌</span></code></pre>
   </div>
 </section>
 
@@ -927,8 +934,8 @@ weight = <span class="tk-l">100</span></code></pre>
   <p class="eyebrow reveal"><b>04</b> Explainability</p>
   <h2 class="h2 reveal">A closed set of reasons, and you can look them all up</h2>
   <p class="lede reveal">
-    Every role change carries one of these. The set is closed on purpose:
-    dashboards and alerts depend on the spelling, so a new reason is a
+    Every role change carries one of these thirteen. The set is closed on
+    purpose: dashboards and alerts depend on the spelling, so a new reason is a
     specification change, not a surprise release note.
   </p>
 
@@ -938,11 +945,14 @@ weight = <span class="tk-l">100</span></code></pre>
     <div class="reason"><code>interface_down</code><span>The link went away</span></div>
     <div class="reason"><code>master_down_timeout</code><span>No advertisement in 3 × adver_int + Skew_Time</span></div>
     <div class="reason"><code>higher_priority_peer_advertisement</code><span>A peer outranked this node</span></div>
+    <div class="reason"><code>preemption_delay_elapsed</code><span>A higher-priority backup took over after its delay</span></div>
     <div class="reason"><code>health_ineligible</code><span>Health policy removed eligibility</span></div>
     <div class="reason"><code>operator_relinquish</code><span>An operator gave the address up</span></div>
-    <div class="reason"><code>ownership_failed</code><span>An address could not be added or removed</span></div>
-    <div class="reason"><code>hold_down_expired</code><span>A fault recovered and re-verified</span></div>
+    <div class="reason"><code>operator_force_transition</code><span>An operator forced the role</span></div>
     <div class="reason"><code>configuration_reloaded</code><span>A reload permitted the transition</span></div>
+    <div class="reason"><code>hold_down_expired</code><span>A fault recovered and re-verified</span></div>
+    <div class="reason"><code>ownership_failed</code><span>An address could not be added or removed</span></div>
+    <div class="reason"><code>shutdown</code><span>The process is stopping</span></div>
   </div>
 </section>
 
@@ -952,14 +962,14 @@ weight = <span class="tk-l">100</span></code></pre>
   <h2 class="h2 reveal">Written for the operator, not the maintainer</h2>
 
   <div class="links reveal" style="margin-block-start:2rem">
-    <a href="user/getting-started.md"><b>Getting started</b><span>Build it, write a first configuration, run it on two nodes</span></a>
+    <a href="user/getting-started.md"><b>Getting started</b><span>Build it, write a first configuration, watch it take the address</span></a>
     <a href="user/installation.md"><b>Installation</b><span>Requirements, systemd and OpenRC, containers, permissions</span></a>
     <a href="user/configuration.md"><b>Configuration reference</b><span>Every key, every default, every rule that rejects a file</span></a>
-    <a href="user/health-checks.md"><b>Health checks</b><span>Check types, weights, choosing a policy, avoiding flapping</span></a>
+    <a href="user/health-checks.md"><b>Health checks</b><span>The four that run, weights, thresholds, and why a failing check does not move the address by itself</span></a>
     <a href="user/cli.md"><b>Command reference</b><span>Every command, its flags, and what it does</span></a>
     <a href="user/troubleshooting.md"><b>Troubleshooting</b><span>Symptom first, then the checks that find each cause</span></a>
     <a href="user/operations.md"><b>Operations guide</b><span>Signals, every event and reason, split brain, upgrade</span></a>
-    <a href="user/compatibility.md"><b>Compatibility</b><span>Keepalived mapping, protocol differences, IPv6</span></a>
+    <a href="user/compatibility.md"><b>Compatibility</b><span>Keepalived mapping, protocol differences, and what has not been run against another implementation</span></a>
     <a href="user/threat-model.md"><b>Threat model</b><span>What Highland trusts, what it refuses, what is out of scope</span></a>
     <a href="SPEC.md"><b>Specification</b><span>The complete requirements, with stable references</span></a>
     <a href="../CHANGELOG.md"><b>Changelog</b><span>Keep a Changelog format, one section per release</span></a>

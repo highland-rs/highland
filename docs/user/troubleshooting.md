@@ -31,35 +31,30 @@ Two habits pay for themselves before anything else:
 
 ```console
 $ highland run --config /etc/highland/config.toml
-ERROR highland: the VRRP transport is not implemented; the daemon will not start
+ERROR highland: the async runtime could not be started: instance api: the VRRP
+  transport is unavailable: could not binding a VRRP socket: Operation not
+  permitted (os error 1)
 ```
 
-This is expected today, and it is deliberate. Highland has no raw VRRP socket
-yet, so the daemon declines to run rather than sit there claiming to be a VRRP
-router while sending nothing. There is nothing to fix on your side.
+Work down the list; the error names the instance and the operation, and the
+kernel's own message is the rest of it.
 
-Two things to know:
+1. **Capabilities.** `CAP_NET_ADMIN` and `CAP_NET_RAW` are both required. A
+   service started under systemd must have them in `AmbientCapabilities` *and*
+   `CapabilityBoundingSet`, and `systemctl show highland.service` will tell you
+   what it actually has.
+2. **The configuration file.** It is validated before anything is bound, so a
+   broken file reports the broken file. `highland check-config` gives the same
+   answer with the rule that rejected it.
+3. **The interface.** It must exist and be up. A `tcp` check with no listening
+   peer is a failing check, not a startup failure — the daemon starts and then
+   demotes itself, which is the correct behaviour.
+4. **The control socket directory.** It must be writable at startup. Under
+   systemd that is `RuntimeDirectory=highland`, which the supplied unit sets.
 
-- **The configuration is still checked first.** A broken file reports the broken
-  file, not this message. Run `highland check-config` to see which.
-- **Do not install the systemd unit yet.** It has `Restart=on-failure`, so
-  systemd would restart the daemon every two seconds indefinitely.
-
-If you have an existing unit installed, stop and disable it:
-
-```console
-$ sudo systemctl disable --now highland.service
-```
-
-The test suite is where the failover is exercised in the meantime:
-
-```console
-$ cargo test -p highland-daemon --test failover
-```
-
-That drives a complete failover — startup, takeover, ownership confirmed before
-advertising, relinquishment, shutdown — against a scripted kernel, with no
-privileges required.
+If the daemon started and then exited, check the shutdown reason in the log
+before anything else: an unclean exit during startup is usually the control
+socket or a configuration error, and both say so.
 
 ## The address is not moving
 
@@ -199,13 +194,15 @@ peer is gone.
 
 1. Check what the probe actually asked for. An `http` check with
    `expected_status = [200]` fails on a `302`, and a redirect is often perfectly
-   healthy.
-2. Check for TLS problems on an `https` check: an untrusted certificate, a name
-   mismatch, or a missing intermediate.
-3. Check the timeout. A check whose `timeout` is close to its `interval` will
-   report failures under load that are really latency.
-4. For a `unix` or `file` check, check the path. It must be the path as the
-   service sees it, and for `file` it must be inside the allowed base directory.
+   healthy. The event carries the status the service returned.
+2. Check the timeout. A check whose `timeout` is close to its `interval` will
+   report failures under load that are really latency, and a probe that
+   overruns is reported as a failure with the timeout in the reason.
+3. For a `unix` check, check the path. It must be the path as the service sees
+   it, and the configuration layer confines it to an allowed base directory.
+4. For an `interface` check, check the link. The check wants a link that is
+   present, up, and carrying — a link that is administratively up with nothing
+   plugged into it is a failing check, correctly.
 5. If the check is genuinely advisory, set `weight = 0`. It stays visible in the
    event stream and stops affecting the address.
 
@@ -262,8 +259,9 @@ to see the violations before you signal.
    with its rule and key.
 3. If the change is legitimate but needs a restart, apply it to one instance at
    a time, during a window you have chosen.
-4. If you are not sure what is running right now, ask the daemon; it retains the
-   previous accepted configuration, so a diagnosis does not require guessing.
+4. If you are not sure what is running right now, ask the daemon: `highland show
+   <instance>` reports the role, the effective priority, and the addresses
+   actually held, so a diagnosis does not require guessing what you configured.
 
 ## I cannot reach the daemon
 
@@ -277,12 +275,20 @@ to see the violations before you signal.
 - Highland never listens on a network interface, by design. If you are trying to
   reach it from another machine, that is not supported and will not be.
 
-## Commands do nothing
+## A command does nothing
 
-Check the [command reference](cli.md). Several commands are specified and
-documented but not implemented in the current build, because the control socket
-is not open yet. `version` and `check-config` are what work today; `run` loads
-and validates the file, then exits 1. [`CHANGELOG.md`](../../CHANGELOG.md) records the rest.
+Every command except `version` and `check-config` reaches the daemon over the
+control socket, so "nothing happened" is nearly always the socket. Check:
+
+- `highland status` with no arguments first. If that works, the command's own
+  argument is wrong; if it does not, the socket is the problem.
+- Destructive commands need `--yes` in a script, and the confirmation prompt is
+  not implemented yet: without a terminal they accept `--yes` and act on it, and
+  with a terminal they act immediately. A refusal is a non-zero exit with a
+  message, never a silent no-op.
+- `events --follow` prints the history and then polls. It is silent until
+  something happens, which is the point; pass `--limit` and a `--since` cursor
+  if you want the past.
 
 ## What to collect before asking for help
 

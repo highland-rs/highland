@@ -90,9 +90,10 @@ INFO role changed instance=api role=BACKUP reason=startup effective_priority=150
 INFO control socket listening socket=/run/highland/control.sock
 ```
 
-On a build with no raw socket the daemon refuses to start, and says so. A process
-that claimed to be a VRRP router while sending nothing would be worse than one
-that declines to run.
+`run` becomes the daemon: the process you start is the one that owns the
+address, so it is not something to run in a terminal you might close. It needs
+`CAP_NET_ADMIN` and `CAP_NET_RAW`, and without them it refuses to start rather
+than sit there claiming to be a VRRP router that cannot move an address.
 
 A reload is a transaction, and it is the same transaction however it is asked
 for: `highland reload` over the control socket and `SIGHUP` both call one reload
@@ -242,7 +243,12 @@ them.
 | `events` | Works, and `--follow` resumes from a cursor |
 
 `force-transition` additionally requires the daemon to have been started with
-`--enable-force-transition`, and refuses without an explicit confirmation.
+`--enable-force-transition`. The confirmation prompt is not implemented yet:
+`--yes` is accepted, and a refusal is a non-zero exit with a message.
+
+Destructive commands (`relinquish`, `force-transition`) act immediately, with or
+without a terminal. Treat `--yes` as a way to say "I meant it" in a script, not
+as a gate.
 
 A refusal from the daemon is a non-zero exit, not just a printed message: a
 script that runs `highland show nope && deploy` must not go on to deploy.

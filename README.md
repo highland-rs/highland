@@ -3,13 +3,14 @@
 A memory-safe, observable, Linux-focused Rust implementation of high-availability
 virtual IP failover, built around VRRPv3.
 
-> **Status: Milestones 0–3 landed. No VIP moves yet.** The state machine, the
-> VRRPv3 codec, the configuration layer with its full validation rule set, and a
-> real Linux netlink backend that adds and removes addresses confirmed by
-> read-back all exist and are tested. What is missing is the raw VRRP socket, so
-> `highland run` refuses to start rather than sit there claiming to be a VRRP
-> router while sending nothing. See [`docs/SPEC.md`](docs/SPEC.md) §27 for the
-> milestone plan and [`CHANGELOG.md`](CHANGELOG.md) for what has landed.
+> **Status: Milestones 0–6 landed. A VIP moves.** A whole failover — election,
+> ownership confirmed by kernel read-back, a takeover announced to the segment, and
+> the address moving — runs in the test suite between two real network
+> namespaces, over IPv4 and IPv6, unicast and multicast, with loss, reordering, a
+> one-way partition, a link flap, and a frozen node injected into the segment.
+> Keepalived interoperability has **not** been run yet, and the table below says
+> so. See [`docs/SPEC.md`](docs/SPEC.md) §27 for the milestone plan and
+> [`CHANGELOG.md`](CHANGELOG.md) for what has landed.
 
 ## What Highland is
 
@@ -18,7 +19,7 @@ virtual IP ownership. It is a library first and a daemon second: the state
 machine, the protocol codec, and the configuration validator are all usable
 without the daemon.
 
-- Correct VRRPv3 behavior for IPv4 and, from 1.0, IPv6
+- Correct VRRPv3 behavior for IPv4 and IPv6, unicast and multicast
 - Deterministic role transitions, every one with a machine-readable reason
 - Native health checks instead of shell scripts
 - Transactional configuration reload
@@ -29,8 +30,8 @@ without the daemon.
 
 | Tier | Contents |
 |---|---|
-| `0.1.0` (Milestones 0–4) | Linux, IPv4, VRRPv3, unicast peers, one interface per instance, TCP and HTTP checks |
-| `1.0` (Milestones 5–9) | IPv6, multicast, the full check set, Keepalived interoperability |
+| `0.1.0` (Milestones 0–6) | Linux, IPv4 and IPv6, VRRPv3, unicast and multicast peers, one family and one interface per instance, `tcp` / `http` / `unix` / `interface` checks |
+| `1.0` (Milestones 7–9) | The operations interface, the full check set, Keepalived interoperability |
 | Post-1.0 | BFD, cloud adapters, IPVS, privilege separation, simulation |
 
 The full specification, including every requirement identifier, lives in
@@ -80,12 +81,11 @@ success_threshold = 2
 weight = 100
 ```
 
-`check-config` is the one CLI command that is fully functional today. It parses
-the file, applies every validation rule, and reports each violation with its
-specification rule and configuration key. See
-[Getting started](docs/user/getting-started.md) for the full walkthrough and
-[the CLI reference](docs/user/cli.md) for which commands exist and which are
-still stubs.
+`check-config` parses the file, applies every validation rule, and reports each
+violation with its specification rule and configuration key — it needs no
+daemon and no privileges. The rest of the CLI talks to a running daemon over a
+local Unix socket. See [Getting started](docs/user/getting-started.md) for the
+walkthrough and [the CLI reference](docs/user/cli.md) for every command.
 
 ## What works, and what does not
 
@@ -94,18 +94,22 @@ still stubs.
 | Configuration model, strict TOML parser, `V-01`–`V-32` validation | Implemented, tested |
 | `highland-core`: roles, events, actions, timers, election, health arithmetic, the instance state machine | Implemented, tested, no runtime dependency |
 | `highland-vrrp`: encoding and decoding for IPv4 and IPv6, RFC 1071 checksums with the IPv6 pseudo-header, two-phase decoding | Implemented, tested, six fuzz targets in CI |
-| `highland-net`: interface lookup, link state, address add and remove **confirmed by read-back**, link subscription, and the receiver-side VRRP validation rules | Implemented, tested |
-| The VRRP **socket**: sending, receiving, and TTL 255 | Not implemented. This is what blocks a live address |
-| Gratuitous ARP and unsolicited Neighbor Advertisements | Not implemented |
-| `highland-daemon`: executor, per-instance actor, run loop, and the whole failover driven end to end against a scripted kernel | Implemented, 15 tests, no privileges needed |
-| `highland-observe`: event model, redaction, bounded ring, sinks | Implemented; no metrics registry or `tracing` bridge yet |
-| `highland-control`: request and response messages, rate limiter, error taxonomy | Message model only; the socket listener lands in Milestone 7 |
-| `highland-checks`: spec, result, hysteresis debouncer, `Check` trait | No probe implementations yet; they land in Milestone 6 |
-| `highland-cli` | `check-config` and `version` work. The socket commands wait on Milestone 7 |
+| `highland-net`: interface lookup, link state, address add and remove **confirmed by read-back**, multicast membership, gratuitous ARP and Neighbor Advertisements | Implemented, tested |
+| The VRRP **socket**: sending, receiving, TTL 255, IPv4 and IPv6 | Implemented, tested against a real kernel |
+| `highland-daemon`: executor, per-instance actor, interface monitor, health task, run loop, and the whole failover driven end to end between two namespaces | Implemented, tested |
+| `highland-observe`: event model, redaction, bounded ring, Prometheus metrics | Implemented, tested |
+| `highland-control`: message model, Unix-socket listener, rate limiter, error taxonomy | Implemented, tested over a real socket |
+| `highland-checks`: spec, thresholds, debouncer, scheduler, and `tcp` / `http` / `unix` / `interface` probes | Implemented, tested. `https`, `dns`, `process`, `file`, and `composite` are refused by name |
+| `highland-cli`: `run`, `status`, `show`, `events`, `reload`, `pause`, `resume`, `relinquish`, `force-transition`, `check-config` | Implemented, tested against a live daemon |
+| Chaos: loss, one-way partition, reordering, duplication, link flap, frozen process | Implemented, five scenarios |
+| Keepalived interoperability, and the IPv4 checksum scope settled against another implementation | **Not run yet** |
+| One instance holding both IPv4 and IPv6 addresses | Refused (`V-03`); use one instance per family |
+| `sd_notify` readiness, configurable hold-down and retry, a `--yes` confirmation prompt | Not implemented |
 
-`highland run` currently exits non-zero with `the VRRP transport is not
-implemented; the daemon will not start`. That refusal is deliberate, and
-[`docs/user/troubleshooting.md`](docs/user/troubleshooting.md) explains it.
+`highland run` needs `CAP_NET_ADMIN` and `CAP_NET_RAW` and refuses to start
+without them, rather than sit there claiming to be a VRRP router that cannot
+move an address.
+[`docs/user/troubleshooting.md`](docs/user/troubleshooting.md) has the rest.
 
 The `README` never claims more than this table. If the table and the code
 disagree, the table is the bug.

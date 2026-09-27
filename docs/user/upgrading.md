@@ -40,19 +40,24 @@ one instance does not disturb its neighbours.
 
 ## What can be reloaded, and what cannot
 
-Today no change is applied by a reload, and there is nothing installed to
-upgrade: the daemon refuses to start. The table below is the design.
-
 | Change | Applied by a reload? |
 |---|---|
-| `priority`, `preempt`, `preempt_delay`, `startup_delay` | Yes |
-| Health policy and any check | Yes |
-| `advertisement_interval` | Yes, unless the instance is currently the master |
-| `peers` | Yes |
+| `priority`, `preempt`, `preempt_delay`, `startup_delay` | Yes, in place |
+| Health policy | Yes, in place |
+| `peers` | Yes, in place |
+| `check` — the list of checks | No. The running probes are built from the old list, so the instance is restarted |
+| `advertisement_interval` | No. The advertisement timer is armed from the running value |
 | `interface`, `vrid` | No. The instance must be restarted |
 | Adding or removing a virtual address | No. The instance must be restarted |
 | Switching between unicast and multicast | No. The instance must be restarted |
+| Adding an instance | Classified, and the reload is applied; the instance itself is started at startup only |
 | Removing an instance | No. It relinquishes its addresses and stops |
+
+The rule behind the table: a change is reloadable only if the running instance
+can be made to do the new thing without being rebuilt. A timer that was already
+armed at the old value, a socket bound to a different interface, and a probe
+built from an old list are all things a reload cannot honestly claim to have
+changed.
 
 If any instance in the file needs a restart, the reload tells you which ones
 before it changes anything. You then choose: drop those changes from this

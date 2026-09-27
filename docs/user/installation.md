@@ -61,21 +61,7 @@ $ highland check-config /etc/highland/config.toml
 /etc/highland/config.toml is valid: 1 instance(s), schema version 1
 ```
 
-## Do not install the service yet
-
-`highland run` currently exits non-zero with `the VRRP transport is not
-implemented`, because the raw VRRP socket does not exist. Installing the unit
-with `Restart=on-failure` would restart the daemon every two seconds forever.
-Everything else on this page is worth reading and doing now; hold this one step
-until the socket lands.
-
-If you have already installed it:
-
-```console
-$ sudo systemctl disable --now highland.service
-```
-
-## Run it under systemd
+## Install and run the service
 
 A unit file is supplied:
 
@@ -89,9 +75,11 @@ $ journalctl -u highland.service -f
 
 The supplied unit is a starting point. Check these before you rely on it:
 
-- **`Type=notify` expects the daemon to announce itself once it is running.**
-  Until that announcement is implemented, use `Type=simple` with
-  `Restart=on-failure`. The unit in `deploy/systemd/` documents this.
+- **`Type=simple`, not `Type=notify`.** The daemon does not send an `sd_notify`
+  readiness message, and a unit that waits for one it will never receive fails
+  to start after `TimeoutStartSec`. `Type=simple` is correct here because the
+  daemon loads and validates its configuration before it binds anything: a
+  process that has started is a process whose configuration was accepted.
 - **Capabilities.** `AmbientCapabilities` must cover what your deployment
   actually opens. The supplied pair is the documented minimum.
 - **Coexisting with Keepalived.** Do not add `Before=keepalived.service` unless
@@ -101,9 +89,9 @@ The supplied unit is a starting point. Check these before you rely on it:
   unit creates via `RuntimeDirectory=highland`.
 
 Reloading through systemd is `systemctl reload highland.service`, which sends
-`SIGHUP`. That re-reads and re-validates the file and reports the outcome; it
-does not apply anything yet, and `highland reload` will work when the control
-socket does.
+`SIGHUP`. That applies the change, or refuses the whole reload and says why. It
+is the same operation as `highland reload`, so an operator who cannot send
+signals is not at a disadvantage.
 
 ## Run it without systemd
 

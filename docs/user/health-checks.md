@@ -98,7 +98,6 @@ signal and then forbidden it from being used.
 name = "api-ready"
 type = "http"
 url = "http://127.0.0.1:8080/ready"
-method = "GET"
 expected_status = [200]
 timeout = "500ms"
 interval = "1s"
@@ -110,6 +109,20 @@ weight = 100
 ```console
 $ highland check-config /etc/highland/config.toml
 ```
+
+A check that this build cannot run is **refused at startup, by name, with the
+reason**:
+
+```console
+$ highland run --config /etc/highland/config.toml
+ERROR highland: instance api: check secure cannot be built: an https check needs
+  TLS, which this build does not implement; use a tcp check on the same port
+  rather than a check that cannot validate a certificate
+```
+
+That is deliberate. A check that cannot be built would otherwise fail on every
+interval forever, which is a quieter way to take a node out of service than a
+refusal at startup.
 
 Rules that catch most mistakes:
 
@@ -125,21 +138,32 @@ Rules that catch most mistakes:
 
 | Type | Checks | Use it for | Availability |
 |---|---|---|---|
-| `tcp` | The port accepts a connection | A dependency that speaks nothing | Initial release |
-| `http` | Status code is in `expected_status` | A readiness or health endpoint | Initial release |
-| `https` | The same, with certificate validation | A TLS endpoint | 1.0 |
-| `dns` | A record resolves | An upstream dependency | 1.0 |
-| `unix` | A socket accepts a connection | A local daemon, database socket | 1.0 |
-| `process` | The process exists | Nothing, really: a weak signal | 1.0 |
-| `interface` | The link is present and up | A dependency on a second link | 1.0 |
-| `file` | A path exists | A marker file | 1.0 |
-| `composite` | Other checks, combined | One signal from several probes | 1.0 |
+| `tcp` | The port accepts a connection | A dependency that speaks nothing | Works today |
+| `http` | Status code is in `expected_status` | A readiness or health endpoint | Works today |
+| `unix` | A socket accepts a connection | A local daemon, database socket | Works today |
+| `interface` | The link is present, up, and carrying | A dependency on a second link | Works today |
+| `https` | The same, with certificate validation | A TLS endpoint | Refused for now |
+| `dns` | A record resolves | An upstream dependency | Not implemented |
+| `process` | The process exists | Nothing, really: a weak signal | Not implemented |
+| `file` | A path exists | A marker file | Not implemented |
+| `composite` | Other checks, combined | One signal from several probes | Not implemented |
+| `command` | An external program | Almost nothing | Needs `command-checks` |
 
-`tcp` and `http` are what the initial release provides. The rest arrive with 1.0.
+`https` is **refused rather than downgraded**. A TLS handshake is not something
+to reimplement, and a check that connected to port 443 without validating a
+certificate would report a service as healthy on the strength of a plaintext
+exchange. If you need a TLS dependency watched today, use a `tcp` check on the
+port and let something else decide whether the service is actually well.
 
-`process` deserves a warning: a running process is not a ready process. If you
-use it, use it as an observation with `weight = 0` and let a real probe carry
-the decision.
+Two notes on the four that work:
+
+- **`http` sends `GET` and reads the status line**, with the response body
+  bounded. It follows no redirects: a `302` is not in `expected_status` unless
+  you put it there, because a redirect is usually a misconfiguration rather than
+  a healthy service.
+- **`unix` and `interface` are the two that need no network** beyond the local
+  socket, and `interface` is the one to reach for when the question is "is this
+  cable plugged in" rather than "is the service answering".
 
 ## Writing checks that behave
 
@@ -198,20 +222,59 @@ $ highland show api
 $ highland events --follow
 ```
 
-Neither reaches a running daemon today; the control socket does not exist yet.
+These reach the daemon over the control socket.
 
 The event stream distinguishes a single failed probe from a check entering the
 failing state, from the check recovering, and from the instance becoming
 ineligible. That distinction is the fastest way to tell a one-off blip from a
 sustained failure.
 
+## A failing check does not move the address by itself
+
+A master whose effective priority drops **keeps advertising**, because that is
+what RFC 5798 requires: it does not know its peer is now the better choice. A
+backup only takes over from a *live* master when preemption is enabled.
+
+So if you want a failing check to move the address, set `preempt = true` on the
+peer:
+
+```toml
+# node-a, the node being watched
+preempt = false
+
+[instance.check]
+name = "api-ready"
+type = "http"
+url = "http://127.0.0.1:8080/ready"
+expected_status = [200]
+interval = "2s"
+timeout = "1s"
+failure_threshold = 3
+success_threshold = 2
+weight = 100
+```
+
+```toml
+# node-b, the peer that should take over
+preempt = true
+```
+
+Without `preempt = true` on the peer, "my check failed and nothing happened" is
+the expected outcome, and it surprises people.
+
 ## Current state
 
-The check framework, the weights, the thresholds, and the hysteresis rules are
-complete and tested, and a weighted priority drop is driven end to end in the
-test suite. The probes themselves are not implemented, and nothing schedules
-them yet, so no check currently runs and a failing check cannot demote a node.
-`tcp` and `http` arrive first.
+`tcp`, `http`, `unix`, and `interface` run today, each tested against a real
+socket or a real link, and a weighted demotion is driven end to end in the
+namespace suite. Not implemented, and refused by name rather than degraded:
+`https`, `dns`, `process`, `file`, `composite`.
+
+Two limits worth knowing:
+
+- **Changing the check list needs a restart.** The reload planner says so rather
+  than reporting a change as applied and leaving the old probes in place.
+- **One instance's checks share one task**, so the probe concurrency limit is
+  one per instance rather than a number you configure.
 
 The [configuration reference](configuration.md) lists every key a check accepts.
 The [operations guide](operations.md) covers what to do when a health check

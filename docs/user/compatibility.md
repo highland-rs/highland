@@ -38,23 +38,26 @@ IPVS, and the LVS integration.
   behind a priority-150 master, not a fixed figure. Keepalived's practical
   behavior is the same.
 - **Multicast TTL.** Must be 255. Highland refuses any other value (`V-24`).
-- **Mixed families.** Before 1.0 an instance is single-family (`V-03`). Split
-  the configuration if you need both.
+- **Mixed families.** An instance is single-family (`V-03`). Split the
+  configuration if you need both: one instance per family, with the addresses
+  split between them.
 - **Preemption.** A master that sees a higher-priority advertisement steps down
   regardless of `preempt` (`R-16`). `preempt` only governs whether a backup may
   take over an existing master.
 - **Degraded advertisement.** Highland never advertises master without owning
   the VIPs. There is no compatibility switch for this (`I-04`).
-- **No wire compatibility yet.** The codec and the receiver-side validation
-  rules are complete and tested, but there is no socket, so nothing has been
-  observed interoperating with another implementation. Treat the claims on this
-  page as the design, not as a report.
+- **No cross-implementation run yet.** Highland carries VRRPv3 on a real socket
+  and the two-node suite runs it over IPv4 and IPv6, unicast and multicast, but
+  nothing has been run against Keepalived. Treat the claims on this page as the
+  design plus what the codec and receiver rules are tested to, not as a report of
+  interoperability. Running both implementations against each other in isolated
+  namespaces is the next milestone, and the IPv4 checksum scope is settled
+  there.
 
 ## Capture-based diagnosis
 
 1. Capture the segment: `tcpdump -i <iface> -w highland.pcap 'ip proto 112'`.
-2. Decode with `highland` tooling as it lands, or with Wireshark's VRRP
-   dissector.
+2. Decode with Wireshark's VRRP dissector, which handles both families.
 3. Confirm for each advertisement: version 3, the expected VRID, priority, TTL
    255, the correct source address, and a checksum that matches.
 4. A capture showing correct advertisements on the wire but a peer not
@@ -78,6 +81,18 @@ deliberately outside the election algorithm.
 
 ## IPv6
 
-From 1.0: IPv6 VIPs, IPv6 advertisements, unsolicited Neighbor Advertisements on
-takeover, and IPv6 multicast. The state machine is family-agnostic; the
-configuration model requires one family per instance before 1.0.
+IPv6 VIPs, IPv6 advertisements, unsolicited Neighbor Advertisements on takeover,
+and IPv6 multicast over `ff02::12` all work today, and the two-node suite runs
+the unicast and multicast cases side by side with their IPv4 equivalents. An
+instance holds the addresses of one family, so a segment with both needs one
+instance per family.
+
+Two IPv6 details that differ from IPv4 and are worth knowing when reading a
+capture:
+
+- **The hop limit must be 255**, as on IPv4, and it is read from the packet
+  rather than from the socket options.
+- **The advertisement's checksum covers the IPv6 pseudo-header**, which includes
+  the address the packet was sent to. A packet built for one destination and
+  inspected as another will not verify, which is why a capture decoded by a
+  third tool can disagree with a live node.

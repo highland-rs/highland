@@ -91,7 +91,7 @@ impl Daemon {
             config.node.name.clone(),
             None,
             "startup",
-            "1970-01-01T00:00:00Z",
+            highland_observe::now_timestamp(),
         )
         .with_field("instances", config.instances.len());
         events.push(startup.clone());
@@ -151,7 +151,7 @@ impl Daemon {
             self.config.node.name.clone(),
             None,
             plan.reason.as_str(),
-            "1970-01-01T00:00:00Z",
+            highland_observe::now_timestamp(),
         )
         .with_field(
             "budget_ms",

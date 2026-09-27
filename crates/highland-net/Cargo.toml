@@ -52,5 +52,33 @@ tokio = { workspace = true, features = ["net", "io-util", "rt", "time"] }
 futures-util.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
-[lints]
-workspace = true
+# Cargo does not allow one lint to be overridden while the rest are inherited,
+# so this table is the workspace's, spelled out, with exactly one difference:
+# `unsafe_code` is `deny` rather than `forbid`.
+#
+# `forbid` is what every other crate gets, and it is the right default: a crate
+# that cannot be lowered to `allow` cannot grow an `unsafe` island by accident.
+# This crate needs two of them, in `gratuitous`: the `sockaddr_ll` an `AF_PACKET`
+# send takes, and the hardware address `getifaddrs` hides in a netmask field.
+# `deny` still refuses every `unsafe` block; it just lets those two functions,
+# each documented with its safety argument, say so explicitly. The reasoning, and
+# the alternative that was rejected, are in
+# `docs/adr/ADR-0004-gratuitous-arp.md`.
+[lints.rust]
+rust_2018_idioms = { level = "warn" }
+missing_docs = { level = "warn" }
+missing_debug_implementations = { level = "warn" }
+unreachable_pub = { level = "warn" }
+unsafe_code = { level = "deny" }
+
+[lints.rustdoc]
+broken_intra_doc_links = { level = "warn" }
+
+[lints.clippy]
+all = { level = "warn" }
+pedantic = { level = "warn" }
+# The same three the workspace allows, listed again because a crate table
+# replaces the workspace table rather than merging with it.
+module_name_repetitions = { level = "allow" }
+must_use_candidate = { level = "allow" }
+enum_variant_names = { level = "allow" }

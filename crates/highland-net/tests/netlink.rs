@@ -305,3 +305,70 @@ async fn the_link_subscription_reports_an_address_change() {
         "the subscription never reported an address change"
     );
 }
+
+/// Brings an interface up, which a real one is and a freshly created dummy is
+/// not. A down interface has no usable link-layer entry, and an announcement is
+/// only ever sent from a link the node is using.
+fn bring_up(name: &str) {
+    let output = std::process::Command::new("ip")
+        .args(["link", "set", name, "up"])
+        .output()
+        .expect("ip runs");
+    assert!(
+        output.status.success(),
+        "could not bring {name} up: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A gratuitous announcement is written to the wire, not merely accepted by the
+/// kernel.
+///
+/// A dummy interface has no peer to hear it, so what this proves is the syscall
+/// path: the hardware address is read from the kernel, the frame is built, and
+/// `AF_PACKET` takes it. That the frame reaches a neighbour is proved in the
+/// daemon's two-node suite, which captures it on the far side of a bridge.
+#[tokio::test]
+async fn a_gratuitous_arp_is_written_out_of_an_interface() {
+    let fixture = Fixture::new().await;
+    bring_up(&fixture.name);
+    let id = fixture.id().await;
+
+    fixture
+        .backend
+        .send_gratuitous_update(id, IpAddr::V4(Ipv4Addr::new(192, 0, 2, 200)))
+        .await
+        .expect("the announcement is written");
+}
+
+/// The hardware address has to be found, or every announcement would fail. A
+/// dummy interface has one, so this checks the lookup rather than the frame.
+#[tokio::test]
+async fn a_hardware_address_is_read_from_the_kernel() {
+    let fixture = Fixture::new().await;
+    bring_up(&fixture.name);
+
+    let hardware = highland_net::gratuitous::hardware_address(&fixture.name)
+        .expect("a dummy interface has a hardware address");
+
+    assert_eq!(hardware.len(), 6);
+    assert!(
+        hardware.iter().any(|byte| *byte != 0),
+        "an all-zero address is what an interface with none looks like: {hardware:?}"
+    );
+}
+
+/// Loopback has no hardware address, so there is nothing to announce with. The
+/// failure says so rather than sending a frame with a zero address in it, which
+/// would teach every neighbour a wrong cache entry.
+#[tokio::test]
+async fn an_interface_without_a_hardware_address_is_reported_rather_than_guessed() {
+    let answer = highland_net::gratuitous::hardware_address("lo");
+
+    assert!(
+        answer.is_err(),
+        "loopback should have no hardware address, got {answer:?}"
+    );
+    let error = answer.expect_err("the lookup failed");
+    assert_eq!(error.kind(), std::io::ErrorKind::Unsupported, "{error}");
+}

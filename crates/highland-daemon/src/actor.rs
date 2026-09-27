@@ -203,6 +203,12 @@ where
 
             let mut produced = Vec::new();
             for action in queue.drain(..) {
+                // The machine's own log lines and events are the daemon's to
+                // report, not the executor's to apply: the executor has no
+                // logger. Dropping them here is how a failed announcement or a
+                // refused takeover would have become invisible, which `R-24`
+                // forbids and which makes every incident unexplainable.
+                self.report(&action);
                 // Every role change is announced with its reason. A failover
                 // that cannot be explained from the log is a failover nobody
                 // can debug (`D-08`, `R-33`).
@@ -249,6 +255,56 @@ where
             role: self.machine.role(),
             ownership: self.machine.pending(),
             actions: applied,
+        }
+    }
+
+    /// Reports a log line or an event the machine asked for.
+    fn report(&self, action: &Action) {
+        match action {
+            Action::Log { level, message } => {
+                let instance = self.machine.config().name.clone();
+                match level {
+                    highland_core::state::LogLevel::Error => {
+                        tracing::error!(instance, "{message}");
+                    }
+                    highland_core::state::LogLevel::Warn => {
+                        tracing::warn!(instance, "{message}");
+                    }
+                    // The set is not closed, so an unrecognised level is
+                    // reported rather than dropped.
+                    _ => tracing::debug!(instance, "{message}"),
+                }
+            }
+            Action::EmitEvent { name } => {
+                // The event names are a closed set (`R-17`), so the machine's
+                // names are mapped onto it rather than invented into it. A name
+                // with no equivalent is logged, not silently dropped: it still
+                // explains something, and `R-24` is about errors reaching a
+                // human.
+                let name: &str = name;
+                let event = match name {
+                    "action_failed" | "ownership_release_failed" => {
+                        Some(highland_observe::EventName::ActionFailed)
+                    }
+                    "operator_action" => Some(highland_observe::EventName::OperatorAction),
+                    "peer_reachable" => Some(highland_observe::EventName::PeerReachable),
+                    "peer_unreachable" => Some(highland_observe::EventName::PeerUnreachable),
+                    _ => None,
+                };
+                if let (Some(kind), Some(log)) = (event, &self.log) {
+                    log.record_named(&self.node, &self.machine.config().name, kind, name);
+                } else {
+                    // No event name to record, or nowhere to record it: still
+                    // reported, because an event nobody can see is worse than a
+                    // machine decision nobody can explain.
+                    tracing::debug!(
+                        instance = %self.machine.config().name,
+                        event = name,
+                        "the machine reported an event"
+                    );
+                }
+            }
+            _ => {}
         }
     }
 

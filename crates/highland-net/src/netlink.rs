@@ -443,17 +443,56 @@ impl NetworkBackend for NetlinkBackend {
         Ok(())
     }
 
-    /// The trait is async because Netlink is; this implementation refuses
-    /// immediately, so its future is already complete.
+    /// Announces an address that was just claimed.
+    ///
+    /// IPv4 gets a gratuitous ARP and IPv6 an unsolicited Neighbor Advertisement
+    /// (§14.1 steps 5 and 6). Both are sent rather than left to the kernel: the
+    /// kernel announces an address when it is added, but only for the interface
+    /// it was added to, and a takeover needs the announcement to be deliberate
+    /// and logged.
+    ///
+    /// A failure is returned rather than swallowed, and the caller treats it as
+    /// non-fatal, because a node that owns an address and cannot announce it is
+    /// still better than a node that gives the address up (§11.4).
     fn send_gratuitous_update(
         &self,
-        _interface: InterfaceId,
-        _address: IpAddr,
+        interface: InterfaceId,
+        address: IpAddr,
     ) -> impl std::future::Future<Output = Result<()>> + Send {
-        let answer = Err(NetError::Unsupported {
-            operation: "gratuitous ARP",
-        });
-        std::future::ready(answer)
+        // The interface lookup goes to the kernel, so this stays asynchronous
+        // rather than becoming a blocking call in the caller's task.
+        self.answer_gratuitous_update(interface, address)
+    }
+}
+
+impl NetlinkBackend {
+    async fn answer_gratuitous_update(
+        &self,
+        interface: InterfaceId,
+        address: IpAddr,
+    ) -> Result<()> {
+        let current = self.interface_by_index(interface).await?;
+        let send = match address {
+            IpAddr::V4(address) => {
+                let hardware =
+                    crate::gratuitous::hardware_address(&current.name).map_err(|source| {
+                        NetError::SendGratuitousUpdate {
+                            interface: current.name.clone(),
+                            address: IpAddr::V4(address).to_string(),
+                            source,
+                        }
+                    })?;
+                crate::gratuitous::send_gratuitous_arp(interface, hardware, address)
+            }
+            IpAddr::V6(address) => {
+                crate::gratuitous::send_neighbour_advertisement(interface, &current.name, address)
+            }
+        };
+        send.map_err(|source| NetError::SendGratuitousUpdate {
+            interface: current.name,
+            address: address.to_string(),
+            source,
+        })
     }
 }
 

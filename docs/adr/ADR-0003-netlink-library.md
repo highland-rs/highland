@@ -80,10 +80,9 @@ The `all` feature is required for `Type::RAW`. This is verified to compile
 without `unsafe` in our code.
 
 Gratuitous ARP needs an `AF_PACKET` socket, whose `sockaddr_ll` has no safe
-`socket2` representation. That is deferred to Milestone 4 with a
-`pnet`-style datalink crate, and until it lands the operation returns
-`NetError::Unsupported`. The state machine already treats a gratuitous-update
-failure as non-fatal, so nothing else changes.
+`socket2` representation. It was deferred at the time, and the plan was a
+`pnet`-style datalink crate. That plan was not followed: ADR-0004 records what was
+done instead, and why the datalink crate was the wrong answer.
 
 ## Verified, not assumed
 

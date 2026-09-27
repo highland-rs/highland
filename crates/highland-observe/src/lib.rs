@@ -14,6 +14,7 @@
 //! | Bounded event history | [`EventRing`] |
 //! | Counters, gauges, histograms, and the scrape format | [`Counter`], [`Gauge`], [`Histogram`], [`Snapshot`] |
 //! | Keeping secrets out of both | [`Redactor`] |
+//! | Timestamps, so an event stream can be read | [`now_timestamp`] |
 //!
 //! The crate depends on nothing but `serde` and `thiserror`: a metrics library
 //! that drags in a web framework is a metrics library that cannot be tested.
@@ -26,9 +27,11 @@ mod metrics;
 mod redact;
 mod ring;
 mod sink;
+mod timestamp;
 
 pub use event::{Event, EventField, EventLevel, EventName};
 pub use metrics::{Counter, DEFAULT_BUCKETS, Gauge, Histogram, Kind, Series, Snapshot};
 pub use redact::{REDACTED, Redactor};
 pub use ring::{EVENT_BUFFER_CAPACITY, EventRing};
 pub use sink::{EventSink, NoopSink, RecordingSink};
+pub use timestamp::{format as format_timestamp, now as now_timestamp};

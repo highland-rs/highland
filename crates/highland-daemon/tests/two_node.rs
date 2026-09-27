@@ -29,7 +29,9 @@ mod support;
 
 use std::time::Duration;
 
-use support::{A_ADDRESS, B_ADDRESS, BridgeGuard, Node, VIRTUAL_ADDRESS as VIP, bridge, wait_for};
+use support::{
+    A_ADDRESS, B_ADDRESS, BridgeGuard, Node, Observer, VIRTUAL_ADDRESS as VIP, bridge, wait_for,
+};
 
 /// `Master_Down_Interval` for a one-second interval at priority 150 (SPEC.md §13.3).
 const MASTER_DOWN_BUDGET: Duration = Duration::from_millis(3600);
@@ -92,4 +94,78 @@ fn two_nodes_elect_one_master_and_the_vip_moves_when_it_dies() {
             second.addresses()
         );
     }
+}
+
+/// The announcement is the part of a takeover a client actually notices.
+///
+/// Without it, every neighbour keeps a cache entry pointing at the node that had
+/// the address last, and traffic to the VIP is a black hole until that entry ages
+/// out — tens of seconds, against a failover measured in milliseconds. So this
+/// asserts the *effect*, not the send: a third namespace on the same segment
+/// resolves the address to the old master, the master is killed, and within a
+/// second or two the neighbour cache must point at the new one.
+///
+/// A `sendto` that returned `Ok` would prove nothing, and a capture would prove
+/// only that a frame existed. A neighbour that changed its mind is the thing
+/// clients depend on.
+#[test]
+fn a_takeover_announces_the_address_to_the_segment() {
+    let bridge = bridge();
+    let name = bridge.name.clone();
+    let _bridge_guard = bridge;
+    let mut first = Node::create("a", A_ADDRESS, &name, false);
+    let mut second = Node::create("b", B_ADDRESS, &name, false);
+    let observer = Observer::create("obs", "192.0.2.13", &name);
+
+    first.start();
+    second.start();
+
+    let elected = wait_for("one node holds the VIP", Duration::from_secs(10), || {
+        usize::from(first.holds_vip()) + usize::from(second.holds_vip()) == 1
+    });
+    assert!(
+        elected,
+        "no node took {VIP}\n--- a ---\n{}\n--- b ---\n{}",
+        first.log(),
+        second.log()
+    );
+
+    let (mut master, other) = if first.holds_vip() {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let old = master.hardware_address();
+
+    // The observer resolves the address first, so it has a cache entry pointing
+    // at the old master before anything goes wrong.
+    let before = observer.resolve(VIP);
+    assert_eq!(
+        before, old,
+        "the observer should have resolved {VIP} to the master that holds it"
+    );
+
+    master.kill();
+    let moved = wait_for("the VIP moved", MASTER_DOWN_BUDGET, || other.holds_vip());
+    assert!(
+        moved,
+        "the address did not move\n--- survivor ---\n{}",
+        other.log()
+    );
+
+    // The announcement is what changes the cache, and it has to do so quickly:
+    // an entry that stays wrong for the rest of its lifetime is the failure this
+    // exists to catch, and the entry's own lifetime is tens of seconds.
+    let new = other.hardware_address();
+    let announced = wait_for(
+        "the neighbour learned the address moved",
+        Duration::from_secs(3),
+        || observer.neighbour(VIP) == new,
+    );
+    assert!(
+        announced,
+        "no neighbour was told {VIP} moved: the cache points at {} instead of {new}\n--- survivor ---\n{}",
+        observer.neighbour(VIP),
+        other.log()
+    );
 }

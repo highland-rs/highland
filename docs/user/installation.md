@@ -10,7 +10,7 @@ no mandatory connection to a management service.
 |---|---|
 | Linux on `x86_64` or `aarch64` | It uses Linux networking directly |
 | `CAP_NET_ADMIN` | To add and remove the virtual address |
-| `CAP_NET_RAW` | For the raw VRRP socket, and eventually for gratuitous ARP |
+| `CAP_NET_RAW` | For the raw VRRP socket, and for the `AF_PACKET` socket a gratuitous ARP needs |
 | A configuration file you can read | It is the only input |
 | A writable `/run/highland` if you use the control socket | The socket lives there |
 

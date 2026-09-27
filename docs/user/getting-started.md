@@ -184,9 +184,9 @@ $ highland check-config /etc/highland/config.toml
 $ highland reload
 ```
 
-Check the file on its own works today. The reload does not yet: `SIGHUP`
-re-validates the file and logs the outcome, but does not apply anything, and
-`highland reload` needs a control socket that does not exist yet.
+The reload applies the change in place where it can, and refuses the whole reload
+where it cannot. `highland reload` and `SIGHUP` are the same operation, so an
+operator who cannot send signals can still reload.
 
 The design is all-or-nothing, and that is what you will get. If any part of a
 reload cannot be applied, nothing changes and you get the reason; you are never
@@ -198,18 +198,27 @@ before it touches anything.
 ## Current state
 
 Be aware of what works today. The state machine, the VRRPv3 codec, the
-configuration layer, and the netlink backend are complete and tested, and a
-complete failover is exercised in the test suite against a scripted kernel. The
-raw VRRP socket is the gap, so the address will not move on a real network yet
-and the daemon refuses to start.
+configuration layer, the netlink backend, the raw VRRP socket, the control
+socket, the metrics endpoint, the event history, and the transactional reload are
+all implemented and tested. A complete failover, including the announcement that
+tells the segment the address moved, runs in the test suite against two real
+network namespaces.
+
+What is not done is IPv6 and multicast: the daemon speaks unicast IPv4, which is
+what the test suite exercises. The IPv6 announcement is written and unit-tested
+but has not been run against a real kernel, because there is nothing for it to
+announce yet.
 
 | You can do this now | Not yet |
 |---|---|
 | Build and test the project | Fail a VIP over between two real machines |
-| Write and validate a configuration | Keep a daemon running |
-| Encode and decode VRRP advertisements | Send gratuitous ARP |
-| Add and remove addresses, confirmed by read-back | Query a running daemon over the control socket |
-| Run the whole failover in the test suite | Use the `status`, `show`, or `events` commands |
+| Write and validate a configuration | Run with IPv6 virtual addresses |
+| Encode and decode VRRP advertisements | Use multicast instead of unicast peers |
+| Add and remove addresses, confirmed by read-back | Keepalived interoperability |
+| Fail a VIP over between two nodes | Configure hold-down and retry parameters |
+| Query a running node over the control socket | |
+| Read the event history, and follow it | |
+| Scrape metrics, reload without dropping the address | |
 
 The [command reference](cli.md) marks every command with its state. Check
 [`CHANGELOG.md`](../../CHANGELOG.md) for the current release notes.

@@ -25,10 +25,18 @@
 //! `docs/adr/ADR-0003-netlink-library.md`.
 
 #![deny(missing_docs)]
-#![forbid(unsafe_code)]
+// Two `unsafe` islands are audited and documented rather than forbidden: the
+// `sockaddr_ll` an `AF_PACKET` send needs, and the hardware address `getifaddrs`
+// hides in its netmask field. `socket2` and `nix` have no safe way to express
+// either, and the alternative considered was a datalink crate that is no longer
+// maintained. Both islands are confined to `gratuitous`, both are documented at
+// the function, and the reasoning is recorded in
+// `docs/adr/ADR-0004-gratuitous-arp.md`.
+#![deny(unsafe_code)]
 
 mod backend;
 mod error;
+pub mod gratuitous;
 mod testing;
 mod types;
 mod vrrp;

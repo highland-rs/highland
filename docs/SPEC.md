@@ -1572,6 +1572,10 @@ Each invariant is a named test requirement.
 20. `I-48` The instance's interface is watched continuously, and the loss of the interface or
     of carrier causes the address to be relinquished without waiting for a timer to expire.
     A node learns of a dead link by looking, not by having an operation fail.
+21. `I-49` A claimed address is announced to the segment, and a takeover is observable by a
+    third party: a namespace running no daemon resolves the address to the old master and
+    must see it change to the new one within seconds, rather than when a cache entry ages
+    out.
 
 ---
 

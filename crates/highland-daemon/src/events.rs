@@ -58,12 +58,31 @@ impl EventLog {
                 node,
                 Some(instance.to_owned()),
                 reason,
-                "1970-01-01T00:00:00Z",
+                highland_observe::now_timestamp(),
             )
             .with_transition(from, to)
             .with_field("peer", "")
             .with_field("last_reason", reason),
         )
+    }
+
+    /// Records an event the machine emitted under a name of its own, mapping it
+    /// onto the closed event set.
+    pub fn record_named(
+        &self,
+        node: &str,
+        instance: &str,
+        name: highland_observe::EventName,
+        reason: &str,
+    ) -> u64 {
+        self.record(Event::new(
+            name,
+            highland_observe::EventLevel::Info,
+            node,
+            Some(instance.to_owned()),
+            reason,
+            highland_observe::now_timestamp(),
+        ))
     }
 
     /// Records that an instance was published, which is how a client knows an
@@ -76,7 +95,7 @@ impl EventLog {
                 node,
                 Some(status.name.clone()),
                 "instance_published",
-                "1970-01-01T00:00:00Z",
+                highland_observe::now_timestamp(),
             )
             .with_transition(status.role.clone(), status.role.clone())
             .with_field("effective_priority", status.effective_priority)

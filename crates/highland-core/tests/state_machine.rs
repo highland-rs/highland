@@ -1407,3 +1407,78 @@ fn a_master_re_arms_its_advertisement_timer_so_advertising_continues() {
         "a peer would see a {worst_gap:?} gap between advertisements"
     );
 }
+
+// ----- a faulted instance must not seize the address ----------------------
+
+/// A node that has been away comes back to a segment where somebody else is
+/// already master. It has to listen first.
+///
+/// This is what a link flap produces: the interface goes down, the instance
+/// faults, the link comes back, and the retry timer fires. If the retry path
+/// takes the address rather than re-entering the election, the two nodes own the
+/// address at once, which is the one failure a VRRP implementation may not have.
+#[test]
+fn a_retry_does_not_take_the_address_out_from_under_a_live_master() {
+    let mut machine = machine_with(config());
+    startup(&mut machine);
+    promote(&mut machine);
+    assert_eq!(machine.role(), Role::Master, "it is master to begin with");
+
+    // The link goes away and comes back, leaving the instance faulted.
+    let _ = machine.handle(Event::InterfaceDown);
+    let _ = machine.handle(Event::ActionSucceeded {
+        kind: ActionKind::RemoveAddresses,
+    });
+    assert_eq!(machine.role(), Role::Fault);
+    let _ = machine.handle(Event::InterfaceUp);
+
+    // Whatever the retry timer does, no action may add an address while a peer
+    // is advertising. The advertisement is fed first, so the machine is in the
+    // state a recovered node is really in.
+    let _ = machine.handle(advert(200));
+    let actions = machine.handle(Event::TimerExpired(TimerId::Retry));
+
+    assert!(
+        !actions.contains(&Action::AddVirtualAddresses),
+        "a retry took the address from a live master: {actions:?}"
+    );
+    assert!(
+        !actions.contains(&Action::SendAdvertisement { priority: 150 }),
+        "and started advertising: {actions:?}"
+    );
+}
+
+/// The same node, with nobody else on the segment, must still recover: the fix
+/// is not to stay faulted forever.
+#[test]
+fn a_retry_after_a_fault_returns_to_the_election() {
+    let mut machine = machine_with(config());
+    startup(&mut machine);
+    promote(&mut machine);
+    let _ = machine.handle(Event::InterfaceDown);
+    let _ = machine.handle(Event::ActionSucceeded {
+        kind: ActionKind::RemoveAddresses,
+    });
+    assert_eq!(machine.role(), Role::Fault);
+    // The link comes back while the hold-down is still running, which is
+    // recorded and then waited out rather than acted on immediately.
+    let _ = machine.handle(Event::InterfaceUp);
+    assert_eq!(
+        machine.role(),
+        Role::Fault,
+        "the hold-down is not cut short"
+    );
+
+    // The hold-down expires, which is the way back, and the machine elects
+    // itself instead of taking the address on the spot.
+    let actions = machine.handle(Event::TimerExpired(TimerId::HoldDown));
+    assert_eq!(machine.role(), Role::Backup, "it rejoins as a backup");
+    assert!(
+        !actions.contains(&Action::AddVirtualAddresses),
+        "election is not ownership: {actions:?}"
+    );
+    assert!(
+        machine.deadline_of(TimerId::MasterDown).is_some(),
+        "a full master-down interval is armed before it may take over"
+    );
+}

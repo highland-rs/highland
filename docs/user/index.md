@@ -73,12 +73,15 @@ Instances that the change does not affect are never interrupted.
 
 ## Current state
 
-Highland is not yet released, and not yet finished. The state machine, the
-VRRPv3 codec, the configuration layer, and the Linux netlink backend are
-complete and tested, and a whole failover is driven end to end in the test
-suite. The raw VRRP socket is not implemented, so a virtual address does not yet
-move on a real network, and `highland run` refuses to start rather than pretend
-otherwise.
+Highland is not yet released, and not yet finished. The state machine, the VRRPv3
+codec, the configuration layer, the Linux netlink backend, the raw VRRP socket,
+the control socket, the metrics endpoint, the event history, and the
+transactional reload are all implemented and tested, and a whole failover —
+including the announcement that tells the segment the address moved — is driven
+end to end between two network namespaces in the test suite.
+
+What is not finished is IPv6 and multicast: the daemon speaks unicast IPv4. That
+is the next milestone, and the documentation marks it wherever it matters.
 
 The documentation describes the finished product, and marks anything that does
 not work yet. The [command reference](cli.md), the

@@ -183,7 +183,7 @@ mod sequence_tests {
             "node-a",
             Some("api".to_owned()),
             reason,
-            "1970-01-01T00:00:00Z",
+            crate::timestamp::now(),
         )
     }
 

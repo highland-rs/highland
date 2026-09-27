@@ -9,7 +9,10 @@
 //! each other's kernel state, so everything that passes between the two nodes
 //! went over a socket.
 
-#![allow(dead_code)]
+// A test-support module has more surface than any one suite uses: the failover
+// suite needs the VIP constants and not the fault injectors, the chaos suite
+// needs both. Restricting every item to `pub(crate)` per suite would be noise.
+#![allow(dead_code, unreachable_pub)]
 
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -29,7 +32,8 @@ pub const B_ADDRESS: &str = "192.0.2.12";
 /// One node: a namespace, an address, and a daemon.
 pub struct Node {
     namespace: String,
-    directory: PathBuf,
+    /// Where this node's configuration and logs live.
+    pub directory: PathBuf,
     daemon: Option<Child>,
 }
 
@@ -159,6 +163,30 @@ impl Node {
             .spawn();
         assert!(child.is_ok(), "the daemon binary must be runnable");
         self.daemon = child.ok();
+    }
+
+    /// The hardware address of this node's interface, as the kernel reports it.
+    #[must_use]
+    pub fn hardware_address(&self) -> String {
+        let output = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &self.namespace,
+                "ip",
+                "-o",
+                "link",
+                "show",
+                INTERFACE,
+            ])
+            .output()
+            .expect("ip runs");
+        String::from_utf8_lossy(&output.stdout)
+            .split("link/ether ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap_or_default()
+            .to_owned()
     }
 
     /// Returns this node's daemon output.
@@ -402,10 +430,8 @@ impl Node {
             .daemon
             .as_ref()
             .expect("the daemon must be running to signal it");
-        match nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(child.id() as i32),
-            nix::sys::signal::Signal::try_from(number).expect("a known signal"),
-        ) {
+        let pid = i32::try_from(child.id()).expect("a process id fits in a pid_t");
+        match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), number) {
             Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
             Err(error) => panic!("could not signal the daemon with {number}: {error}"),
         }
@@ -445,7 +471,6 @@ fn run_owned(arguments: &[String]) {
 }
 
 /// Removes the bridge on drop, so a failed test does not leave the host dirty.
-/// Removes the bridge on drop, so a failed test does not leave the host dirty.
 pub struct BridgeGuard {
     /// The kernel name of the bridge, so a caller can attach veth ends to it.
     pub name: String,
@@ -456,6 +481,154 @@ impl Drop for BridgeGuard {
         let _ = Command::new("ip")
             .args(["link", "del", &self.name])
             .output();
+    }
+}
+
+/// A namespace on the same segment that runs no daemon.
+///
+/// This exists to check what a *neighbour* learns, rather than what a sender
+/// believes it sent. An announcement is only real if something on the segment
+/// acts on it, and a daemon is the wrong witness: it has its own idea of who owns
+/// the address.
+pub struct Observer {
+    namespace: String,
+    address: &'static str,
+}
+
+impl Observer {
+    /// Attaches a namespace to the bridge with one address.
+    #[must_use]
+    pub fn create(namespace: &str, address: &'static str, bridge: &str) -> Self {
+        let name = Node::name(namespace);
+        run(&["netns", "del", &name], true);
+        let local_end = format!("{name}-l");
+        let peer_end = format!("{name}-p");
+        run(&["link", "del", &local_end], true);
+        run(&["link", "del", &peer_end], true);
+        run(&["netns", "add", &name], false);
+        run(
+            &[
+                "link", "add", &local_end, "type", "veth", "peer", "name", &peer_end,
+            ],
+            false,
+        );
+        run(&["link", "set", &local_end, "master", bridge], false);
+        run(&["link", "set", &local_end, "up"], false);
+        run(&["link", "set", &peer_end, "netns", &name], false);
+        run(
+            &[
+                "netns", "exec", &name, "ip", "link", "set", &peer_end, "name", INTERFACE,
+            ],
+            false,
+        );
+        run(
+            &["netns", "exec", &name, "ip", "link", "set", "lo", "up"],
+            false,
+        );
+        run(
+            &[
+                "netns",
+                "exec",
+                &name,
+                "ip",
+                "addr",
+                "add",
+                &format!("{address}/24"),
+                "dev",
+                INTERFACE,
+            ],
+            false,
+        );
+        run(
+            &["netns", "exec", &name, "ip", "link", "set", INTERFACE, "up"],
+            false,
+        );
+        Self {
+            namespace: name,
+            address,
+        }
+    }
+
+    /// The observer's own hardware address, as the kernel reports it.
+    #[must_use]
+    pub fn hardware_address(&self) -> String {
+        let output = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &self.namespace,
+                "ip",
+                "-o",
+                "link",
+                "show",
+                INTERFACE,
+            ])
+            .output()
+            .expect("ip runs");
+        String::from_utf8_lossy(&output.stdout)
+            .split("link/ether ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// Sends a datagram to `address`, which is what makes this namespace resolve
+    /// it, and returns the hardware address the neighbour cache then holds.
+    ///
+    /// A datagram rather than a ping because the point is the *cache*, and a
+    /// ping brings a tool and its own opinions about what a reply should be.
+    /// Nothing has to answer: the resolution happens on the way out.
+    #[must_use]
+    pub fn resolve(&self, address: &str) -> String {
+        let _ = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &self.namespace,
+                "bash",
+                "-c",
+                &format!("echo x > /dev/udp/{address}/9"),
+            ])
+            .output();
+        std::thread::sleep(Duration::from_millis(150));
+        self.neighbour(address)
+    }
+
+    /// The hardware address this namespace's neighbour cache holds for
+    /// `address`, or an empty string when it holds none.
+    #[must_use]
+    pub fn neighbour(&self, address: &str) -> String {
+        let output = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &self.namespace,
+                "ip",
+                "neigh",
+                "show",
+                address,
+            ])
+            .output()
+            .expect("ip runs");
+        String::from_utf8_lossy(&output.stdout)
+            .split("lladdr ")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// The address this observer was given.
+    #[must_use]
+    pub fn address(&self) -> &str {
+        self.address
+    }
+}
+
+impl Drop for Observer {
+    fn drop(&mut self) {
+        run(&["netns", "del", &self.namespace], true);
     }
 }
 

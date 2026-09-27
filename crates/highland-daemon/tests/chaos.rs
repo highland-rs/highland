@@ -32,9 +32,6 @@ use std::time::{Duration, Instant};
 
 use support::{A_ADDRESS, B_ADDRESS, BridgeGuard, Node, VIRTUAL_ADDRESS as VIP, bridge, wait_for};
 
-/// `Master_Down_Interval` for a one-second interval at priority 150 (§13.3).
-const MASTER_DOWN_BUDGET: Duration = Duration::from_millis(3600);
-
 /// The budget for a takeover after a fault is injected.
 ///
 /// A backup's master-down timer is reset by every advertisement it receives, so
@@ -191,7 +188,7 @@ fn assert_bounded_flapping(segment: &Segment, baseline: usize, ceiling: usize) {
 /// that. It has no way to know its peer took over, which is the fencing
 /// limitation a VRRP implementation inherits rather than one it can fix. The
 /// scenario is therefore about what happens when the partition heals.
-fn partition_the_master<'segment>(segment: &'segment Segment) -> (&'segment Node, &'segment Node) {
+fn partition_the_master(segment: &Segment) -> (&Node, &Node) {
     let (cut, deaf) = if segment.first.holds_vip() {
         (&segment.first, &segment.second)
     } else {

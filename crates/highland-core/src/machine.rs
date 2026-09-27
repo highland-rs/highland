@@ -687,7 +687,28 @@ where
         self.retry_attempt = self.retry_attempt.saturating_add(1);
         match self.role {
             Role::Fault if self.is_eligible() && self.interface_up => {
-                self.request_ownership(TransitionReason::OwnershipFailed, actions);
+                if self.last_reason == TransitionReason::InterfaceDown {
+                    // The instance was *away*, not unable to add an address. It
+                    // has no idea what happened on the segment while its link was
+                    // down, so it goes back to listening for a full
+                    // `Master_Down_Interval` rather than taking the address on a
+                    // retry backoff. Taking it here is a split brain: the peer has
+                    // been master for as long as this node was gone, and nothing
+                    // here would find out. The link-flap scenario in
+                    // `tests/chaos.rs` is what found this.
+                    log(
+                        actions,
+                        LogLevel::Debug,
+                        "retry after an interface failure: returning to the election",
+                    );
+                    self.begin_startup(actions);
+                } else {
+                    // A local failure, such as an address that would not be
+                    // added: re-attempt the same acquisition, which is what the
+                    // hold-down bounds (`I-21`) and what makes a bounded number
+                    // of attempts meaningful (`R-12`).
+                    self.request_ownership(TransitionReason::OwnershipFailed, actions);
+                }
             }
             Role::Master if !self.owns_addresses => {
                 self.request_release(TransitionReason::OwnershipFailed, Role::Fault, actions);

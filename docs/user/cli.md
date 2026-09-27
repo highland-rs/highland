@@ -94,19 +94,20 @@ On a build with no raw socket the daemon refuses to start, and says so. A proces
 that claimed to be a VRRP router while sending nothing would be worse than one
 that declines to run.
 
-A reload is a transaction. `highland reload` is not wired to the socket in this
-build, but `SIGHUP` is: the file is re-read, every instance is classified, and
-the change is applied only if no instance would need a restart. A refusal names the
-instance and the change, and nothing is touched. A reloadable instance is
-reconfigured in place, so the role, the address, and the running timers all
-survive.
+A reload is a transaction, and it is the same transaction however it is asked
+for: `highland reload` over the control socket and `SIGHUP` both call one reload
+path, so the two cannot disagree. The file is re-read, every instance is
+classified, and the change is applied only if no instance would need a restart. A
+refusal names the instance and the change, and nothing is touched. A reloadable
+instance is reconfigured in place, so the role, the address, and the running
+timers all survive.
 
 Highland handles three signals:
 
 | Signal | What it does |
 |---|---|
 | `SIGTERM`, `SIGINT` | Stops cleanly, giving up any addresses it holds |
-| `SIGHUP` | Re-reads and re-validates the configuration file. Does not apply it yet |
+| `SIGHUP` | Re-reads the configuration file and applies it, or refuses the whole reload |
 | A second `SIGTERM` | Ignored; the first shutdown is already under way |
 
 The `run` command starts the `highland-daemon` process, so both binaries must be
@@ -142,15 +143,22 @@ the addresses are actually held, the state of each health check, peer
 reachability, and the time remaining on the takeover and preemption timers. A
 timer that is not running shows as `null` rather than as a misleading zero.
 
-### `highland events [--limit <N>] [--follow]`
+### `highland events [--limit <N>] [--follow] [--since <N>]`
 
-The event stream. Every role change, health change, address change, reload, and
-operator action appears here with the reason for it.
+The event history. Every role change, health change, address change, reload, and
+operator action appears here with the reason for it, recorded as it happened
+rather than reconstructed afterwards. The log holds the most recent 4096 events.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--limit <N>` | `50` | How many recent events to show first |
-| `-f`, `--follow` | off | Keep streaming |
+| `--limit <N>` | `50` | How many events to show at a time |
+| `-f`, `--follow` | off | Keep asking for new events until interrupted |
+| `--since <N>` | `0` | Only events after this sequence number |
+
+Every event carries a sequence number, so `--follow` polls with a cursor rather
+than re-reading the buffer: it asks for what it has not seen and holds nothing
+open. `--since` is what makes that resumable, and asking for events past the end
+returns nothing rather than an error.
 
 This is the most useful command during an incident: the reason field tells you
 why an instance changed role instead of leaving you to infer it. The
@@ -197,7 +205,7 @@ an instance stuck in a state it will not leave on its own.
 | `--enable` | Required. Acknowledges that this changes running state |
 
 The daemon must also have been started with `--enable-force-transition`, so this
-cannot be issued by accident from a script. That daemon flag does not exist yet.
+cannot be issued by accident from a script.
 
 If you need this in production, treat it as an incident: it means the state
 machine and the machine disagree, and the reason is worth reading in the event
@@ -205,9 +213,11 @@ stream before you force anything.
 
 ## Confirmation and exit codes
 
-Commands that change running state print the instance they will affect and ask
-for confirmation. Pass `--yes` to skip the prompt when scripting. The prompt is
-not implemented yet, so `--yes` is currently accepted and ignored.
+Commands that change running state name the instance they will affect. Pass
+`--yes` to skip the confirmation prompt when scripting. The prompt itself is not
+implemented yet, so `--yes` is currently accepted and ignored; the exit code is
+not: a refused command exits non-zero, so a script that runs
+`highland show nope && deploy` does not go on to deploy.
 
 | Outcome | Exit code |
 |---|---|
@@ -228,8 +238,8 @@ them.
 | `status`, `show` | Work |
 | `pause`, `resume`, `relinquish` | Work |
 | `force-transition` | Works, and needs the daemon started with `--enable-force-transition` |
-| `reload` | `SIGHUP` applies the change; over the socket it answers "the reload runs on the signal loop" |
-| `events` | Answers "not implemented" rather than hanging |
+| `reload` | Works, over the socket and by `SIGHUP`, through the same path |
+| `events` | Works, and `--follow` resumes from a cursor |
 
 `force-transition` additionally requires the daemon to have been started with
 `--enable-force-transition`, and refuses without an explicit confirmation.

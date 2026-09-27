@@ -136,7 +136,7 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
 
     // The control socket is served after the instances exist, so the first
     // `status` a client asks for already describes the real thing.
-    start_control_socket(&daemon, std::sync::Arc::new(service), event_log).await?;
+    start_control_socket(&daemon, std::sync::Arc::new(service)).await?;
 
     let reason = loop {
         tokio::select! {
@@ -420,7 +420,6 @@ fn start_metrics_endpoint(
 async fn start_control_socket(
     daemon: &Daemon,
     service: std::sync::Arc<crate::ControlService>,
-    log: std::sync::Arc<crate::EventLog>,
 ) -> Result<(), DaemonError> {
     let settings = &daemon.config().control;
     let policy = highland_control::SocketPolicy {
@@ -454,7 +453,6 @@ async fn start_control_socket(
 fn start_control_socket(
     _daemon: &Daemon,
     _service: std::sync::Arc<crate::ControlService>,
-    _log: std::sync::Arc<crate::EventLog>,
 ) -> impl std::future::Future<Output = Result<(), DaemonError>> {
     std::future::ready(Ok(()))
 }
@@ -650,7 +648,7 @@ fn announce(daemon: &Daemon, reason: &'static str) {
         daemon.config().node.name.clone(),
         None,
         reason,
-        "1970-01-01T00:00:00Z",
+        highland_observe::now_timestamp(),
     );
     tracing::info!(event = %event.name, reason = %event.reason, "daemon event");
     daemon.sink().publish(event);

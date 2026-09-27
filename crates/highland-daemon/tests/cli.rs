@@ -666,9 +666,9 @@ fn the_event_history_records_what_happened() {
 
     // A cursor past the end returns nothing new, which is what makes following
     // cheap rather than a re-read of the whole buffer.
-    let (_, none) = cli(&node, &["events", "--json", "--since", "100000"]);
+    let (_, empty) = cli(&node, &["events", "--json", "--since", "100000"]);
     assert!(
-        !none.contains("role_transition"),
-        "asking past the end returns nothing: {none}"
+        !empty.contains("role_transition"),
+        "asking past the end returns nothing: {empty}"
     );
 }

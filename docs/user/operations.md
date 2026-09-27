@@ -38,11 +38,8 @@ credential (`R-28`).
 
 `force-transition` is disabled unless the daemon was started with
 `--enable-force-transition` (`R-10`). It exists for breaking a stuck state
-machine, and it is the first thing to look suspicious in an incident. That
-daemon flag is not wired up yet, so the command is doubly unavailable today.
-
-The confirmation prompts and audit events described above are also not
-implemented yet: `--yes` is accepted and ignored.
+machine, and it is the first thing to look suspicious in an incident. It refuses
+without an explicit confirmation, and the refusal is a non-zero exit.
 
 ## Signals
 

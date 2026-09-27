@@ -6,11 +6,15 @@ Everything you need to install, configure, run, and operate Highland.
 
 | If you want to | Read |
 |---|---|
+| Install it | [Installation](installation.md) |
 | Get it running for the first time | [Getting started](getting-started.md) |
-| Look up a configuration key or an error message | [Configuration reference](../configuration.md) |
+| Look up a configuration key or an error message | [Configuration reference](configuration.md) |
+| Decide how health should affect failover | [Health checks](health-checks.md) |
 | Run a command and understand what it did | [Command reference](cli.md) |
-| Fix something that is wrong | [Operations guide](../operations.md) |
-| Move off Keepalived | [Compatibility](../compatibility.md) |
+| Fix something that is wrong | [Troubleshooting](troubleshooting.md) |
+| Look up an event or a signal | [Operations guide](operations.md) |
+| Upgrade or roll back | [Upgrading and rolling back](upgrading.md) |
+| Move off Keepalived | [Compatibility](compatibility.md) |
 | Report a vulnerability | `SECURITY.md` in the repository root |
 | Know exactly what the software promises | [Specification](../SPEC.md) |
 
@@ -32,24 +36,29 @@ It is built around three commitments:
   machine failing. It does not survive a network partition that separates the
   nodes from each other while leaving both able to reach clients, and it does not
   pretend otherwise. Read [split-brain
-  behavior](../compatibility.md#split-brain-behavior) before you deploy.
+  behavior](compatibility.md#split-brain-behavior) before you deploy.
 
-## What is here
+## The documents
 
 | Document | What it covers |
 |---|---|
-| [Getting started](getting-started.md) | Requirements, building, a first configuration, running on two nodes |
-| [Configuration reference](../configuration.md) | Every key, every default, and every rule that rejects a file |
+| [Installation](installation.md) | Requirements, building, installing, systemd and OpenRC, containers, permissions, uninstalling |
+| [Getting started](getting-started.md) | A first configuration, a two-node setup, running it, changing it later |
+| [Configuration reference](configuration.md) | Every key, every default, and every rule that rejects a file |
+| [Health checks](health-checks.md) | Check types, weights, choosing a policy, writing checks that do not flap |
 | [Command reference](cli.md) | Every command, its flags, and what it does |
-| [Operations guide](../operations.md) | Signals, events, the failure playbook, split brain, upgrade and rollback |
-| [Compatibility](../compatibility.md) | Keepalived mapping, protocol differences, IPv6, diagnosing with packet captures |
-| [Threat model](../threat-model.md) | What Highland trusts, what it refuses, and what is out of scope |
+| [Troubleshooting](troubleshooting.md) | Symptoms first, then the checks that find each cause |
+| [Operations guide](operations.md) | Signals, every event and reason, the failure playbook, split brain, upgrade and rollback |
+| [Upgrading and rolling back](upgrading.md) | The rolling upgrade procedure, what a reload can and cannot change, and rollback |
+| [Compatibility](compatibility.md) | Keepalived mapping, protocol differences, IPv6, diagnosing with packet captures |
+| [Threat model](threat-model.md) | What Highland trusts, what it refuses, and what is out of scope |
 | [Specification](../SPEC.md) | The complete requirements, with stable references for tests and issues |
 
-The [operations guide](../operations.md), [configuration
-reference](../configuration.md), and [compatibility](../compatibility.md) are
-written as runbooks: they are meant to be followed while something is happening,
-not read in advance.
+Three of these overlap on purpose. [Troubleshooting](troubleshooting.md) is
+symptom-first and short, for use during an incident. The
+[operations guide](operations.md) is the reference the other pages point at: it
+lists every event and every reason. [Upgrading](upgrading.md) is the procedure,
+and it assumes the operations guide for the rules behind it.
 
 ## Two things to know before you deploy
 

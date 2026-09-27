@@ -53,7 +53,7 @@ highland: validating /etc/highland/config.toml: [V-01] instance.api.vrid: 0 is n
 ```
 
 The rule label is a stable reference, so if you search for it you will find the
-entry in the [configuration reference](../configuration.md). Run this command
+entry in the [configuration reference](configuration.md). Run this command
 before every reload and before every restart. A rejected configuration never
 reaches the running daemon.
 
@@ -128,7 +128,7 @@ operator action appears here with the reason for it.
 
 This is the most useful command during an incident: the reason field tells you
 why an instance changed role instead of leaving you to infer it. The
-[operations guide](../operations.md) lists every reason you will see and what to
+[operations guide](operations.md) lists every reason you will see and what to
 check for each.
 
 ### `highland reload`

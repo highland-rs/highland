@@ -85,13 +85,13 @@ Every role transition carries one of these. This list is the closed set
    master-down timer counting down?
 2. `highland events --follow` on both. Is the master still sending?
 3. Capture the segment and confirm advertisements are arriving at the peer
-   (`docs/compatibility.md` has the capture procedure).
+   (`compatibility.md` has the capture procedure).
 4. Check the firewall. VRRP uses IP protocol 112 and requires TTL 255.
 
 ### Two nodes both believe they are master
 
 This is a layer-2 partition and VRRP cannot prevent it. See
-[`docs/compatibility.md`](compatibility.md) and the split-brain section below.
+[`compatibility.md`](compatibility.md) and the split-brain section below.
 Record both `role_transition` events with their reasons, and fix the network.
 
 ### A node is stuck in FAULT

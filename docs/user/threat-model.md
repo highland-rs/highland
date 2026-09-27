@@ -88,4 +88,4 @@ those two capabilities for its whole lifetime.
 
 ## Reporting
 
-See [`SECURITY.md`](../SECURITY.md).
+See [`SECURITY.md`](../../SECURITY.md).

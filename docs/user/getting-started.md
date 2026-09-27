@@ -120,7 +120,7 @@ Five mistakes account for most first attempts:
 - **A check is missing the key its type needs.** An `http` check needs a `url` and
   an `expected_status`; a `tcp` check needs an `address`.
 
-The [configuration reference](../configuration.md) documents every key, every
+The [configuration reference](configuration.md) documents every key, every
 default, and every rule.
 
 ## Set up the second node
@@ -170,7 +170,7 @@ $ highland show api
 $ highland events --follow
 ```
 
-The [operations guide](../operations.md) is the runbook: what each event means,
+The [operations guide](operations.md) is the runbook: what each event means,
 what to do when the address will not move, and how to upgrade without an outage.
 
 ## Changing the configuration later
@@ -207,6 +207,6 @@ The [command reference](cli.md) marks every command with its state. Check
 ## Next steps
 
 - [Command reference](cli.md) — every command, and whether it works yet
-- [Configuration reference](../configuration.md) — every key and rule
-- [Operations guide](../operations.md) — the runbook
-- [Compatibility](../compatibility.md) — migrating from Keepalived
+- [Configuration reference](configuration.md) — every key and rule
+- [Operations guide](operations.md) — the runbook
+- [Compatibility](compatibility.md) — migrating from Keepalived

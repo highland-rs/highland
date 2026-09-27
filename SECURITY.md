@@ -26,7 +26,7 @@ unless you ask otherwise.
 
 ## Threat model
 
-The full threat model lives in [`docs/threat-model.md`](docs/threat-model.md). In
+The full threat model lives in [`docs/user/threat-model.md`](docs/user/threat-model.md). In
 summary:
 
 - All network input is untrusted. Parsers MUST NOT panic and every size is
@@ -45,4 +45,4 @@ summary:
 - Anything requiring an attacker to already control the configuration file or the
   host.
 - Split-brain conditions. VRRP cannot prevent every partition, and Highland does
-  not claim to; see [`docs/operations.md`](docs/operations.md).
+  not claim to; see [`docs/user/operations.md`](docs/user/operations.md).

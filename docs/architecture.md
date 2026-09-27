@@ -50,13 +50,21 @@ target graph in `SPEC.md` §9:
 |---|---|
 | `highland-core` | `thiserror` |
 | `highland-vrrp` | `thiserror` |
-| `highland-net` | `thiserror` |
+| `highland-net` | `thiserror`, `highland-vrrp`, and on Linux `rtnetlink`, `socket2`, `tokio` |
 | `highland-checks` | `highland-core`, `thiserror` |
 | `highland-config` | `serde`, `thiserror`, `toml` |
 | `highland-observe` | `serde`, `tracing`, `thiserror` |
 | `highland-control` | `serde`, `serde_json`, `thiserror` |
-| `highland-daemon` | `anyhow`, `tokio`, `tracing`, `tracing-subscriber`, `highland-core`, `highland-config`, `highland-checks`, `highland-control`, `highland-observe` |
+| `highland-daemon` | `anyhow`, `thiserror`, `tokio`, `tracing`, `tracing-subscriber`, `highland-core`, `highland-config`, `highland-checks`, `highland-control`, `highland-net`, `highland-observe`, `highland-vrrp` |
 | `highland-cli` | `anyhow`, `clap`, `serde_json`, `tokio`, `highland-config`, `highland-control` |
+
+`highland-net` is the only crate with a platform-gated dependency. `rtnetlink`
+cannot compile off Linux at all, so it is declared under
+`[target.'cfg(target_os = "linux")'.dependencies]` and every other platform gets
+`UnsupportedBackend`, whose operations return `NetError::Unsupported`. The
+executor and its tests therefore run on a contributor's Mac while the kernel
+talk stays on Linux. The reasoning is in
+[`docs/adr/ADR-0003-netlink-library.md`](adr/ADR-0003-netlink-library.md).
 
 Edges that the target graph does not have yet, and when they appear:
 
@@ -239,6 +247,43 @@ Per-instance actors, the executor contract, and the event loop are specified in
 
 A `[F]` feature MUST be behind an explicit default-off flag, and the daemon MUST
 run correctly with every `[F]` feature disabled (`SPEC.md` §3.4).
+
+## The executor and the actor
+
+`highland-core` decides; `highland-daemon` acts. The seam is the [`Executor`],
+which takes one `Action` at a time and answers with the event to feed back.
+
+The loop that applies actions is a **worklist**, not a single pass. That is not a
+detail: confirming the addresses is what makes the machine enter `MASTER` and ask
+to advertise, so the actions produced by the *outcome* of an action have to be
+applied too. A single pass leaves a master that owns its address and never says
+so. `InstanceActor::handle` drains the worklist, bounded at sixteen rounds,
+because a machine that never settles would otherwise spin.
+
+`InstanceActor` owns one machine and one executor, and `run_instance` owns the
+`select!` over protocol events, the earliest timer deadline, and shutdown. There
+is no shared mutable state between instances, which is the property `SPEC.md` §20
+exists to protect.
+
+The state machine's actions that touch the kernel or the wire are confirmed;
+timers, roles, events, and the effective priority are the machine's own
+bookkeeping and answer with `None`. Everything else that could fail answers with
+`ActionFailed`, so the machine never assumes an outcome.
+
+## What Milestone 3 does and does not do
+
+Delivered and tested: the Netlink backend with read-back confirmation, the VRRP
+transport's validation and peer filtering, the executor, the actor, the run loop,
+and a full failover exercised end to end against a scripted kernel with no
+privileges.
+
+Not delivered: the raw socket. Putting an advertisement on the wire needs a
+`SOCK_RAW` socket for IP protocol 112, and reading a peer's TTL back off an
+incoming datagram needs ancillary data. Both are Linux-specific and neither can be
+developed or verified on the machine this milestone was built on, so the daemon
+refuses to start (`TRANSPORT_AVAILABLE` is `false`) rather than running a process
+that claims to be a VRRP router while sending nothing. The socket and the
+namespace harness land together in Milestone 4.
 
 ## What Milestone 1 does not do
 

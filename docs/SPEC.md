@@ -399,7 +399,7 @@ dependency into a consumer's build.
 | 2 | `highland-vrrp` | none | no |
 | 3 | `highland-config` | 1 | no |
 | 4 | `highland-observe` | 1 | no |
-| 5 | `highland-net` | 1, 2 | yes |
+| 5 | `highland-net` | 1, 2, and `rtnetlink` on Linux only | yes |
 | 6 | `highland-checks` | 1, 4 | yes |
 | 7 | `highland-control` | 1, 4 | yes |
 | 8 | `highland-daemon` | 1–7 | yes |
@@ -512,7 +512,8 @@ pub trait NetworkBackend {
 - `R-03` All Linux-specific behavior MUST sit behind a trait, so that the daemon can be
   tested against a scripted backend.
 - `R-04` The concrete Netlink implementation choice MUST be recorded in an ADR and MUST
-  be covered by the `tests/network-ns/` suite (decision tracked in Appendix B, `B-02`).
+  be covered by the namespace suite, whose library choice is recorded in
+  `docs/adr/ADR-0003-netlink-library.md`.
 
 ### 9.4 `highland-checks`
 
@@ -2209,16 +2210,20 @@ resolution, so a later change can be traced.
 | A-41 | `I-44` said repeated advertisements reset the master-down timer, without exception | RFC 5798 §6.4.2 requires a lower-priority advertisement to be **discarded** when preemption is enabled, and a priority-zero advertisement to set the timer to `Skew_Time`. Both are now specified and implemented |
 | A-42 | §9.2 implied the IPv4 and IPv6 message layouts differ, as in the VRRPv2-era IPv6 draft | RFC 5798 §5.1 defines **one** format for both families, with a 4-bit reserved field sharing an octet with the 12-bit interval. The decoder accepts a non-zero reserved nibble, as the RFC requires of a receiver |
 | A-43 | §5.2.8 was read as requiring the IPv6 pseudo-header checksum for IPv4 as well | The RFC does not distinguish, and interoperating implementations compute the plain message checksum for IPv4. The scope is now an explicit parameter, `ChecksumScope`, whose IPv6 default is `Undecidable` rather than a value that would not interoperate. Milestone 8 settles it against a real implementation |
+| A-44 | §9.3 declared `NetworkBackend` synchronous, with a note that the production implementation would run on a blocking thread | Netlink is an asynchronous socket, so a synchronous trait forces a blocking wrapper on a runtime thread, which `I-38` forbids. The trait is now `async`; a scripted backend is unaffected because its futures complete immediately |
+| A-45 | §14.3 and §11.4 left the receiver-side checks to the daemon, and the executor had no way to confirm an action | Packet validation, peer filtering, and rate limiting live in `highland-net::vrrp`, and the executor answers every action with its outcome, so the two-phase ownership handshake is the only path to `MASTER` |
 
 ## Appendix B — Open Questions
 
-These are deliberately undecided. Each is an `R-nn`-level blocker for the milestone named
-and MUST be resolved in an ADR before the dependent work starts.
+These are deliberately undecided. Each is an `R-nn`-level blocker for the milestone
+named and MUST be resolved in an ADR before the dependent work starts.
+
+`B-02` is closed: see `docs/adr/ADR-0003-netlink-library.md`.
 
 | # | Question | Needed by | Default if unresolved |
 |---|---|---|---|
 | B-01 | Which async runtime? | Milestone 0 | None. Blocks `R-25` implementation |
-| B-02 | Which Netlink library, or direct `rtnetlink` use? | Milestone 3 | None. Blocks `R-04` |
+| B-02 | Which Netlink library? | — | Resolved by `docs/adr/ADR-0003-netlink-library.md`: `rtnetlink` 0.23 with the `tokio` feature, declared Linux-only |
 | B-03 | Multicast implementation: one socket per family per instance, or per interface with demultiplexing? | Milestone 5 | Per-family sockets, demultiplexed by VRID |
 | B-04 | Does `RUST_LOG`-style filtering apply to metrics and events, or only logs? | Milestone 7 | Logs only |
 | B-05 | Serialization library for the control API and event stream? | Milestone 7 | Serde JSON |

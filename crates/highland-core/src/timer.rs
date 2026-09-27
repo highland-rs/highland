@@ -89,6 +89,15 @@ impl TimerSet {
             .collect()
     }
 
+    /// Returns the earliest armed deadline, when any timer is armed.
+    ///
+    /// The run loop uses this to sleep exactly as long as it needs to, so six
+    /// timers cost one `select!` arm rather than six tasks.
+    #[must_use]
+    pub fn deadline_of_first(&self) -> Option<Duration> {
+        self.deadlines.values().copied().min()
+    }
+
     /// Returns the armed timers, in a stable order.
     #[must_use]
     pub fn armed(&self) -> Vec<TimerId> {

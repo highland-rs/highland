@@ -1,9 +1,6 @@
 // Rust guideline compliant 2026-09-27
 
-//! The `highland-daemon` entry point.
-//!
-//! Argument parsing lives in `highland-cli`; this binary is what
-//! `highland run` executes.
+//! The process entry point.
 
 use std::path::PathBuf;
 use std::process::ExitCode;

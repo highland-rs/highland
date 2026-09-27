@@ -14,14 +14,21 @@
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
+mod actor;
+mod driver;
+mod executor;
 mod logging;
 mod options;
 mod runner;
 mod shutdown;
 
-pub use runner::run;
-
-pub use options::{Options, OptionsError};
+pub use actor::{Applied, InstanceActor};
+pub use driver::{Instruction, InstructionReceiver, InstructionSender, channel, run_instance};
+pub use executor::{
+    Executor, Ownership, RecordingTransport, TestHarness, Transport, TransportError,
+};
+pub use options::{InstancePlan, Options, OptionsError};
+pub use runner::{TRANSPORT_AVAILABLE, plan_for, plans, run};
 pub use shutdown::{DEFAULT_SHUTDOWN_BUDGET, ShutdownPlan, ShutdownReason};
 
 use std::path::{Path, PathBuf};
@@ -156,6 +163,13 @@ pub enum DaemonError {
     /// The runtime could not be started.
     #[error("the async runtime could not be started: {0}")]
     Runtime(String),
+
+    /// The VRRP transport is not implemented, so the daemon refuses to start.
+    ///
+    /// Reporting this beats starting a process that claims to be a VRRP router
+    /// while sending nothing. It clears with the raw socket, in Milestone 4.
+    #[error("the VRRP transport is not implemented; the daemon will not start")]
+    TransportUnavailable,
 }
 
 /// Reports whether `path` looks like a configuration file the daemon can load.

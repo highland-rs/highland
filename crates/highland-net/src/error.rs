@@ -91,6 +91,25 @@ pub enum NetError {
         /// The unsupported operation.
         operation: &'static str,
     },
+
+    /// An operation failed for a reason that is not specific to addresses or
+    /// sockets, such as a subscription failing to install.
+    #[error("could not {operation}: {source}")]
+    Io {
+        /// What was being attempted, in the infinitive.
+        operation: &'static str,
+        /// The operating-system error.
+        source: std::io::Error,
+    },
+
+    /// An advertisement could not be encoded for the wire.
+    #[error("could not encode an {family} advertisement: {reason}")]
+    Encode {
+        /// The family the advertisement was for.
+        family: highland_vrrp::IpFamily,
+        /// Why encoding failed.
+        reason: String,
+    },
 }
 
 impl NetError {

@@ -52,7 +52,53 @@ All notable changes to Highland are recorded here. The format follows
 - A shutdown or a pause cancels an in-flight ownership request and owes a
   best-effort removal, so a late confirmation cannot revive an instance.
 
+### Added in this milestone
+
+- `highland-net` has a real Linux backend: interface lookup with addresses, link
+  state, address add and remove **confirmed by read-back** rather than by
+  acknowledgment, and a link/address subscription (`I-19`).
+- `highland-net::vrrp`: the receiver-side rules, in the order a receiver should
+  apply them. The TTL must be 255, the source must be a configured peer, the VRID
+  must match, and the length must agree with the count before anything is
+  allocated from it.
+- `highland-net::ScriptedBackend`: a scriptable kernel, which is what `R-03` asks
+  for and what makes the failure paths testable without privileges.
+- `highland-daemon::Executor`, which applies one action and answers with the
+  outcome, and `Transport`, so the wire can be swapped without touching the
+  failover logic.
+- `highland-daemon::InstanceActor` and `run_instance`: one task per instance, no
+  shared state, one timer for the earliest deadline rather than six tasks.
+- 15 daemon tests, including the whole failover driven end to end: startup,
+  takeover, ownership confirmed before advertising, a failed add faulting instead
+  of claiming the address, relinquishment, shutdown, and a paused instance
+  staying out.
+
 ### Changed
+
+- `NetworkBackend` is now `async`. Netlink is an asynchronous socket, and a
+  synchronous trait would have forced a blocking wrapper on the runtime thread,
+  which is exactly what `I-38` forbids. A scripted backend is unaffected: its
+  futures are already complete.
+- The action loop is a **worklist**, not a single pass. Confirming the addresses
+  is what makes the machine enter `MASTER` and ask to advertise, so the actions
+  produced by an outcome must be applied too. A single pass left a master that
+  owned its address and never said so; the failover test caught it.
+
+### Not delivered, and why
+
+- **The raw VRRP socket.** It needs `SOCK_RAW` for IP protocol 112, and reading a
+  peer's TTL back needs ancillary data. Both are Linux-specific, and this
+  milestone was built on macOS, where neither can be compiled or verified. The
+  daemon therefore refuses to start rather than run a process that claims to be a
+  VRRP router while sending nothing (`TRANSPORT_AVAILABLE` is `false`).
+- **Gratuitous ARP**, which needs an `AF_PACKET` socket whose `sockaddr_ll` has no
+  safe representation. It returns `NetError::Unsupported`, and the state machine
+  already treats that failure as non-fatal.
+- **The namespace harness**, which is Milestone 4's exit criterion and needs root.
+  What the scripted-kernel tests establish is that the logic and the sequencing
+  are right, so that the namespace run has one variable rather than two.
+
+### Earlier in this milestone
 
 - **The advertisement interval is a 12-bit centisecond field** (RFC 5798
   §5.2.7), not the 8-bit field the specification assumed, so the accepted range

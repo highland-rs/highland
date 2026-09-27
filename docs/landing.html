@@ -1,0 +1,1323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Highland — VRRPv3 virtual IP failover, in Rust</title>
+<meta name="description" content="Highland is a memory-safe, observable, Linux-focused Rust implementation of VRRPv3 virtual IP failover. Deterministic state transitions, native health checks, and first-class observability.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ============================================================================
+   Highland — landing page
+   Concept: the fault-tolerant peak. Bedrock neutrals, telemetry accents, and
+   an interactive failover simulator as the centerpiece. Every claim on this
+   page is checked against README.md / docs/SPEC.md; nothing aspirational.
+   ========================================================================= */
+
+@layer reset, tokens, base, components, motion, utilities;
+
+@layer reset {
+  *, *::before, *::after { box-sizing: border-box; }
+  * { margin: 0; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { min-height: 100svh; }
+  img, svg { display: block; max-inline-size: 100%; }
+  button, input { font: inherit; color: inherit; }
+  button { background: none; border: 0; cursor: pointer; }
+  ul[class], ol[class] { list-style: none; padding: 0; }
+  a { color: inherit; }
+}
+
+@layer tokens {
+  :root {
+    /* Palette from docs/VISUAL_PROFILE.md, expressed in OKLCH so the
+       generated tint steps stay perceptually even. */
+    --void:      oklch(21% 0.018 258);   /* Basalt Void   #0D1117 */
+    --void-deep: oklch(16% 0.016 258);
+    --plate:     oklch(27% 0.022 258);   /* Granite Plate #1F2937 */
+    --plate-hi:  oklch(33% 0.024 258);
+    --beacon:    oklch(83% 0.155 165);   /* Beacon Cyan   #00E5A3 */
+    --rust:      oklch(65% 0.155 38);    /* Highland Rust #DE5B3E */
+    --amber:     oklch(78% 0.150 72);    /* Failover Drift#F59E0B */
+    --violet:    oklch(62% 0.190 295);
+    --frost:     oklch(92% 0.006 258);   /* Frost Gray    #E5E7EB */
+    --mist:      oklch(72% 0.014 258);
+    --dim:       oklch(56% 0.014 258);
+
+    --line:      oklch(38% 0.020 258 / 0.55);
+    --line-soft: oklch(38% 0.020 258 / 0.28);
+
+    --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+
+    --step--1: clamp(0.72rem, 0.69rem + 0.14vw, 0.8rem);
+    --step-0:  clamp(0.94rem, 0.9rem + 0.2vw, 1.05rem);
+    --step-1:  clamp(1.15rem, 1.05rem + 0.5vw, 1.4rem);
+    --step-2:  clamp(1.5rem, 1.3rem + 1vw, 2.1rem);
+    --step-3:  clamp(2rem, 1.5rem + 2.4vw, 3.4rem);
+    --step-4:  clamp(2.6rem, 1.6rem + 4.6vw, 5.2rem);
+
+    --gutter: clamp(1.25rem, 0.9rem + 1.8vw, 2.5rem);
+    --measure: 68ch;
+    --radius: 3px;
+  }
+}
+
+@layer base {
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--void);
+    color: var(--frost);
+    font-family: var(--sans);
+    font-size: var(--step-0);
+    line-height: 1.6;
+    font-weight: 350;
+    overflow-x: clip;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Atmosphere: elevation contours (the highland plateau) over a cold field,
+     then a fine grain so the darks read as bedrock rather than as flat black. */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: -2;
+    background:
+      radial-gradient(120% 80% at 78% -10%, oklch(30% 0.05 168 / 0.30), transparent 62%),
+      radial-gradient(90% 70% at 8% 8%,   oklch(32% 0.05 292 / 0.22), transparent 60%),
+      linear-gradient(180deg, var(--void) 0%, var(--void-deep) 100%);
+  }
+  body::after {
+    content: "";
+    position: fixed;
+    inset: -50%;
+    z-index: -1;
+    pointer-events: none;
+    opacity: 0.30;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+    mix-blend-mode: overlay;
+  }
+
+  ::selection { background: var(--beacon); color: var(--void); }
+
+  :focus-visible {
+    outline: 2px solid var(--beacon);
+    outline-offset: 3px;
+  }
+}
+
+/* ---------------------------------------------------------------- sections */
+
+.wrap { inline-size: min(1240px, 100% - var(--gutter) * 2); margin-inline: auto; }
+
+.section { padding-block: clamp(4.5rem, 3rem + 7vw, 8.5rem); position: relative; }
+.section + .section { border-block-start: 1px solid var(--line-soft); }
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--dim);
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+.eyebrow::before {
+  content: "";
+  inline-size: 1.6rem;
+  block-size: 1px;
+  background: linear-gradient(90deg, var(--beacon), transparent);
+}
+.eyebrow b { color: var(--beacon); font-weight: 500; }
+
+.h2 {
+  font-family: var(--mono);
+  font-size: var(--step-2);
+  font-weight: 500;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  text-wrap: balance;
+  margin-block: 0.9rem 1.1rem;
+}
+.h2 em { font-style: normal; color: var(--beacon); }
+.lede {
+  max-inline-size: var(--measure);
+  color: var(--mist);
+  text-wrap: pretty;
+}
+.lede + .lede { margin-block-start: 0.9rem; }
+
+.mono { font-family: var(--mono); }
+.dim { color: var(--dim); }
+
+/* -------------------------------------------------------------------- nav */
+
+.nav {
+  position: sticky;
+  inset-block-start: 0;
+  z-index: 40;
+  backdrop-filter: blur(14px) saturate(1.3);
+  background: oklch(21% 0.018 258 / 0.72);
+  border-block-end: 1px solid var(--line-soft);
+}
+.nav__in {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  block-size: 3.5rem;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  text-decoration: none;
+  margin-inline-end: auto;
+}
+.brand svg { inline-size: 22px; block-size: 22px; }
+.brand span {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 0.95rem;
+  letter-spacing: 0.18em;
+}
+.nav ul { display: flex; gap: 1.6rem; }
+.nav a {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  letter-spacing: 0.06em;
+  color: var(--mist);
+  text-decoration: none;
+  padding-block: 0.3rem;
+  border-block-end: 1px solid transparent;
+  transition: color 0.18s, border-color 0.18s;
+}
+.nav a:hover { color: var(--frost); border-block-end-color: var(--beacon); }
+@media (max-width: 780px) { .nav ul { display: none; } }
+
+/* ------------------------------------------------------------------- hero */
+
+.hero { padding-block: clamp(4.5rem, 3rem + 6vw, 8rem) clamp(3.5rem, 2.5rem + 4vw, 6rem); }
+
+.hero__grid {
+  display: grid;
+  gap: clamp(2.5rem, 1rem + 4vw, 4rem);
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+}
+@media (min-width: 1080px) {
+  .hero__grid { grid-template-columns: minmax(0, 1.02fr) minmax(0, 1fr); }
+}
+
+.pill-row { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-block-end: 1.6rem; }
+.pill {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.34rem 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--mist);
+  background: oklch(27% 0.022 258 / 0.5);
+  white-space: nowrap;
+}
+.pill b { color: var(--frost); font-weight: 500; }
+.pill--beacon { border-color: oklch(83% 0.155 165 / 0.42); color: var(--beacon); background: oklch(83% 0.155 165 / 0.08); }
+.pill--beacon b { color: var(--beacon); }
+.pill--rust   { border-color: oklch(65% 0.155 38 / 0.45); color: var(--rust); background: oklch(65% 0.155 38 / 0.09); }
+.pill--rust b { color: var(--rust); }
+
+.wordmark {
+  font-family: var(--mono);
+  font-size: var(--step-4);
+  font-weight: 700;
+  line-height: 0.92;
+  letter-spacing: 0.06em;
+  margin-block-end: 1.4rem;
+}
+.wordmark .v {
+  display: block;
+  font-size: 0.3em;
+  letter-spacing: 0.34em;
+  color: var(--dim);
+  font-weight: 400;
+  margin-block-start: 1.1rem;
+}
+
+.tagline {
+  font-size: var(--step-1);
+  line-height: 1.5;
+  color: var(--frost);
+  max-inline-size: 30ch;
+  text-wrap: balance;
+  margin-block-end: 1.1rem;
+}
+.tagline .hi { color: var(--beacon); }
+
+.cta { display: flex; flex-wrap: wrap; gap: 0.7rem; margin-block-start: 2rem; }
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 0.8rem 1.15rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  text-decoration: none;
+  transition: background 0.18s, border-color 0.18s, transform 0.18s;
+}
+.btn--primary {
+  background: var(--beacon);
+  border-color: var(--beacon);
+  color: var(--void);
+  font-weight: 700;
+}
+.btn--primary:hover { background: oklch(88% 0.15 165); transform: translateY(-1px); }
+.btn--ghost:hover { border-color: var(--beacon); color: var(--beacon); }
+
+/* -------------------------------------------------------------- simulator */
+
+.sim {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background:
+    linear-gradient(180deg, oklch(24% 0.022 258 / 0.9), oklch(20% 0.02 258 / 0.9));
+  container-type: inline-size;
+  container-name: sim;
+  overflow: hidden;
+  box-shadow: 0 24px 60px -30px oklch(0% 0 0 / 0.9);
+}
+.sim__bar {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.6rem 0.85rem;
+  border-block-end: 1px solid var(--line-soft);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--dim);
+  background: oklch(27% 0.022 258 / 0.6);
+}
+.dots { display: flex; gap: 0.3rem; }
+.dots i { inline-size: 7px; block-size: 7px; border-radius: 50%; background: var(--line); }
+.sim__bar .state {
+  margin-inline-start: auto;
+  color: var(--beacon);
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+.sim__bar .state::before {
+  content: "";
+  inline-size: 6px; block-size: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pulse 1.9s ease-in-out infinite;
+}
+
+.sim__stage { padding: 0.35rem 0.5rem 0; }
+.sim__stage svg { inline-size: 100%; block-size: auto; }
+
+/* topology */
+.link {
+  stroke: oklch(45% 0.03 258);
+  stroke-width: 1.5;
+  fill: none;
+  color: oklch(45% 0.03 258);
+  transition: stroke 0.4s, color 0.4s;
+}
+.link--live { stroke: oklch(83% 0.155 165 / 0.5); color: var(--beacon); }
+.link--dead { stroke: oklch(65% 0.155 38 / 0.35); color: var(--rust); stroke-dasharray: 3 5; }
+.link--peer { stroke: oklch(45% 0.03 258 / 0.45); stroke-dasharray: 2 5; color: transparent; }
+
+.tnode { transition: opacity 0.4s; }
+.tnode rect {
+  fill: oklch(22% 0.022 258);
+  stroke: var(--line);
+  stroke-width: 1.25;
+  transition: stroke 0.4s, fill 0.4s;
+}
+.tnode--master rect { stroke: var(--beacon); fill: oklch(83% 0.155 165 / 0.09); }
+.tnode--backup rect { stroke: var(--amber); fill: oklch(78% 0.15 72 / 0.07); }
+.tnode--fault  rect { stroke: var(--rust); fill: oklch(65% 0.155 38 / 0.09); }
+.tnode--down   { opacity: 0.32; }
+.tnode--down rect { stroke: var(--rust); stroke-dasharray: 4 4; }
+
+.tlabel { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; fill: var(--mist); }
+.tlabel--addr { fill: var(--frost); font-size: 11px; }
+.trole  { font-family: var(--mono); font-size: 11px; font-weight: 700; letter-spacing: 0.12em; }
+.trole--master { fill: var(--beacon); }
+.trole--backup { fill: var(--amber); }
+.trole--fault  { fill: var(--rust); }
+.taddr  { font-family: var(--mono); font-size: 9px; fill: var(--dim); }
+.tprio  { font-family: var(--mono); font-size: 9px; fill: var(--frost); }
+.tprio--eff { fill: var(--beacon); }
+.tprio--low { fill: var(--amber); }
+
+/* the VIP itself */
+.vip rect { fill: oklch(24% 0.024 258); stroke: var(--line); stroke-width: 1.25; transition: stroke 0.4s, fill 0.4s; }
+.vip--owned rect { stroke: var(--beacon); fill: oklch(83% 0.155 165 / 0.10); }
+.vip .halo { fill: none; stroke: var(--beacon); stroke-width: 1; opacity: 0; transform-box: fill-box; transform-origin: center; }
+.vip--owned .halo { animation: halo 2.6s ease-out infinite; }
+
+.hop {
+  fill: var(--beacon);
+  opacity: 0;
+  offset-distance: 0%;
+  offset-rotate: 0deg;
+  filter: drop-shadow(0 0 4px oklch(83% 0.155 165 / 0.8));
+}
+.hop--a { offset-path: path("M190 76 L348 90"); }
+.hop--b { offset-path: path("M190 186 L348 114"); }
+.hop--run { animation: travel 1.05s linear infinite; }
+
+/* readouts */
+.readouts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(7.5rem, 1fr));
+  border-block-start: 1px solid var(--line-soft);
+  border-block-end: 1px solid var(--line-soft);
+}
+.ro { padding: 0.7rem 0.85rem; border-inline-end: 1px solid var(--line-soft); }
+.ro:last-child { border-inline-end: 0; }
+.ro dt {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.ro dd {
+  font-family: var(--mono);
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+  margin: 0.2rem 0 0;
+  color: var(--frost);
+}
+.ro dd.beacon { color: var(--beacon); }
+.ro dd.amber  { color: var(--amber); }
+.ro dd.rust   { color: var(--rust); }
+
+/* console */
+.console {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  line-height: 1.75;
+  padding: 0.75rem 0.9rem;
+  block-size: 8.5rem;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  background:
+    repeating-linear-gradient(180deg, transparent 0 1.68rem, oklch(38% 0.02 258 / 0.07) 1.68rem 1.7rem);
+}
+.console__line { display: flex; gap: 0.6rem; animation: enter 0.3s ease-out both; white-space: nowrap; }
+.console__t { color: var(--dim); flex: none; }
+.console__m { color: var(--mist); overflow: hidden; text-overflow: ellipsis; }
+.console__line--info .console__m { color: var(--frost); }
+.console__line--ok   .console__m { color: var(--beacon); }
+.console__line--warn .console__m { color: var(--amber); }
+.console__line--err  .console__m { color: var(--rust); }
+.console__tag { color: var(--dim); flex: none; }
+
+.sim__ctl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.75rem 0.9rem;
+  border-block-start: 1px solid var(--line-soft);
+  background: oklch(24% 0.022 258 / 0.5);
+}
+.ctl {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--mist);
+  transition: all 0.16s;
+}
+.ctl:hover:not(:disabled) { color: var(--frost); border-color: var(--beacon); background: oklch(83% 0.155 165 / 0.08); }
+.ctl--danger:hover:not(:disabled) { border-color: var(--rust); color: var(--rust); background: oklch(65% 0.155 38 / 0.1); }
+.ctl--ok { border-color: oklch(83% 0.155 165 / 0.45); color: var(--beacon); background: oklch(83% 0.155 165 / 0.07); }
+.ctl--ok:hover:not(:disabled) { border-color: var(--beacon); color: var(--beacon); background: oklch(83% 0.155 165 / 0.14); }
+.ctl:disabled { opacity: 0.35; cursor: not-allowed; }
+.sim__hint { font-family: var(--mono); font-size: 0.62rem; color: var(--dim); letter-spacing: 0.06em; margin-inline-start: auto; }
+
+@container sim (max-width: 30rem) {
+  .sim__hint { display: none; }
+  .ro { padding: 0.55rem 0.6rem; }
+  .ro dd { font-size: 0.9rem; }
+}
+
+/* ------------------------------------------------------------ status board */
+
+.board {
+  display: grid;
+  gap: 1px;
+  background: var(--line-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr));
+}
+.board__col { background: var(--void); padding: 1.4rem 1.3rem 1.5rem; }
+.board h3 {
+  font-family: var(--mono);
+  font-size: var(--step--1);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  margin-block-end: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.board h3::before { content: ""; inline-size: 7px; block-size: 7px; border-radius: 1px; }
+.board--yes h3 { color: var(--beacon); } .board--yes h3::before { background: var(--beacon); }
+.board--no  h3 { color: var(--amber); }  .board--no  h3::before { background: var(--amber); }
+.board li {
+  display: flex;
+  gap: 0.6rem;
+  padding-block: 0.5rem;
+  border-block-start: 1px solid var(--line-soft);
+  color: var(--mist);
+  font-size: 0.94rem;
+  line-height: 1.45;
+}
+.board li::before { content: ""; flex: none; margin-block-start: 0.5em; inline-size: 5px; block-size: 5px; border-radius: 50%; background: currentColor; opacity: 0.6; }
+.board--yes li::before { background: var(--beacon); }
+.board--no  li::before { background: var(--amber); }
+
+/* ------------------------------------------------------------- principles */
+
+.creed { display: grid; gap: 1px; background: var(--line-soft); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+@media (min-width: 900px) { .creed { grid-template-columns: repeat(3, 1fr); } }
+.creed__cell { background: var(--void); padding: 1.6rem 1.4rem 1.7rem; position: relative; overflow: hidden; }
+.creed__cell::after {
+  content: attr(data-n);
+  position: absolute;
+  inset-block-start: -0.5rem; inset-inline-end: 0.4rem;
+  font-family: var(--mono);
+  font-size: 3.4rem;
+  font-weight: 700;
+  color: oklch(38% 0.02 258 / 0.4);
+  line-height: 1;
+}
+.creed h3 { font-family: var(--mono); font-size: 1.02rem; font-weight: 500; letter-spacing: -0.01em; margin-block-end: 0.6rem; }
+.creed h3 span { color: var(--beacon); }
+.creed p { color: var(--mist); font-size: 0.94rem; }
+.creed code { font-family: var(--mono); font-size: 0.86em; color: var(--frost); background: oklch(27% 0.022 258 / 0.8); padding: 0.1em 0.35em; border-radius: 2px; }
+
+/* ------------------------------------------------------------ crate ladder */
+
+.ladder { display: grid; gap: 0.4rem; counter-reset: crate; }
+@media (min-width: 860px) { .ladder { grid-template-columns: repeat(3, 1fr); } }
+.crate {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 0.9rem;
+  align-items: baseline;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--line);
+  border-inline-start: 2px solid var(--line);
+  border-radius: var(--radius);
+  background: oklch(23% 0.02 258 / 0.6);
+  text-decoration: none;
+  transition: border-inline-start-color 0.2s, background 0.2s, transform 0.2s;
+}
+.crate:hover { border-inline-start-color: var(--beacon); background: oklch(26% 0.024 258 / 0.7); transform: translateX(2px); }
+.crate__i { font-family: var(--mono); font-size: 0.65rem; color: var(--dim); }
+.crate__n { font-family: var(--mono); font-size: 0.95rem; font-weight: 500; }
+.crate__d { grid-column: 2; color: var(--dim); font-size: 0.85rem; line-height: 1.4; }
+.crate--core:hover { border-inline-start-color: var(--beacon); }
+
+/* ------------------------------------------------------------------- code */
+
+.code {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: oklch(19% 0.018 258);
+  overflow: hidden;
+}
+.code__bar {
+  display: flex; align-items: center; gap: 0.7rem;
+  padding: 0.55rem 0.85rem;
+  border-block-end: 1px solid var(--line-soft);
+  font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--dim);
+  background: oklch(23% 0.02 258 / 0.7);
+}
+.code pre {
+  margin: 0;
+  padding: 1.1rem 1.2rem 1.3rem;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.85;
+  tab-size: 2;
+}
+.tk-c { color: var(--dim); }          /* comment  */
+.tk-l { color: var(--beacon); }        /* literal  */
+.tk-s { color: oklch(83% 0.09 190); } /* string   */
+.tk-f { color: oklch(78% 0.12 60); }  /* fn       */
+.tk-t { color: var(--violet); }       /* type     */
+
+/* ----------------------------------------------------------------- reason */
+
+.reasons { display: grid; gap: 0; border-block-start: 1px solid var(--line-soft); }
+@media (min-width: 720px) { .reasons { grid-template-columns: 1fr 1fr; column-gap: 2.5rem; } }
+.reason {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 1rem;
+  padding-block: 0.7rem;
+  border-block-end: 1px solid var(--line-soft);
+  align-items: baseline;
+}
+.reason code { font-family: var(--mono); font-size: 0.8rem; color: var(--amber); }
+.reason span { color: var(--mist); font-size: 0.9rem; }
+@media (max-width: 520px) { .reason { grid-template-columns: 1fr; gap: 0.15rem; } }
+
+/* ------------------------------------------------------------------ links */
+
+.links { display: grid; gap: 1px; background: var(--line-soft); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; grid-template-columns: repeat(auto-fit, minmax(min(17rem, 100%), 1fr)); }
+.links a { background: var(--void); padding: 1.3rem 1.2rem; text-decoration: none; display: grid; gap: 0.35rem; transition: background 0.2s; }
+.links a:hover { background: var(--plate); }
+.links b { font-family: var(--mono); font-size: 0.92rem; font-weight: 500; color: var(--frost); }
+.links a:hover b { color: var(--beacon); }
+.links span { color: var(--dim); font-size: 0.86rem; line-height: 1.45; }
+
+/* ----------------------------------------------------------------- footer */
+
+.footer { border-block-start: 1px solid var(--line-soft); padding-block: 2.6rem 3rem; }
+.footer__in { display: flex; flex-wrap: wrap; gap: 1.2rem; align-items: center; justify-content: space-between; }
+.footer p { font-family: var(--mono); font-size: 0.72rem; color: var(--dim); letter-spacing: 0.06em; }
+.footer nav { display: flex; gap: 1.2rem; }
+.footer nav a { font-family: var(--mono); font-size: 0.72rem; color: var(--mist); text-decoration: none; letter-spacing: 0.06em; }
+.footer nav a:hover { color: var(--beacon); }
+
+.sr { position: absolute; inline-size: 1px; block-size: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* ----------------------------------------------------------------- motion */
+
+@layer motion {
+  @keyframes reveal-up { from { opacity: 0; transform: translateY(28px); } to { opacity: 1; transform: none; } }
+  @keyframes enter { from { opacity: 0; transform: translateX(-6px); } to { opacity: 1; transform: none; } }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+  @keyframes halo { 0% { opacity: 0.5; transform: scale(1); } 100% { opacity: 0; transform: scale(1.5); } }
+  @keyframes travel { 0% { offset-distance: 0%; opacity: 0; } 8% { opacity: 1; } 92% { opacity: 1; } 100% { offset-distance: 100%; opacity: 0; } }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .reveal {
+    animation: reveal-up linear both;
+    animation-timeline: view();
+    animation-range: entry 5% cover 28%;
+  }
+
+  /* hero load sequence */
+  .load { animation: reveal-up 0.7s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+  .load--1 { animation-delay: 0.05s; } .load--2 { animation-delay: 0.15s; }
+  .load--3 { animation-delay: 0.25s; } .load--4 { animation-delay: 0.35s; }
+  .load--5 { animation-delay: 0.45s; } .load--6 { animation-delay: 0.55s; }
+
+  .caret { animation: blink 1.1s step-end infinite; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .reveal, .load { animation: none; }
+    .hop--run, .vip--owned .halo, .sim__bar .state::before, .caret { animation: none; }
+    .hop--run { opacity: 1; offset-distance: 45%; }
+    * { scroll-behavior: auto !important; }
+  }
+}
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="wrap nav__in">
+    <a class="brand" href="#top" aria-label="Highland, back to top">
+      <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+        <path d="M2 21 L9 8 L14 15 L17 10 L22 21" stroke="#00E5A3" stroke-width="2" stroke-linecap="square"/>
+        <path d="M9 8 L9 21" stroke="#5EE0B4" stroke-width="1" stroke-dasharray="2 2" opacity=".6"/>
+        <circle cx="17" cy="10" r="2.4" fill="#00E5A3"/>
+      </svg>
+      <span>HIGHLAND</span>
+    </a>
+    <ul>
+      <li><a href="#simulator">Failover</a></li>
+      <li><a href="#status">Status</a></li>
+      <li><a href="#principles">Principles</a></li>
+      <li><a href="#crates">Crates</a></li>
+      <li><a href="#docs">Docs</a></li>
+      <li><a href="https://github.com/highland-rs/highland">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<!-- ============================================================== hero -->
+<header class="hero wrap" id="top">
+  <div class="hero__grid">
+    <div>
+      <div class="pill-row load load--1">
+        <span class="pill pill--rust">Rust 2024 · MSRV 1.85</span>
+        <span class="pill"><b>RFC 5798</b> / VRRPv3</span>
+        <span class="pill"><b>Linux</b> · x86_64 · aarch64</span>
+      </div>
+
+      <h1 class="wordmark load load--2">HIGHLAND<span class="v">VRRPv3 · 0.1.0 · NOT YET RELEASED</span></h1>
+
+      <p class="tagline load load--3">
+        Virtual IP failover that <span class="hi">never claims an address it does not hold</span>,
+        and never makes you guess why.
+      </p>
+
+      <p class="lede load load--4">
+        Highland is a memory-safe Rust implementation of VRRPv3 for Linux: a
+        deterministic state machine, native health checks, transactional
+        configuration reload, and an event stream that explains every single
+        role change. A library first, a daemon second.
+      </p>
+
+      <div class="cta load load--5">
+        <a class="btn btn--primary" href="https://github.com/highland-rs/highland">Get Highland</a>
+        <a class="btn btn--ghost" href="user/index.md">Documentation</a>
+        <a class="btn btn--ghost" href="SPEC.md">Specification</a>
+      </div>
+    </div>
+
+    <!-- ------------------------------------------------------ simulator -->
+    <div class="sim load load--6" id="simulator">
+      <div class="sim__bar">
+        <span class="dots"><i></i><i></i><i></i></span>
+        <span>vrrp_instance / api · vrid 42</span>
+        <span class="state" id="simState">converged</span>
+      </div>
+
+      <div class="sim__stage">
+        <svg viewBox="0 0 520 250" role="img" aria-labelledby="simTitle simDesc">
+          <title id="simTitle">Two-node VRRP topology converging on one virtual address</title>
+          <desc id="simDesc">node-a and node-b peer over eth0. The higher-priority node holds virtual address 192.0.2.10. Breaking the master moves the address to the backup.</desc>
+          <defs>
+            <marker id="arrow" viewBox="0 0 8 8" refX="6" refY="4" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+              <path d="M0 0 L8 4 L0 8 z" fill="currentColor" opacity=".55"/>
+            </marker>
+            <pattern id="grid" width="26" height="26" patternUnits="userSpaceOnUse">
+              <path d="M26 0 L0 0 0 26" fill="none" stroke="oklch(38% 0.02 258 / 0.16)" stroke-width="1"/>
+            </pattern>
+          </defs>
+          <rect width="520" height="250" fill="url(#grid)" opacity=".5"/>
+
+          <!-- links: nodes -> vip edge, arrowed in the advertisement direction -->
+          <path class="link link--live" id="linkA" d="M190 76 L348 90" marker-end="url(#arrow)"/>
+          <path class="link" id="linkB" d="M190 186 L348 114" marker-end="url(#arrow)"/>
+
+          <!-- peer link between the two nodes -->
+          <path class="link link--peer" d="M105 112 L105 150"/>
+          <text class="taddr" x="105" y="136" text-anchor="middle">peer link · ip proto 112</text>
+
+          <!-- node A -->
+          <g class="tnode tnode--master" id="nodeA">
+            <rect x="20" y="40" width="170" height="72" rx="3"/>
+            <text class="tlabel" x="34" y="62">node-a</text>
+            <text class="taddr" x="176" y="62" text-anchor="end">192.0.2.11</text>
+            <text class="trole trole--master" id="roleA" x="34" y="86">MASTER</text>
+            <text class="tprio" x="34" y="102">prio 150<tspan class="tprio--eff" id="effA"> · eff 150</tspan></text>
+          </g>
+
+          <!-- node B -->
+          <g class="tnode tnode--backup" id="nodeB">
+            <rect x="20" y="150" width="170" height="72" rx="3"/>
+            <text class="tlabel" x="34" y="172">node-b</text>
+            <text class="taddr" x="176" y="172" text-anchor="end">192.0.2.12</text>
+            <text class="trole trole--backup" id="roleB" x="34" y="194">BACKUP</text>
+            <text class="tprio" x="34" y="210">prio 100<tspan class="tprio--low" id="effB"> · eff 100</tspan></text>
+          </g>
+
+          <!-- the virtual address itself -->
+          <g class="vip vip--owned" id="vip" transform="translate(398 101)">
+            <rect class="halo" x="-46" y="-40" width="92" height="80" rx="3"/>
+            <rect x="-46" y="-40" width="92" height="80" rx="3"/>
+            <text class="tlabel" x="-32" y="-16">virtual</text>
+            <text class="tlabel tlabel--addr" x="-32" y="0">192.0.2.10</text>
+            <text class="trole" x="-32" y="26" id="vipOwner">held by a</text>
+          </g>
+
+          <!-- packet hops -->
+          <circle class="hop hop--a" id="hopA" r="3.2"/>
+          <circle class="hop hop--b" id="hopB" r="3.2"/>
+        </svg>
+      </div>
+
+      <dl class="readouts">
+        <div class="ro"><dt>holder</dt><dd id="roHolder" class="beacon">node-a</dd></div>
+        <div class="ro"><dt>adver int</dt><dd>1.000s</dd></div>
+        <div class="ro"><dt>master-down</dt><dd id="roDown">—</dd></div>
+        <div class="ro"><dt>owner</dt><dd class="beacon" id="roOwned">confirmed</dd></div>
+      </dl>
+
+      <div class="console" id="console" role="log" aria-live="polite" aria-label="Simulated event stream"></div>
+
+      <div class="sim__ctl">
+        <button class="ctl ctl--danger" id="btnFail" type="button">Kill master</button>
+        <button class="ctl" id="btnHealth" type="button">Fail health check</button>
+        <button class="ctl" id="btnReturn" type="button" disabled>Return master</button>
+        <button class="ctl" id="btnReset" type="button">Reset</button>
+        <span class="sim__hint">master-down = 3 × adver_int + 10ms</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<!-- ============================================================ status -->
+<section class="section wrap" id="status">
+  <p class="eyebrow reveal"><b>01</b> Honest status</p>
+  <h2 class="h2 reveal">What works <em>today</em>, and what does not</h2>
+  <p class="lede reveal">
+    Highland is pre-release. The failover logic and the configuration layer are
+    finished and tested; the parts that put packets on the wire are still being
+    built. This page will not pretend otherwise.
+  </p>
+
+  <div class="board reveal" style="margin-block-start:2.5rem">
+    <div class="board__col board--yes">
+      <h3>Shipped and tested</h3>
+      <ul>
+        <li>Configuration model, strict TOML parser, and 32 validation rules, each with its own test</li>
+        <li>Deterministic state machine: roles, timers, election, health arithmetic, no runtime dependency</li>
+        <li>VRRP domain types, validated so an invalid wire value cannot be represented</li>
+        <li>Event model, redaction, bounded 4096-entry history</li>
+        <li>Control message model, error taxonomy, token-bucket rate limiter</li>
+        <li><code class="mono">highland check-config</code>, fully functional</li>
+      </ul>
+    </div>
+    <div class="board__col board--no">
+      <h3>Not yet on the wire</h3>
+      <ul>
+        <li>Packet encoding and decoding, with fuzz targets (Milestone 2)</li>
+        <li>The netlink backend that adds and removes addresses (Milestone 3)</li>
+        <li>A real address moving between two machines (Milestone 4, ships as 0.1.0)</li>
+        <li>The control socket, so the CLI can query a running daemon (Milestone 7)</li>
+        <li>Health probes for anything beyond the framework (Milestone 6)</li>
+        <li>IPv6, multicast, and Keepalived interoperability (1.0)</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ========================================================= principles -->
+<section class="section wrap" id="principles">
+  <p class="eyebrow reveal"><b>02</b> What it refuses to do</p>
+  <h2 class="h2 reveal">Three commitments, and they cost something</h2>
+
+  <div class="creed reveal" style="margin-block-start:2.5rem">
+    <div class="creed__cell" data-n="01">
+      <h3>Ownership <span>before</span> advertisement</h3>
+      <p>
+        A node reads its addresses back from the kernel before it is allowed to
+        announce itself as their owner. Taking ownership is a two-step operation:
+        add, confirm, <em>then</em> advertise. There is no degraded mode in which
+        a node claims an address it does not hold — not even a configurable one.
+        If it cannot take ownership it says which interface, which address, and
+        which kernel error.
+      </p>
+    </div>
+    <div class="creed__cell" data-n="02">
+      <h3>Every transition <span>carries a reason</span></h3>
+      <p>
+        <code>I-04</code> is structural, not a convention: there is no code path
+        from <code>BACKUP</code> to <code>MASTER</code> and on to an
+        advertisement except through a confirmed add. Ties break in a documented,
+        deterministic order, and a single failed probe can never move an
+        address.
+      </p>
+    </div>
+    <div class="creed__cell" data-n="03">
+      <h3>Honest about <span>split brain</span></h3>
+      <p>
+        Highland is a layer-2 tool. During a network partition two nodes can both
+        believe they own the address. It reports peer loss on both sides, makes
+        no claim of consensus, and documents the exposure. Fencing is post-1.0
+        and deliberately outside the election path.
+      </p>
+    </div>
+  </div>
+
+  <div class="code reveal" style="margin-block-start:1.2rem">
+    <div class="code__bar"><span class="dots"><i></i><i></i><i></i></span><span>highland events --follow</span></div>
+<pre><code><span class="tk-c"># the address moved, and the reason is in the log</span>
+<span class="tk-t">INFO</span>  node-a/api   <span class="tk-l">MASTER → BACKUP</span>  reason=<span class="tk-s">higher_priority_peer_advertisement</span> peer=<span class="tk-s">192.0.2.12</span> local=<span class="tk-s">50</span> remote=<span class="tk-s">100</span>
+<span class="tk-t">WARN</span>  node-a/api   effective priority <span class="tk-s">150 → 50</span>  check=<span class="tk-s">api-ready</span> weight=<span class="tk-s">100</span> policy=<span class="tk-s">weighted</span>
+<span class="tk-t">INFO</span>  node-b/net   gratuitous ARP broadcast sent (<span class="tk-s">3</span> frames)
+<span class="tk-t">INFO</span>  node-b/api   <span class="tk-l">BACKUP → MASTER</span>  reason=<span class="tk-s">higher_priority_peer_advertisement</span> vip=<span class="tk-s">192.0.2.10/24</span><span class="caret">▌</span></code></pre>
+  </div>
+</section>
+
+<!-- ============================================================= crates -->
+<section class="section wrap" id="crates">
+  <p class="eyebrow reveal"><b>03</b> Architecture</p>
+  <h2 class="h2 reveal">A library that happens to ship a daemon</h2>
+  <p class="lede reveal">
+    Nine focused crates. Dependencies flow strictly downward, cycles are
+    forbidden, and the two crates at the bottom depend on nothing at all — which
+    is what makes the state machine and the protocol codec testable without
+    Linux, without a network, and without an async runtime.
+  </p>
+
+  <div class="ladder reveal" style="margin-block-start:2.2rem">
+    <a class="crate crate--core" href="SPEC.md"><span class="crate__i">01</span><span class="crate__n">highland-core</span><span class="crate__d">Roles, timers, election, health arithmetic. No Linux, no runtime, no I/O.</span></a>
+    <a class="crate crate--core" href="SPEC.md"><span class="crate__i">02</span><span class="crate__n">highland-vrrp</span><span class="crate__d">VRRPv3 encoding, decoding, checksums, validation. No sockets.</span></a>
+    <a class="crate" href="user/configuration.md"><span class="crate__i">03</span><span class="crate__n">highland-config</span><span class="crate__d">Typed TOML model, 32 validation rules, source-located errors.</span></a>
+    <a class="crate" href="SPEC.md"><span class="crate__i">04</span><span class="crate__n">highland-observe</span><span class="crate__d">Events, redaction, bounded history, Prometheus metrics.</span></a>
+    <a class="crate" href="SPEC.md"><span class="crate__i">05</span><span class="crate__n">highland-net</span><span class="crate__d">Interfaces, addresses, gratuitous updates, netlink — behind a trait.</span></a>
+    <a class="crate" href="user/health-checks.md"><span class="crate__i">06</span><span class="crate__n">highland-checks</span><span class="crate__d">Native probes with thresholds, weights, bounded timeouts.</span></a>
+    <a class="crate" href="user/cli.md"><span class="crate__i">07</span><span class="crate__n">highland-control</span><span class="crate__d">Local Unix-socket API. Never a network listener.</span></a>
+    <a class="crate" href="user/operations.md"><span class="crate__i">08</span><span class="crate__n">highland-daemon</span><span class="crate__d">Process lifecycle, signals, shutdown budget, wiring.</span></a>
+    <a class="crate" href="user/cli.md"><span class="crate__i">09</span><span class="crate__n">highland-cli</span><span class="crate__d">`highland` — mapped exactly onto the control API.</span></a>
+  </div>
+
+  <div class="code reveal" style="margin-block-start:1.4rem">
+    <div class="code__bar"><span class="dots"><i></i><i></i><i></i></span><span>check-config — a config, and what it rejects</span></div>
+<pre><code><span class="tk-c"># /etc/highland/config.toml</span>
+schema_version = <span class="tk-l">1</span>
+
+[[instance]]
+name = <span class="tk-s">"api"</span>
+interface = <span class="tk-s">"eth0"</span>
+vrid = <span class="tk-l">42</span>
+priority = <span class="tk-l">150</span>
+advertisement_interval = <span class="tk-s">"1s"</span>
+
+[instance.network]
+mode = <span class="tk-s">"unicast"</span>
+peers = [<span class="tk-s">"192.0.2.12"</span>]
+
+[[instance.vip]]
+address = <span class="tk-s">"192.0.2.10/24"</span>
+
+[[instance.check]]
+name = <span class="tk-s">"api-ready"</span>
+type = <span class="tk-s">"http"</span>
+url = <span class="tk-s">"http://127.0.0.1:8080/ready"</span>
+expected_status = [<span class="tk-l">200</span>]
+timeout = <span class="tk-s">"500ms"</span>      <span class="tk-c"># durations always carry a unit</span>
+interval = <span class="tk-s">"1s"</span>
+failure_threshold = <span class="tk-l">3</span>  <span class="tk-c"># one unlucky probe is not a failover</span>
+weight = <span class="tk-l">100</span></code></pre>
+  </div>
+</section>
+
+<!-- =========================================================== reasons -->
+<section class="section wrap">
+  <p class="eyebrow reveal"><b>04</b> Explainability</p>
+  <h2 class="h2 reveal">A closed set of reasons, and you can look them all up</h2>
+  <p class="lede reveal">
+    Every role change carries one of these. The set is closed on purpose:
+    dashboards and alerts depend on the spelling, so a new reason is a
+    specification change, not a surprise release note.
+  </p>
+
+  <div class="reasons reveal" style="margin-block-start:2rem">
+    <div class="reason"><code>startup</code><span>The instance entered election</span></div>
+    <div class="reason"><code>interface_up</code><span>The interface became usable</span></div>
+    <div class="reason"><code>interface_down</code><span>The link went away</span></div>
+    <div class="reason"><code>master_down_timeout</code><span>No advertisement in 3 × adver_int + 10ms</span></div>
+    <div class="reason"><code>higher_priority_peer_advertisement</code><span>A peer outranked this node</span></div>
+    <div class="reason"><code>health_ineligible</code><span>Health policy removed eligibility</span></div>
+    <div class="reason"><code>operator_relinquish</code><span>An operator gave the address up</span></div>
+    <div class="reason"><code>ownership_failed</code><span>An address could not be added or removed</span></div>
+    <div class="reason"><code>hold_down_expired</code><span>A fault recovered and re-verified</span></div>
+    <div class="reason"><code>configuration_reloaded</code><span>A reload permitted the transition</span></div>
+  </div>
+</section>
+
+<!-- ============================================================== docs -->
+<section class="section wrap" id="docs">
+  <p class="eyebrow reveal"><b>05</b> Documentation</p>
+  <h2 class="h2 reveal">Written for the operator, not the maintainer</h2>
+
+  <div class="links reveal" style="margin-block-start:2rem">
+    <a href="user/getting-started.md"><b>Getting started</b><span>Build it, write a first configuration, run it on two nodes</span></a>
+    <a href="user/installation.md"><b>Installation</b><span>Requirements, systemd and OpenRC, containers, permissions</span></a>
+    <a href="user/configuration.md"><b>Configuration reference</b><span>Every key, every default, every rule that rejects a file</span></a>
+    <a href="user/health-checks.md"><b>Health checks</b><span>Check types, weights, choosing a policy, avoiding flapping</span></a>
+    <a href="user/cli.md"><b>Command reference</b><span>Every command, its flags, and what it does</span></a>
+    <a href="user/troubleshooting.md"><b>Troubleshooting</b><span>Symptom first, then the checks that find each cause</span></a>
+    <a href="user/operations.md"><b>Operations guide</b><span>Signals, every event and reason, split brain, upgrade</span></a>
+    <a href="user/compatibility.md"><b>Compatibility</b><span>Keepalived mapping, protocol differences, IPv6</span></a>
+    <a href="user/threat-model.md"><b>Threat model</b><span>What Highland trusts, what it refuses, what is out of scope</span></a>
+    <a href="SPEC.md"><b>Specification</b><span>The complete requirements, with stable references</span></a>
+    <a href="../CHANGELOG.md"><b>Changelog</b><span>Keep a Changelog format, one section per release</span></a>
+    <a href="../SECURITY.md"><b>Security</b><span>Reporting path and supported versions</span></a>
+  </div>
+</section>
+
+<footer class="footer">
+  <div class="wrap footer__in">
+    <p>HIGHLAND · MIT OR Apache-2.0 · NOT YET RELEASED</p>
+    <nav>
+      <a href="../README.md">README</a>
+      <a href="user/index.md">DOCS</a>
+      <a href="../CONTRIBUTING.md">CONTRIBUTING</a>
+      <a href="https://github.com/highland-rs/highland">GITHUB</a>
+    </nav>
+  </div>
+</footer>
+
+<script>
+(() => {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const SPEED = reduce ? 0.12 : 1;      // collapse timings for reduced motion
+  const at = () =>
+    new Date().toISOString().replace("T", " ").slice(0, 19) + "Z";
+
+  /* ------------------------------------------------------------------ model
+     Mirrors SPEC.md: node-a priority 150, node-b 100, adver_int 1s, so
+     Master_Down_Interval = 3 * adver_int + Skew_Time(10ms) = 3010ms. */
+  const MASTER_DOWN_MS = 3010;
+
+  const fresh = () => ({
+    a: { name: "node-a", addr: "192.0.2.11", prio: 150, eff: 150, role: "master", vips: 1, alive: true, healthy: true },
+    b: { name: "node-b", addr: "192.0.2.12", prio: 100, eff: 100, role: "backup", vips: 0, alive: true, healthy: true },
+  });
+
+  let nodes = fresh();
+  let downed = null;      // the node killed by the operator
+  let healthFailing = false;
+  let busy = false;
+
+  const ui = {
+    console: $("console"), state: $("simState"),
+    holder: $("roHolder"), down: $("roDown"), owned: $("roOwned"),
+    vip: $("vip"), vipOwner: $("vipOwner"),
+    linkA: $("linkA"), linkB: $("linkB"), hopA: $("hopA"), hopB: $("hopB"),
+    btnFail: $("btnFail"), btnHealth: $("btnHealth"),
+    btnReturn: $("btnReturn"), btnReset: $("btnReset"),
+  };
+
+  const timers = new Set();
+  const wait = (ms) => new Promise((res) => {
+    const t = setTimeout(res, Math.max(0, ms * SPEED));
+    timers.add(t);
+  });
+  const later = (fn, ms) => {
+    const t = setTimeout(fn, ms * SPEED);
+    timers.add(t);
+    return t;
+  };
+  const clearAll = () => { timers.forEach(clearTimeout); timers.clear(); };
+  const holder = () => Object.keys(nodes).find((k) => nodes[k].vips > 0) ?? null;
+  const other = (k) => (k === "a" ? "b" : "a");
+
+  /* ------------------------------------------------------------------- log */
+  function log(level, module, message) {
+    const line = document.createElement("div");
+    line.className = `console__line console__line--${level}`;
+    const t = document.createElement("span");
+    t.className = "console__t";
+    t.textContent = at();
+    const tag = document.createElement("span");
+    tag.className = "console__tag";
+    tag.textContent = level.toUpperCase().padEnd(4);
+    const m = document.createElement("span");
+    m.className = "console__m";
+    m.textContent = `${module}  ${message}`;
+    line.append(t, tag, m);
+    ui.console.append(line);
+    while (ui.console.children.length > 9) ui.console.firstElementChild.remove();
+  }
+
+  /* ----------------------------------------------------------------- paint */
+  function paintNode(key) {
+    const n = nodes[key];
+    const g = $("node" + key.toUpperCase());
+    const role = $("role" + key.toUpperCase());
+    const eff = $("eff" + key.toUpperCase());
+    const link = key === "a" ? ui.linkA : ui.linkB;
+    const hop = key === "a" ? ui.hopA : ui.hopB;
+
+    g.classList.remove("tnode--master", "tnode--backup", "tnode--fault", "tnode--down");
+    role.classList.remove("trole--master", "trole--backup", "trole--fault");
+
+    if (!n.alive) {
+      g.classList.add("tnode--down");
+      role.textContent = "DOWN";
+      role.classList.add("trole--fault");
+    } else if (n.role === "master") {
+      g.classList.add("tnode--master");
+      role.textContent = "MASTER";
+      role.classList.add("trole--master");
+    } else {
+      g.classList.add("tnode--backup");
+      role.textContent = "BACKUP";
+      role.classList.add("trole--backup");
+    }
+
+    eff.textContent = ` · eff ${n.eff}`;
+    eff.classList.remove("tprio--eff", "tprio--low");
+    eff.classList.add(n.eff < n.prio ? "tprio--low" : "tprio--eff");
+
+    const live = n.role === "master" && n.alive;
+    link.classList.toggle("link--live", live);
+    link.classList.toggle("link--dead", !n.alive);
+    hop.classList.toggle("hop--run", live);
+  }
+
+  /* The readouts and the VIP card describe the cluster, so they are derived
+     from both nodes rather than from whichever one painted last. */
+  function paintCluster() {
+    const held = Object.keys(nodes).filter((k) => nodes[k].vips > 0);
+    const h = held.length ? nodes[held[0]] : null;
+    const contested = held.length > 1;
+
+    ui.vip.classList.toggle("vip--owned", held.length > 0);
+    ui.vipOwner.textContent = contested ? "contested" : h ? `held by ${h.name.slice(-1)}` : "unowned";
+    ui.vipOwner.setAttribute("class", "trole trole--" + (contested ? "fault" : h ? "master" : "fault"));
+    ui.holder.textContent = contested ? "both" : h ? h.name : "none";
+    ui.holder.className = contested ? "rust" : h ? "beacon" : "rust";
+    ui.owned.textContent = contested ? "conflict" : h ? "confirmed" : "none";
+    ui.owned.className = contested ? "rust" : h ? "beacon" : "rust";
+  }
+
+  /* Controls describe what is possible from the current state, so every
+     scenario ends up idempotent: no button can be pressed into a no-op. */
+  function syncControls() {
+    // Killing the last live node would leave nobody to take over, which is a
+    // partition rather than a failover.
+    const live = Object.values(nodes).filter((n) => n.alive).length;
+    ui.btnFail.disabled = busy || holder() === null || live < 2;
+    ui.btnHealth.disabled = busy;
+    ui.btnHealth.textContent = healthFailing ? "Recover health check" : "Fail health check";
+    ui.btnHealth.classList.toggle("ctl--ok", healthFailing);
+    ui.btnReturn.disabled = busy || downed === null || holder() === null;
+    ui.btnReturn.textContent = downed ? `Restart ${nodes[downed].name}` : "Restart node";
+  }
+
+  function paintAll() {
+    paintNode("a");
+    paintNode("b");
+    paintCluster();
+    syncControls();
+  }
+
+  function phase(text, tone = "") {
+    ui.state.textContent = text;
+    ui.state.style.color = tone === "err" ? "var(--rust)" : tone === "warn" ? "var(--amber)" : "";
+  }
+
+  function countdown(from, to, onDone) {
+    let t = from;
+    ui.down.className = "amber";
+    const tick = () => {
+      t -= 100;
+      if (t <= to) { ui.down.textContent = (to / 1000).toFixed(3) + "s"; onDone(); return; }
+      ui.down.textContent = (t / 1000).toFixed(3) + "s";
+      later(tick, 100);
+    };
+    ui.down.textContent = (from / 1000).toFixed(3) + "s";
+    later(tick, 100);
+  }
+
+  const run = (fn) => { busy = true; syncControls(); fn(); };
+
+  /* ------------------------------------------------------- kill the holder */
+  function failMaster() {
+    if (busy) return;
+    const key = holder();
+    if (!key) return;
+    run(() => {
+      const n = nodes[key];
+      downed = key;
+      phase("master lost", "err");
+      log("err", n.name, "process gone; advertisements stopped");
+      n.alive = false;
+      n.vips = 0;
+      n.role = "fault";
+      paintAll();
+
+      log("warn", nodes[other(key)].name, "master timer armed, waiting for silence");
+      countdown(MASTER_DOWN_MS, 0, () => takeOver(other(key), "master_down_timeout"));
+    });
+  }
+
+  /* The peer asserts election and takes ownership in two confirmed steps. */
+  function takeOver(key, reason) {
+    const n = nodes[key];
+    if (!n.alive) {
+      log("err", n.name, "cannot assert election: this node is not running");
+      ui.down.textContent = "—";
+      ui.down.className = "";
+      busy = false;
+      phase("no quorum", "err");
+      paintAll();
+      return;
+    }
+    log("warn", n.name, `no advertisement in ${MASTER_DOWN_MS}ms, asserting election`);
+    log("info", n.name, `BACKUP → MASTER  reason=${reason}  vrid=42`);
+    n.role = "master";
+    paintAll();
+
+    log("info", n.name, "AddVirtualAddresses 192.0.2.10/24 → eth0");
+    later(async () => {
+      log("ok", n.name, "ownership confirmed by kernel read-back");
+      n.vips = 1;
+      paintAll();
+      log("info", n.name, "gratuitous ARP broadcast sent (3 frames)");
+      log("ok", n.name, `MASTER role announced, eff priority ${n.eff}`);
+      ui.down.textContent = "—";
+      ui.down.className = "";
+      busy = false;
+      phase("converged");
+      paintAll();
+    }, 260);
+  }
+
+  /* ------------------------------------------------------------ health down */
+  function failHealth() {
+    if (busy || healthFailing) return;
+    const key = holder();
+    if (!key) return;
+    run(() => {
+      const n = nodes[key];
+      healthFailing = true;
+      phase("health failing", "warn");
+      log("warn", n.name, "check api-ready failing (2/3), weight=100 policy=weighted");
+      later(() => {
+        log("warn", n.name, `effective priority ${n.prio} → ${n.prio - 100}`);
+        n.eff = n.prio - 100;
+        n.healthy = false;
+        paintAll();
+        log("info", nodes[other(key)].name, `advertising MASTER eff priority ${nodes[other(key)].prio}`);
+        later(() => stepDown(key, other(key), "higher_priority_peer_advertisement", n.prio - 100, nodes[other(key)].prio), 300);
+      }, 320);
+    });
+  }
+
+  /* A higher-priority peer advertised: the current master steps down (R-16). */
+  function stepDown(key, peerKey, reason, localEff, remotePri) {
+    const n = nodes[key];
+    const p = nodes[peerKey];
+    log("warn", n.name,
+      `MASTER → BACKUP  reason=${reason}  peer=${p.addr}  local=${localEff} remote=${remotePri}`);
+    n.role = "backup";
+    n.vips = 0;
+    paintAll();
+
+    log("info", p.name, "AddVirtualAddresses 192.0.2.10/24 → eth0");
+    later(async () => {
+      p.role = "master";
+      p.vips = 1;
+      paintAll();
+      log("ok", p.name, "ownership confirmed; gratuitous ARP sent (3 frames)");
+      busy = false;
+      phase("converged");
+      paintAll();
+    }, 240);
+  }
+
+  /* ----------------------------------------------------------- health back */
+  function recoverHealth() {
+    if (busy || !healthFailing) return;
+    const key = Object.keys(nodes).find((k) => !nodes[k].healthy);
+    if (!key) return;
+    run(() => {
+      const n = nodes[key];
+      const peerKey = other(key);
+      healthFailing = false;
+      phase("health recovering", "warn");
+      log("ok", n.name, "check api-ready passing (2/2), weight restored");
+      later(() => {
+        log("info", n.name, `effective priority ${n.eff} → ${n.prio}, preempt=true`);
+        n.eff = n.prio;
+        n.healthy = true;
+        paintAll();
+        later(() => {
+          log("warn", nodes[peerKey].name, `MASTER → BACKUP  reason=preemption  peer=${n.addr}  local=${nodes[peerKey].prio} remote=${n.prio}`);
+          nodes[peerKey].role = "backup";
+          nodes[peerKey].vips = 0;
+          paintAll();
+          log("info", n.name, "preempt_delay 0s elapsed, AddVirtualAddresses 192.0.2.10/24 → eth0");
+          later(() => {
+            n.role = "master";
+            n.vips = 1;
+            paintAll();
+            log("ok", n.name, "ownership confirmed; gratuitous ARP sent (3 frames)");
+            busy = false;
+            phase("converged");
+            paintAll();
+          }, 240);
+        }, 300);
+      }, 320);
+    });
+  }
+
+  /* ------------------------------------------------------- node comes back */
+  function returnMaster() {
+    if (busy || downed === null) return;
+    run(() => {
+      const key = downed;
+      const peerKey = other(key);
+      const n = nodes[key];
+      downed = null;
+      phase(`${n.name} returning`, "warn");
+
+      n.alive = true;
+      n.role = "init";
+      n.eff = n.prio;
+      paintAll();
+      log("info", n.name, "process up, role INIT, startup_delay 5s");
+      later(() => {
+        n.role = "backup";
+        paintAll();
+        log("info", n.name, "startup_delay elapsed → BACKUP, one health window evaluated");
+        log("warn", n.name, "preempt_delay 30s → 0s, taking over from lower-priority peer");
+        stepDown(peerKey, key, "higher_priority_peer_advertisement", nodes[peerKey].prio, n.prio);
+      }, 340);
+    });
+  }
+
+  /* ------------------------------------------------------------------ boot */
+  function reset() {
+    clearAll();
+    ui.console.replaceChildren();
+    nodes = fresh();
+    downed = null;
+    healthFailing = false;
+    busy = false;
+    ui.down.textContent = "—";
+    ui.down.className = "";
+    phase("converged");
+    log("info", "node-a", "MASTER  vrid=42  vip=192.0.2.10/24  eff=150");
+    log("info", "node-b", "BACKUP  vrid=42  peer=192.0.2.11  master_down=3.010s");
+    paintAll();
+  }
+
+  /* A thrown error in a demo like this is invisible otherwise: the page just
+     stops doing things. Report it in the stream everything else already uses. */
+  addEventListener("error", (e) => log("err", "simulator", e.message || "unexpected error"));
+
+  ui.btnFail.addEventListener("click", failMaster);
+  ui.btnHealth.addEventListener("click", () => (healthFailing ? recoverHealth() : failHealth()));
+  ui.btnReturn.addEventListener("click", returnMaster);
+  ui.btnReset.addEventListener("click", reset);
+
+  reset();
+})();
+</script>
+</body>
+</html>

@@ -54,7 +54,9 @@ Specification requirements are testable obligations. The mapping today:
 | `R-26`, `R-27` (determinism, absolute deadlines) | `crates/highland-core/tests/properties.rs` and `src/clock.rs` |
 | `I-05`, `I-06` (decoder never panics, interval round trip) | `crates/highland-vrrp/tests/properties.rs` and the two VRRP fuzz targets |
 | `I-09` (a rejected reload changes nothing) | Milestone 4; Milestone 1 tests the generation guard only |
-| `I-19` (confirmation means read-back) | Milestone 3 for the read-back; Milestone 1 tests that confirmation is the only path to ownership |
+| `I-19` (confirmation means read-back) | Milestone 1 tests that confirmation is the only path to ownership; `crates/highland-daemon/tests/failover.rs` tests the read-back through the executor |
+| `I-04`, `I-14`, `I-45` (ownership precedes advertising) | `crates/highland-daemon/tests/failover.rs`, driven through a scripted kernel |
+| `L-05` (bounded instruction queue) | `crates/highland-daemon/tests/run_loop.rs` |
 | `I-39` (a malformed packet never terminates the daemon) | `fuzz_vrrp_ipv4_packet` and `fuzz_vrrp_ipv6_packet` |
 | `I-44` (advertisement handling in `BACKUP`) | `crates/highland-core/tests/state_machine.rs`, including the discard rule |
 | `I-12`, `I-26` (stale results) | `crates/highland-checks/src/result.rs` |
@@ -86,6 +88,20 @@ $ PROPTEST_CASES=4096 cargo test -p highland-core --test properties
 
 A failing case is written to `tests/properties.proptest-regressions` and is
 checked in, so a bug found once is tested forever.
+
+## Testing above the kernel
+
+Everything from the state machine upward is tested without privileges, because
+`highland-net` ships a `ScriptedBackend` and the executor is generic over it. A
+test scripts the kernel's answers and then asserts the whole sequence: the calls
+the backend received, and the advertisements the transport was asked to send.
+
+That is what makes the failure paths affordable to test. "The address is already
+in use", "the interface disappeared", "the add was refused" are one line of
+script rather than a namespace and a root shell, and they run in milliseconds.
+
+What a scripted kernel cannot prove is that Linux behaves as the backend expects.
+That is the namespace suite's job, and it is the reason both exist.
 
 ## Network-namespace tests
 

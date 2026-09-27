@@ -146,6 +146,10 @@ Start at the [user documentation index](docs/user/index.md).
 - [Testing](docs/testing.md)
 - [Architecture decision records](docs/adr/)
 
+## Notices
+
+- All code in the initial version was written by Space bunny alpha.
+
 ## Privileges
 
 The daemon needs `CAP_NET_ADMIN` and `CAP_NET_RAW`. It does not require

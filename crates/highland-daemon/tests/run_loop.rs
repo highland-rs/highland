@@ -37,6 +37,7 @@ fn spawn(
     tokio::task::JoinHandle<()>,
     watch::Sender<bool>,
     highland_daemon::InstructionSender,
+    highland_daemon::InstructionSender,
     std::sync::Arc<ScriptedBackend>,
     std::sync::Arc<highland_daemon::RecordingTransport>,
 ) {
@@ -54,17 +55,33 @@ fn spawn(
         transport.clone(),
     );
     let (sender, receiver) = channel();
+    let (protocol_sender, protocol_receiver) = channel();
     let (shutdown, watch_receiver) = watch::channel(false);
 
     let handle = tokio::spawn(async move {
-        run_instance(actor, receiver, watch_receiver).await;
+        run_instance(
+            actor,
+            receiver,
+            protocol_receiver,
+            watch_receiver,
+            None,
+            None,
+        )
+        .await;
     });
-    (handle, shutdown, sender, backend, transport)
+    (
+        handle,
+        shutdown,
+        sender,
+        protocol_sender,
+        backend,
+        transport,
+    )
 }
 
 #[tokio::test]
 async fn an_instance_takes_over_when_its_timers_fire() {
-    let (handle, shutdown, _sender, _backend, transport) = spawn([]);
+    let (handle, shutdown, _sender, _protocol, _backend, transport) = spawn([]);
 
     // The advertisement interval is one second and the takeover is 3.41s, so
     // waiting past both must produce a master that has advertised.
@@ -83,7 +100,7 @@ async fn an_instance_takes_over_when_its_timers_fire() {
 
 #[tokio::test]
 async fn a_shutdown_stops_the_loop_even_with_traffic_arriving() {
-    let (handle, shutdown, sender, _backend, transport) = spawn([]);
+    let (handle, shutdown, sender, _protocol, _backend, transport) = spawn([]);
 
     // Queue work, then ask it to stop. Shutdown is biased ahead of the queue, so
     // the instance relinquishes rather than continuing to advertise.
@@ -111,7 +128,7 @@ async fn a_shutdown_stops_the_loop_even_with_traffic_arriving() {
 
 #[tokio::test]
 async fn a_failing_backend_keeps_the_instance_out_of_ownership() {
-    let (handle, shutdown, _sender, _backend, transport) =
+    let (handle, shutdown, _sender, _protocol, _backend, transport) =
         spawn([Outcome::Failed("EPERM".to_owned())]);
 
     tokio::time::sleep(Duration::from_millis(3_600)).await;

@@ -188,6 +188,12 @@ where
         &self.plan
     }
 
+    /// Returns the peers this instance is allowed to hear from.
+    #[must_use]
+    pub fn peers(&self) -> &[std::net::IpAddr] {
+        self.ownership.peers.list()
+    }
+
     /// Returns the addresses this instance owns.
     #[must_use]
     pub fn addresses(&self) -> &[IpCidr] {

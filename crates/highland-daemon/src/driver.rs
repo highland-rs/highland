@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 use crate::actor::InstanceActor;
 
 /// What the loop is asked to do.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instruction {
     /// A protocol event, already validated by the transport.
     Event(Event),
@@ -35,6 +35,61 @@ pub enum Instruction {
     PeerReachable,
     /// A peer became unreachable.
     PeerUnreachable,
+    /// An operator paused the instance.
+    Pause,
+    /// An operator resumed the instance.
+    Resume,
+    /// An operator asked the instance to relinquish its addresses.
+    Relinquish,
+    /// An operator forced a role change.
+    ForceRole(highland_core::state::Role),
+}
+
+impl Instruction {
+    /// The instruction an operator pause sends.
+    #[must_use]
+    pub fn pause() -> Self {
+        Instruction::Pause
+    }
+
+    /// The instruction an operator resume sends.
+    #[must_use]
+    pub fn resume() -> Self {
+        Instruction::Resume
+    }
+
+    /// The instruction an operator relinquish sends.
+    #[must_use]
+    pub fn relinquish() -> Self {
+        Instruction::Relinquish
+    }
+
+    /// The instruction a forced role change sends, or `None` when the role name
+    /// is not one this daemon knows.
+    ///
+    /// A role is not accepted as a string, because `highland force-transition
+    /// --role sideways` should be a refusal rather than a silent no-op.
+    #[must_use]
+    pub fn force(role: &str) -> Option<Self> {
+        highland_core::state::Role::parse(role)
+            .ok()
+            .map(Instruction::ForceRole)
+    }
+
+    /// The name used in the audit record.
+    #[must_use]
+    pub fn operation(&self) -> &'static str {
+        match self {
+            Instruction::Event(_) => "event",
+            Instruction::Health(_) => "health",
+            Instruction::PeerReachable => "peer_reachable",
+            Instruction::PeerUnreachable => "peer_unreachable",
+            Instruction::Pause => "pause",
+            Instruction::Resume => "resume",
+            Instruction::Relinquish => "relinquish",
+            Instruction::ForceRole(_) => "force_transition",
+        }
+    }
 }
 
 /// The channel an instance's task receives on.
@@ -62,16 +117,30 @@ const IDLE_WAIT: Duration = Duration::from_secs(1);
 /// loop only reads it, so the two are interchangeable.
 pub async fn run_instance<C, B, T>(
     mut actor: InstanceActor<C, B, T>,
-    mut instructions: InstructionReceiver,
+    mut control: InstructionReceiver,
+    mut protocol: InstructionReceiver,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    registry: Option<std::sync::Arc<crate::control::StatusRegistry>>,
+    name: Option<String>,
 ) where
     C: Clock,
     B: NetworkBackend,
     T: crate::executor::Transport,
 {
+    // The registry is optional so a test can run a loop without one; when it is
+    // absent the machine is still the authority and simply has no reader.
+    let publish = |actor: &InstanceActor<C, B, T>| {
+        if let Some(registry) = &registry
+            && name.is_some()
+        {
+            registry.publish(actor.publish_status());
+        }
+    };
+
     // The instance is told it has started, which arms the startup delay and puts
     // it in election.
     actor.handle(Event::Startup).await;
+    publish(&actor);
 
     loop {
         if *shutdown.borrow() {
@@ -87,13 +156,22 @@ pub async fn run_instance<C, B, T>(
             // protocol traffic.
             _ = shutdown.changed() => {
                 actor.handle(Event::ShutdownRequested).await;
+                publish(&actor);
                 return;
             }
-            Some(instruction) = instructions.recv() => {
+            // The control channel first: an operator's request is never queued
+            // behind the wire.
+            Some(instruction) = control.recv() => {
                 apply(&mut actor, instruction).await;
+                publish(&actor);
+            }
+            Some(instruction) = protocol.recv() => {
+                apply(&mut actor, instruction).await;
+                publish(&actor);
             }
             () = tokio::time::sleep(wait) => {
                 let _ = actor.fire_due_timers().await;
+                publish(&actor);
             }
         }
     }
@@ -107,14 +185,19 @@ where
 {
     let event = match instruction {
         Instruction::Event(event) => event,
-        // A peer becoming reachable is an advertisement opportunity; becoming
-        // unreachable is not an event the machine takes, so it is recorded by
-        // the observability layer rather than by the state machine.
-        Instruction::PeerReachable => {
-            Event::TimerExpired(highland_core::state::TimerId::MasterDown)
-        }
-        Instruction::PeerUnreachable => return,
         Instruction::Health(summary) => Event::HealthChanged(summary),
+        // A peer becoming unreachable is not an event the machine takes. A peer
+        // that stops sending is already covered by the master-down timer, and
+        // inventing an event for it would give the wire a second way to change a
+        // role.
+        Instruction::PeerReachable | Instruction::PeerUnreachable => return,
+        Instruction::Pause => Event::OperatorPauseRequested,
+        Instruction::Resume => Event::OperatorResumeRequested,
+        Instruction::Relinquish => Event::OperatorRelinquishRequested,
+        Instruction::ForceRole(role) => Event::OperatorForceTransitionRequested {
+            target: role,
+            reason: "operator force-transition".to_owned(),
+        },
     };
     let _ = actor.handle(event).await;
 }

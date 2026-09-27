@@ -283,6 +283,12 @@ impl PeerSet {
         self.peers.is_empty()
     }
 
+    /// Returns every configured peer, in configuration order.
+    #[must_use]
+    pub fn list(&self) -> &[IpAddr] {
+        &self.peers
+    }
+
     /// Returns the peers of `family`, for a per-family socket.
     #[must_use]
     pub fn of_family(&self, family: IpFamily) -> Vec<IpAddr> {

@@ -8,8 +8,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ControlError, Result};
-
 /// The largest control request this release accepts (`L-14`).
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
 
@@ -66,6 +64,38 @@ pub enum ControlRequest {
 }
 
 impl ControlRequest {
+    /// The instance this request names, when it names one.
+    #[must_use]
+    pub fn as_instance(&self) -> Option<&str> {
+        match self {
+            ControlRequest::Show { instance }
+            | ControlRequest::Pause { instance }
+            | ControlRequest::Resume { instance }
+            | ControlRequest::Relinquish { instance }
+            | ControlRequest::ForceTransition { instance, .. } => Some(instance),
+            ControlRequest::Status
+            | ControlRequest::Instances
+            | ControlRequest::Events { .. }
+            | ControlRequest::Reload => None,
+        }
+    }
+
+    /// The stable name of this operation, for an audit record.
+    #[must_use]
+    pub fn operation(&self) -> &'static str {
+        match self {
+            ControlRequest::Status => "status",
+            ControlRequest::Instances => "instances",
+            ControlRequest::Show { .. } => "show",
+            ControlRequest::Events { .. } => "events",
+            ControlRequest::Reload => "reload",
+            ControlRequest::Pause { .. } => "pause",
+            ControlRequest::Resume { .. } => "resume",
+            ControlRequest::Relinquish { .. } => "relinquish",
+            ControlRequest::ForceTransition { .. } => "force_transition",
+        }
+    }
+
     /// Returns `true` when the operation changes runtime state and therefore
     /// requires confirmation and an audit event (`R-28`).
     #[must_use]
@@ -84,13 +114,16 @@ impl ControlRequest {
     ///
     /// # Errors
     ///
-    /// Returns [`ControlError::RequestTooLarge`] above [`MAX_REQUEST_BYTES`].
-    pub fn encode(&self) -> Result<String> {
-        let text = serde_json::to_string(self).map_err(|error| ControlError::MalformedRequest {
-            message: error.to_string(),
+    /// Returns [`MessageError::TooLarge`] above [`MAX_REQUEST_BYTES`].
+    pub fn encode(&self) -> std::result::Result<String, MessageError> {
+        let text = serde_json::to_string(self).map_err(|error| MessageError::Malformed {
+            reason: error.to_string(),
         })?;
         if text.len() > MAX_REQUEST_BYTES {
-            return Err(ControlError::RequestTooLarge { size: text.len() });
+            return Err(MessageError::TooLarge {
+                size: text.len(),
+                limit: MAX_REQUEST_BYTES,
+            });
         }
         Ok(text)
     }
@@ -99,14 +132,17 @@ impl ControlRequest {
     ///
     /// # Errors
     ///
-    /// Returns [`ControlError::RequestTooLarge`] above [`MAX_REQUEST_BYTES`] and
-    /// [`ControlError::MalformedRequest`] for anything else.
-    pub fn decode(line: &str) -> Result<Self> {
+    /// Returns [`MessageError::TooLarge`] above [`MAX_REQUEST_BYTES`] and
+    /// [`MessageError::Malformed`] for anything else.
+    pub fn decode(line: &str) -> std::result::Result<Self, MessageError> {
         if line.len() > MAX_REQUEST_BYTES {
-            return Err(ControlError::RequestTooLarge { size: line.len() });
+            return Err(MessageError::TooLarge {
+                size: line.len(),
+                limit: MAX_REQUEST_BYTES,
+            });
         }
-        serde_json::from_str(line).map_err(|error| ControlError::MalformedRequest {
-            message: error.to_string(),
+        serde_json::from_str(line).map_err(|error| MessageError::Malformed {
+            reason: error.to_string(),
         })
     }
 }
@@ -203,11 +239,11 @@ impl ControlResponse {
     ///
     /// # Errors
     ///
-    /// Returns [`ControlError::MalformedRequest`] when the response cannot be
+    /// Returns [`MessageError::Malformed`] when the response cannot be
     /// encoded.
-    pub fn encode(&self) -> Result<String> {
-        serde_json::to_string(self).map_err(|error| ControlError::MalformedRequest {
-            message: error.to_string(),
+    pub fn encode(&self) -> std::result::Result<String, MessageError> {
+        serde_json::to_string(self).map_err(|error| MessageError::Malformed {
+            reason: error.to_string(),
         })
     }
 
@@ -215,10 +251,10 @@ impl ControlResponse {
     ///
     /// # Errors
     ///
-    /// Returns [`ControlError::MalformedRequest`] for anything else.
-    pub fn decode(line: &str) -> Result<Self> {
-        serde_json::from_str(line).map_err(|error| ControlError::MalformedRequest {
-            message: error.to_string(),
+    /// Returns [`MessageError::Malformed`] for anything else.
+    pub fn decode(line: &str) -> std::result::Result<Self, MessageError> {
+        serde_json::from_str(line).map_err(|error| MessageError::Malformed {
+            reason: error.to_string(),
         })
     }
 }
@@ -300,14 +336,14 @@ mod tests {
         };
         assert!(matches!(
             request.encode(),
-            Err(ControlError::RequestTooLarge { .. })
+            Err(MessageError::TooLarge { .. })
         ));
     }
 
     #[test]
     fn a_malformed_request_names_the_problem() {
         let error = ControlRequest::decode("{not json").expect_err("rejects");
-        assert!(matches!(error, ControlError::MalformedRequest { .. }));
+        assert!(matches!(error, MessageError::Malformed { .. }));
     }
 
     #[test]
@@ -328,4 +364,28 @@ mod tests {
         let response = ControlResponse::ok(status);
         assert_eq!(response.status().map(|status| status.generation), Some(7));
     }
+}
+
+/// Why a control message could not be encoded or decoded.
+///
+/// The message types carry their own error rather than the transport's, so the
+/// CLI can decode a response without depending on anything the server owns.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum MessageError {
+    /// The message is larger than the framing allows.
+    #[error("a control message may be at most {limit} bytes, not {size}")]
+    TooLarge {
+        /// The size that was offered.
+        size: usize,
+        /// The limit that applies.
+        limit: usize,
+    },
+
+    /// The bytes are not a valid control message.
+    #[error("not a valid control message: {reason}")]
+    Malformed {
+        /// What went wrong.
+        reason: String,
+    },
 }

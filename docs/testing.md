@@ -153,6 +153,20 @@ same time. Two things follow, both learned by having them fail:
   if a parallel test is sending. Each socket test takes its own address out of
   `127/8`.
 
+## The control socket
+
+`crates/highland-control/tests/server.rs` drives a real socket with a real client:
+the mode is `0660`, a world-writable socket is refused, a malformed request gets a
+typed refusal, a flooding peer is rate limited, an oversized request is refused
+before it is parsed, and a client that says nothing is timed out.
+
+`crates/highland-daemon/tests/cli.rs` runs the real CLI against a real daemon in a
+namespace: it asks the node what it is doing, and it makes a master give up its
+address and checks the kernel released it.
+
+Both are behind `netlink-tests` or `cfg(unix)` and are run by
+`scripts/linux-tests.sh`.
+
 ## The two-node suite
 
 `crates/highland-daemon/tests/two_node.rs` is behind the `netlink-tests` feature

@@ -44,7 +44,7 @@ impl RateLimiter {
     /// Refills the bucket for `elapsed` and consumes one token.
     ///
     /// Returns `false` when no token is available, which the caller MUST turn
-    /// into [`ControlError::RateLimited`](crate::ControlError::RateLimited).
+    /// into a refusal, which the server sends as a `rate_limited` response.
     pub fn admit(&mut self, elapsed: std::time::Duration) -> bool {
         self.elapsed_nanos = self
             .elapsed_nanos

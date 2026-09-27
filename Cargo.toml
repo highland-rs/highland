@@ -54,7 +54,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 clap = { version = "4.5", features = ["derive"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-nix = { version = "0.31", default-features = false, features = ["net", "socket", "uio"] }
+nix = { version = "0.31", default-features = false, features = ["fs", "net", "socket", "uio", "user"] }
 # Only for the cmsg constants (`IP_TTL`, `IPV6_RECVHOPLIMIT`). `nix` re-exports
 # them, but the types it uses in its own signatures come from `libc`.
 libc = "0.2"

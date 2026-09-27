@@ -73,7 +73,22 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
         "highland started"
     );
 
-    let instances = start_instances(&daemon, &shutdown_rx).await?;
+    let registry = std::sync::Arc::new(crate::StatusRegistry::new(
+        daemon.config().node.name.clone(),
+    ));
+    registry.mark_started();
+
+    let mut service = crate::ControlService::new(
+        daemon.config().node.name.clone(),
+        std::sync::Arc::clone(&registry),
+        daemon.options().force_transition_enabled,
+    );
+
+    let instances = start_instances(&daemon, &shutdown_rx, &registry, &mut service).await?;
+
+    // The control socket is served after the instances exist, so the first
+    // `status` a client asks for already describes the real thing.
+    start_control_socket(&daemon, std::sync::Arc::new(service)).await?;
 
     let reason = loop {
         tokio::select! {
@@ -121,6 +136,8 @@ type RunningInstance = (String, tokio::task::JoinHandle<()>);
 async fn start_instances(
     daemon: &Daemon,
     shutdown_signal: &tokio::sync::watch::Receiver<bool>,
+    registry: &std::sync::Arc<crate::StatusRegistry>,
+    service: &mut crate::ControlService,
 ) -> Result<Vec<RunningInstance>, DaemonError> {
     let mut running = Vec::new();
     for (plan, ownership) in plans(daemon.config()) {
@@ -164,13 +181,30 @@ async fn start_instances(
             actor.set_primary_addresses(interface.primary_ipv4(), interface.primary_ipv6());
         }
 
+        // Two channels, two sources: one for the operator and one for the
+        // wire. Sharing one would let a flood of advertisements delay a
+        // `relinquish`.
         let (sender, receiver) = crate::channel();
-        let reader = transport.spawn_reader(sender);
+        let (reader_sender, reader_receiver) = crate::channel();
+        registry.publish(actor.publish_status());
+        service.register(plan.name.clone(), sender);
+
+        let reader = transport.spawn_reader(reader_sender);
         let watch = shutdown_signal.clone();
         let name = plan.name.clone();
 
+        let publishing_registry = std::sync::Arc::clone(registry);
+        let publishing_name = plan.name.clone();
         let handle = tokio::spawn(async move {
-            crate::run_instance(actor, receiver, watch).await;
+            crate::run_instance(
+                actor,
+                receiver,
+                reader_receiver,
+                watch,
+                Some(publishing_registry),
+                Some(publishing_name),
+            )
+            .await;
             // The reader stops with the actor: nothing outlives the instance
             // that owns it (`I-41`).
             reader.abort();
@@ -194,6 +228,8 @@ async fn start_instances(
 fn start_instances(
     _daemon: &Daemon,
     _shutdown_signal: &tokio::sync::watch::Receiver<bool>,
+    _registry: &std::sync::Arc<crate::StatusRegistry>,
+    _service: &mut crate::ControlService,
 ) -> impl std::future::Future<Output = Result<Vec<RunningInstance>, DaemonError>> {
     std::future::ready(Err(DaemonError::TransportUnavailable))
 }
@@ -254,6 +290,52 @@ async fn source_address(
             })
         }
     }
+}
+
+/// Serves the control socket for the lifetime of the process.
+///
+/// The socket is optional: an operator who never calls `highland status` gets a
+/// warning rather than a daemon that will not start, because a missing
+/// administrative interface is not a reason to stop forwarding addresses.
+#[cfg(target_os = "linux")]
+async fn start_control_socket(
+    daemon: &Daemon,
+    service: std::sync::Arc<crate::ControlService>,
+) -> Result<(), DaemonError> {
+    let settings = &daemon.config().control;
+    let policy = highland_control::SocketPolicy {
+        path: std::path::PathBuf::from(&settings.socket),
+        group: settings.group.clone(),
+        verify_peer_credentials: settings.verify_peer_credentials,
+        requests_per_second: 20,
+    };
+
+    match highland_control::Server::bind(service, policy).await {
+        Ok(server) => {
+            let path = server.path().display().to_string();
+            tracing::info!(socket = %path, "control socket listening");
+            tokio::spawn(async move {
+                if let Err(error) = server.serve().await {
+                    tracing::error!(error = %error, "control socket stopped");
+                }
+            });
+            Ok(())
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "continuing without a control socket");
+            Ok(())
+        }
+    }
+}
+
+/// The control API is portable even where VRRP is not, so this still serves a
+/// socket off Linux; only the Linux build needs to build one here.
+#[cfg(not(target_os = "linux"))]
+fn start_control_socket(
+    _daemon: &Daemon,
+    _service: std::sync::Arc<crate::ControlService>,
+) -> impl std::future::Future<Output = Result<(), DaemonError>> {
+    std::future::ready(Ok(()))
 }
 
 /// Re-reads the configuration file and reports the first reason it was

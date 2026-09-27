@@ -46,6 +46,7 @@ docker run --rm --privileged --cap-add=NET_ADMIN --cap-add=NET_RAW \
 		RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 		$( [ "$run_netlink" = 1 ] && echo "cargo test -p highland-net --features netlink-tests" )
 		$( [ "$run_netlink" = 1 ] && echo "cargo test -p highland-daemon --features netlink-tests" )
+		$( [ "$run_netlink" = 1 ] && echo "cargo test -p highland-control" )
 	"
 
 # The source is mounted read-only, so a `cargo fmt` fix has to happen on the

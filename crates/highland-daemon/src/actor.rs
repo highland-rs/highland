@@ -125,6 +125,8 @@ where
     /// without settling. That is a defect in the machine rather than a runtime
     /// condition, and a spinning actor would be far worse than a clear failure.
     pub async fn handle(&mut self, event: Event) -> Applied {
+        self.trace_incoming(&event);
+
         let mut applied: Vec<Action> = self.machine.handle(event);
         let mut round = 0;
         let mut queue: Vec<Action> = applied.clone();
@@ -138,6 +140,18 @@ where
 
             let mut produced = Vec::new();
             for action in queue.drain(..) {
+                // Every role change is announced with its reason. A failover
+                // that cannot be explained from the log is a failover nobody
+                // can debug (`D-08`, `R-33`).
+                if let Action::EnterRole { role, reason } = action {
+                    tracing::info!(
+                        instance = %self.machine.config().name,
+                        role = %role,
+                        reason = %reason,
+                        effective_priority = self.machine.effective_priority(),
+                        "role changed"
+                    );
+                }
                 if let Some(outcome) = self.executor.apply(&action).await {
                     produced.extend(self.machine.handle(outcome));
                 }
@@ -150,6 +164,58 @@ where
             role: self.machine.role(),
             ownership: self.machine.pending(),
             actions: applied,
+        }
+    }
+
+    /// Records an event the instance received, for the log.
+    fn trace_incoming(&self, event: &Event) {
+        match event {
+            Event::AdvertisementReceived(advertisement) => tracing::debug!(
+                instance = %self.machine.config().name,
+                peer = %advertisement.source,
+                vrid = advertisement.vrid,
+                priority = advertisement.priority,
+                "advertisement received"
+            ),
+            Event::Startup => tracing::info!(
+                instance = %self.machine.config().name,
+                vrid = self.machine.config().vrid,
+                priority = self.machine.config().priority,
+                interval = ?self.machine.config().advertisement_interval,
+                "instance starting"
+            ),
+            _ => {}
+        }
+    }
+
+    /// Publishes a status snapshot for the control API and the metrics.
+    ///
+    /// The snapshot exists because the actor owns its state machine and a reader
+    /// cannot ask the actor what its role is. Publishing after every event,
+    /// rather than on request, is what keeps the registry and the machine from
+    /// disagreeing about a role.
+    #[must_use]
+    pub fn publish_status(&self) -> crate::control::InstanceStatus {
+        let machine = self.machine();
+        crate::control::InstanceStatus {
+            name: machine.config().name.clone(),
+            role: machine.role().to_string(),
+            priority: machine.config().priority,
+            effective_priority: machine.effective_priority(),
+            owns_addresses: machine.owns_virtual_addresses(),
+            vip_addresses: self
+                .executor
+                .addresses()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            peers: self
+                .executor
+                .peers()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            last_reason: machine.last_reason().to_string(),
         }
     }
 

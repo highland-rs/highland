@@ -149,6 +149,8 @@ jobs:
         run: sudo -E env "PATH=$PATH" cargo test -p highland-net --features netlink-tests
       - name: two nodes, one segment, a VIP that moves
         run: sudo -E env "PATH=$PATH" cargo test -p highland-daemon --features netlink-tests
+      - name: an operator can read the node and stop it
+        run: sudo -E env "PATH=$PATH" cargo test -p highland-daemon --features netlink-tests --test cli
 
   # Packet loss, delay, and reordering between the nodes are the chaos
   # scenarios in SPEC.md 21.5. They arrive with the chaos harness.

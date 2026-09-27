@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 mod actor;
+mod control;
 mod driver;
 mod executor;
 mod logging;
@@ -26,6 +27,7 @@ mod shutdown;
 mod vrrp_transport;
 
 pub use actor::{Applied, InstanceActor};
+pub use control::{ControlService, InstanceStatus, StatusRegistry};
 pub use driver::{Instruction, InstructionReceiver, InstructionSender, channel, run_instance};
 pub use executor::{
     Executor, Ownership, RecordingTransport, TestHarness, Transport, TransportError,

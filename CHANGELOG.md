@@ -243,13 +243,62 @@ It found four real defects, none of which any amount of unit testing would have:
   - A present but partial `[logging]` table demanded every key, because a
     field-level `#[serde(default)]` only applies when the whole table is absent.
 
+### The control socket
+
+`highland status` is the first thing an operator runs, and until now nothing
+proved it worked. It does.
+
+- `highland-control` serves a Unix socket speaking newline-delimited JSON, with a
+  `Service` trait so the server has no opinion about VRRP. The daemon supplies the
+  behavior; the crate supplies authenticating, rate limiting, and framing.
+- The socket is created with mode `0660` and a world-writable socket is refused
+  at startup rather than served. A test asserts the mode on a real socket, and
+  another asserts the refusal.
+- Each peer is rate limited, an oversized request is refused before it is parsed,
+  a malformed request gets a typed refusal instead of a dropped connection, and a
+  client that connects and says nothing is timed out rather than holding a task
+  forever. Each has a test over a real socket.
+- Operator actions are audit records naming the peer. `force-transition` is
+  refused unless the daemon was started to allow it, and refuses again without an
+  explicit confirmation.
+- A status registry publishes each instance's role, priorities, addresses, and
+  last reason after every event, so the control API and the metrics can never
+  disagree with the state machine. An actor owns its machine, and a reader cannot
+  ask an actor what its role is; publishing is what closes that gap.
+- The daemon serves the socket after its instances exist, so the first `status`
+  already describes the real thing. A failure to bind is a warning, not a refusal
+  to start: an operator who never calls `highland status` should not lose
+  forwarding.
+
+Ten tests drive a real socket with a real client, and two more run the real CLI
+against a real daemon in a namespace: one asks it what it is doing, the other
+makes a master give up its address and checks the kernel released it.
+
+Three defects came out of writing them:
+
+  - The reader's channel had its receiver dropped on the line after it was
+    created, so the reader exited immediately and no advertisement was ever
+    delivered. The two-node test caught it as split brain, and the fix is why each
+    instance now has two channels: one for the wire, one for the operator, so a
+    flood of advertisements cannot delay a `relinquish`.
+  - A refusal from the daemon still exited zero, so a script running
+    `highland show nope && deploy` would have gone on to deploy. A refusal is now
+    a non-zero exit, printed as well as returned.
+  - A Unix socket path is capped at 108 bytes and an interface name at 15, and
+    both were discovered by a fixture being rejected with a confusing error. The
+    socket limit is now checked up front with a sentence an operator can act on,
+    and the test fixtures use names inside the limits.
+
 ### Not delivered, and why
 
-- **The control socket.** The message model exists and the CLI can encode it, but
-  nothing serves it yet, so `highland status` has no daemon to talk to.
 - **Metrics and transactional reload.** `SIGHUP` re-reads and re-validates the
   file and reports a rejection, but the result is not applied to running
-  instances, which is most of what "transactional" means.
+  instances, which is most of what "transactional" means. `highland reload` and
+  the control `reload` operation answer "not implemented" rather than pretending.
+- **The event stream.** `highland events` is wired to the socket and gets an
+  explicit "not implemented" rather than silence.
+- **Packet loss, delay, and reordering** between the nodes. The harness has one
+  healthy link; the chaos scenarios in `SPEC.md` 21.5 are not built.
 - **Gratuitous ARP**, which needs an `AF_PACKET` socket whose `sockaddr_ll` has no
   safe representation. It returns `NetError::Unsupported`, and the state machine
   already treats that failure as non-fatal.

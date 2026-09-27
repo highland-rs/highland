@@ -4,7 +4,7 @@
 
 use thiserror::Error;
 
-use crate::message::MAX_REQUEST_BYTES;
+use crate::server::MAX_SOCKET_PATH;
 
 /// Result alias for fallible control operations.
 pub type Result<T, E = ControlError> = std::result::Result<T, E>;
@@ -13,13 +13,24 @@ pub type Result<T, E = ControlError> = std::result::Result<T, E>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ControlError {
-    /// The socket could not be created, bound, or connected.
-    #[error("control socket {path} could not be used: {source}")]
+    /// The socket could not be created, bound, or used.
+    #[error("control socket {path} could not be used: {reason}")]
     Socket {
         /// The socket path.
         path: String,
-        /// The operating-system error.
-        source: std::io::Error,
+        /// What the operating system reported.
+        reason: String,
+    },
+
+    /// The socket path is longer than the platform allows.
+    #[error(
+        "control socket path {path} is {length} bytes; a Unix socket path may be at most {MAX_SOCKET_PATH}"
+    )]
+    SocketPathTooLong {
+        /// The path that was offered.
+        path: String,
+        /// How long it is.
+        length: usize,
     },
 
     /// The socket exists with permissions that are too permissive.
@@ -27,48 +38,30 @@ pub enum ControlError {
     InsecureSocket {
         /// The socket path.
         path: String,
-        /// The observed mode.
+        /// The mode that was observed.
         mode: u32,
     },
 
-    /// A request exceeded the size limit (`L-14`).
-    #[error("request is {size} bytes, above the {MAX_REQUEST_BYTES} byte limit")]
-    RequestTooLarge {
-        /// The observed size.
-        size: usize,
+    /// The configured group does not exist.
+    #[error("group {group} could not be resolved: {reason}")]
+    Group {
+        /// The group name from the configuration.
+        group: String,
+        /// Why it could not be resolved.
+        reason: String,
     },
 
-    /// A request was not valid JSON, or did not match the schema.
-    #[error("request is not a valid control request: {message}")]
-    MalformedRequest {
-        /// The diagnostic.
-        message: String,
+    /// Reading or writing a connection failed.
+    #[error("control connection failed: {reason}")]
+    Io {
+        /// What the operating system reported.
+        reason: String,
     },
 
-    /// The request referenced an instance the daemon does not have.
-    #[error("no instance named {name:?}")]
-    UnknownInstance {
-        /// The requested name.
-        name: String,
+    /// A message could not be encoded or decoded.
+    #[error("control protocol error: {reason}")]
+    Protocol {
+        /// What went wrong.
+        reason: String,
     },
-
-    /// The operation requires a flag the daemon was not started with.
-    #[error("{operation} is disabled; start the daemon with {flag}")]
-    OperationDisabled {
-        /// The operation that was refused.
-        operation: &'static str,
-        /// The flag that would enable it.
-        flag: &'static str,
-    },
-
-    /// The peer exceeded the request rate limit (`L-12`).
-    #[error("rate limit exceeded: at most {limit} requests per second are accepted")]
-    RateLimited {
-        /// The configured limit.
-        limit: u32,
-    },
-
-    /// The peer is not permitted to use the socket.
-    #[error("peer credentials are not permitted to use the control socket")]
-    Unauthorized,
 }

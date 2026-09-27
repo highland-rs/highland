@@ -242,17 +242,28 @@ async fn send(socket: &std::path::Path, request: ControlRequest, json: bool) -> 
         .await
         .with_context(|| format!("reading from {}", socket.display()))?;
 
+    let decoded = highland_control::ControlResponse::decode(response.trim_end())
+        .context("the daemon sent a response this client cannot read")?;
+
     if json {
         println!("{}", response.trim_end());
     } else {
-        print_human(response.trim_end())?;
+        print_human(&decoded);
     }
-    Ok(())
+
+    // A refusal from the daemon is a failure of the command, and the exit code
+    // has to say so: a script that runs `highland show nope && deploy` must not
+    // go on to deploy.
+    match &decoded {
+        highland_control::ControlResponse::Error { reason, message } => {
+            anyhow::bail!("{reason}: {message}")
+        }
+        _ => Ok(()),
+    }
 }
 
-/// Renders a response for a human reader, falling back to the raw line.
-fn print_human(response: &str) -> anyhow::Result<()> {
-    let decoded = highland_control::ControlResponse::decode(response)?;
+/// Renders a response for a human reader.
+fn print_human(decoded: &highland_control::ControlResponse) {
     match decoded {
         highland_control::ControlResponse::Ok { status } => {
             println!("node {} (generation {})", status.node, status.generation);
@@ -277,8 +288,9 @@ fn print_human(response: &str) -> anyhow::Result<()> {
             }
         }
         highland_control::ControlResponse::Error { reason, message } => {
+            // Printed as well as returned, so a human and a script see the same
+            // refusal.
             println!("error [{reason}]: {message}");
         }
     }
-    Ok(())
 }

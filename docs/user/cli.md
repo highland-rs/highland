@@ -23,7 +23,7 @@ These work with any command.
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--socket <PATH>` | `/run/highland/control.sock` | Which daemon to talk to |
+| `--socket <PATH>` | `/run/highland/control.sock` | Which daemon to talk to. A Unix socket path may be at most 107 bytes |
 | `--json` | off | Machine-readable output, where the command supports it |
 | `--version` | — | Print the version |
 | `--help` | — | Print usage |
@@ -75,17 +75,21 @@ Only pass `--allow-insecure-config` for a file on a trusted filesystem, such as
 one generated at boot. Highland refuses a world-writable file by default because
 anyone who can write it can name themselves as a trusted peer.
 
-**Today this command exits immediately**, with exit code 1:
+The configuration is loaded and validated first, so a broken file reports the
+broken file rather than a problem with the daemon. Each instance then binds a raw
+VRRP socket, opens the control socket, and runs until a signal arrives.
 
 ```console
 $ highland run --config /etc/highland/config.toml
-ERROR highland: the VRRP transport is not implemented; the daemon will not start
+INFO highland started node=node-a instances=1
+INFO instance started instance=api vrid=42 source=192.0.2.11 peers=1
+INFO role changed instance=api role=BACKUP reason=startup effective_priority=150
+INFO control socket listening socket=/run/highland/control.sock
 ```
 
-The configuration is loaded and validated first, so a broken file reports the
-broken file rather than this message. The refusal is deliberate: there is no raw
-VRRP socket yet, and a process that claims to be a VRRP router while sending
-nothing is worse than one that declines to start.
+On a build with no raw socket the daemon refuses to start, and says so. A process
+that claimed to be a VRRP router while sending nothing would be worse than one
+that declines to run.
 
 Highland handles three signals:
 
@@ -198,7 +202,8 @@ not implemented yet, so `--yes` is currently accepted and ignored.
 | Outcome | Exit code |
 |---|---|
 | Success | `0` |
-| Any error, including an unreachable daemon | `1` |
+| Any error, including a refusal from the daemon | `1` |
+| An unreachable daemon | `1` |
 
 Errors go to standard error as `highland: <message>`, so a script can capture
 them.
@@ -209,12 +214,18 @@ them.
 |---|---|
 | `version` | Works |
 | `check-config` | Works |
-| `run` | Loads and validates the configuration, then exits 1: the VRRP socket is not implemented |
-| `status`, `show`, `events`, `reload`, `pause`, `resume`, `relinquish`, `force-transition` | Need the control socket, which is not open yet |
+| `run` | Works |
+| `status`, `show` | Work |
+| `pause`, `resume`, `relinquish` | Work |
+| `force-transition` | Works, and needs the daemon started with `--enable-force-transition` |
+| `events` | Answers "not implemented" rather than hanging |
+| `reload` | Answers "not implemented": a reload is validated and reported, but not yet applied to running instances |
 
 `force-transition` additionally requires the daemon to have been started with
-`--enable-force-transition`. That flag is not wired up yet either, so the command
-is doubly unavailable today.
+`--enable-force-transition`, and refuses without an explicit confirmation.
+
+A refusal from the daemon is a non-zero exit, not just a printed message: a
+script that runs `highland show nope && deploy` must not go on to deploy.
 
 Everything above describes the intended behavior of each command, which is fixed
 and will not change. What changes is when it starts working; the

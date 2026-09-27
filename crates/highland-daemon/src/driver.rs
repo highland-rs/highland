@@ -121,6 +121,14 @@ pub fn channel() -> (InstructionSender, InstructionReceiver) {
 /// How long the loop waits when the machine holds no timers at all.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 
+/// How often the instance asks the kernel whether its interface is still usable.
+///
+/// Fast enough that a pulled cable is noticed in well under a second, which is
+/// the difference between relinquishing the address and leaving it claimed on a
+/// dead link until the master-down timer expires. Slow enough that a node with
+/// many instances is not asking the kernel a thousand times a second.
+const INTERFACE_POLL: Duration = Duration::from_millis(250);
+
 /// Runs one instance until `shutdown` resolves.
 ///
 /// `C` is the clock: in production a system clock, in tests a manual one. The
@@ -152,6 +160,19 @@ pub async fn run_instance<C, B, T>(
     actor.handle(Event::Startup).await;
     publish(&actor);
 
+    // The interface is watched continuously rather than consulted when an action
+    // fails. A node whose link went away has to stop claiming the address at
+    // once: waiting to find out from a failed netlink call means holding an
+    // address on a dead link for as long as the failure takes to notice, and the
+    // peer takes the address over meanwhile.
+    //
+    // `None` means "not known yet", so the first reading is not reported as a
+    // change: an instance that starts on a healthy interface must not be told its
+    // interface just came up.
+    let mut interface_usable: Option<bool> = None;
+    let mut monitor = tokio::time::interval(INTERFACE_POLL);
+    monitor.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
         if *shutdown.borrow() {
             actor.handle(Event::ShutdownRequested).await;
@@ -178,6 +199,28 @@ pub async fn run_instance<C, B, T>(
             Some(instruction) = protocol.recv() => {
                 apply(&mut actor, instruction).await;
                 publish(&actor);
+            }
+            _ = monitor.tick() => {
+                let usable = actor.interface_usable().await;
+                let event = match interface_usable {
+                    // A reading, not a change, is not an event. The first
+                    // reading is not a change either: an instance that starts on
+                    // a healthy interface has not just seen it come up.
+                    Some(before) if before == usable => None,
+                    Some(true) | None if !usable => Some(Event::InterfaceDown),
+                    _ => Some(Event::InterfaceUp),
+                };
+                interface_usable = Some(usable);
+                if let Some(event) = event {
+                    if matches!(event, Event::InterfaceDown) {
+                        tracing::warn!(
+                            instance = %actor.machine().config().name,
+                            "the interface is no longer usable"
+                        );
+                    }
+                    actor.handle(event).await;
+                    publish(&actor);
+                }
             }
             () = tokio::time::sleep(wait) => {
                 let _ = actor.fire_due_timers().await;

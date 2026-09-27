@@ -1566,6 +1566,12 @@ Each invariant is a named test requirement.
     lower-priority peer is discarded when preemption is enabled: it resets
     nothing, per RFC 5798 §6.4.2. An advertisement carrying priority zero sets
     the timer to `Skew_Time`.
+19. `I-47` A `MASTER` advertises every `Advertisement_Interval` for as long as it holds
+    ownership. Advertising once and stopping is indistinguishable from a dead node to every
+    peer, so the address would move on each `Master_Down_Interval`.
+20. `I-48` The instance's interface is watched continuously, and the loss of the interface or
+    of carrier causes the address to be relinquished without waiting for a timer to expire.
+    A node learns of a dead link by looking, not by having an operation fail.
 
 ---
 
@@ -1670,6 +1676,35 @@ Dropped, delayed, duplicated, and reordered advertisements; link flaps; address-
 address-remove failures; process pauses; clock jumps; slow checks; stale sockets; netlink
 errors; simultaneous election. Each chaos scenario asserts bounded recovery time and
 bounded event volume.
+
+Injected with `tc netem` on a single node's egress, never on the shared bridge, because
+the question is what one node does to its peer on its own. The scenarios are
+`crates/highland-daemon/tests/chaos.rs`:
+
+| Scenario | Injected | Asserted |
+|---|---|---|
+| Loss | 20% loss both ways, then 100% on the master | One master throughout, takeover inside the fault budget, no flapping once healed |
+| One-way partition | 100% loss on the master's egress | The peer takes the address by timing out; the healed segment converges to one master |
+| Reordering and duplication | 50% reordering, 10% duplication, 20ms delay | One master throughout, bounded role changes |
+| Link flap | `ip link down`, then up | Address handed over inside the budget, one master after the link returns |
+| Frozen process | `SIGSTOP`, then `SIGCONT` | The peer takes the address by timing out, and the segment converges once the node thaws |
+
+A scenario that recovered by flapping would fail: a flapping master moves the address
+again on every flap, which is worse for clients than a plain outage. Role changes are
+counted from the moment the election settles, because the startup election is a fixed cost
+that says nothing about stability.
+
+Two scenarios deliberately assert what a VRRP implementation *cannot* fix. While a node is
+frozen or partitioned it still believes it is `MASTER` and still holds the address, because
+no protocol message reaches it; the assertion is about recovery once the fault heals. This
+is the same fencing limitation §21.2 records for a killed node, and it is written down
+rather than hidden.
+
+The takeover budget after an injected fault is one `Advertisement_Interval` longer than
+`Master_Down_Interval`: a backup's timer is reset by every advertisement, so a fault landing
+between two advertisements is noticed only after up to a full interval of phase plus a full
+`Master_Down_Interval`. The failover suite's budget assumes a process that died at a known
+moment.
 
 ### 21.6 Compatibility tests `[1]`
 
@@ -1911,7 +1946,8 @@ a namespace; all `V-nn` for the `[I]` key set are enforced.
 ### Milestone 4 — Two-node integration `[I]`
 
 Namespace harness, master-failure tests, VIP movement, gratuitous ARP, configuration
-validation, graceful shutdown, control socket, metrics, reload.
+validation, graceful shutdown, control socket, metrics, reload, event history, and the
+§21.5 chaos scenarios.
 
 Exit (`M-05`): the §21.4 scenario passes deterministically in CI, reload is transactional,
 and timing budgets in §13.3 are asserted. This milestone is the **0.1.0 initial public

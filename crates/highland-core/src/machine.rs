@@ -636,6 +636,19 @@ where
                     actions.push(Action::SendAdvertisement {
                         priority: self.priority.effective,
                     });
+                    // The advertisement timer is periodic, so it is armed again
+                    // here rather than only at takeover. A master that
+                    // advertised once and then went quiet is indistinguishable
+                    // from a dead one to its peers: they would time it out and
+                    // take the address, and it would take it back on its next
+                    // master-down timer. The address would then move every
+                    // `Master_Down_Interval`, which is worse than an outage
+                    // because every client sees it.
+                    self.arm(
+                        TimerId::Advertisement,
+                        self.config.advertisement_interval,
+                        actions,
+                    );
                 }
             }
             TimerId::MasterDown => self.on_master_down(actions),

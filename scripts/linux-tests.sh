@@ -47,7 +47,11 @@ docker run --rm --privileged --cap-add=NET_ADMIN --cap-add=NET_RAW \
 		cargo test --workspace
 		RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 		$( [ "$run_netlink" = 1 ] && echo "cargo test -p highland-net --features netlink-tests" )
-		$( [ "$run_netlink" = 1 ] && echo "cargo test -p highland-daemon --features netlink-tests" )
+		# The daemon suites that build namespaces run one test at a time: they
+		# each create a bridge and a pair of namespaces, and their assertions are
+		# about elapsed time, so running several at once would have them
+		# competing for the same CPU and failing for the wrong reason.
+		$( [ "$run_netlink" = 1 ] && echo "cargo test -p highland-daemon --features netlink-tests -- --test-threads=1" )
 		$( [ "$run_netlink" = 1 ] && echo "cargo test -p highland-control" )
 	"
 

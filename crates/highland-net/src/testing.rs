@@ -76,6 +76,13 @@ pub enum Call {
 #[derive(Debug)]
 pub struct ScriptedBackend {
     script: Mutex<Vec<Outcome>>,
+    /// Outcomes for interface lookups, kept apart from the mutating operations.
+    ///
+    /// The daemon polls the interface continuously to notice a link going away,
+    /// so a single shared queue would let a failure scripted for an address add
+    /// be eaten by a poll. A scripted failure has to name the operation it
+    /// belongs to, or the test stops meaning anything.
+    interface_script: Mutex<Vec<Outcome>>,
     interfaces: Mutex<Vec<Interface>>,
     addresses: Mutex<Vec<(InterfaceId, IpCidr)>>,
     calls: Mutex<Vec<Call>>,
@@ -87,6 +94,7 @@ impl ScriptedBackend {
     pub fn new() -> Self {
         Self {
             script: Mutex::new(Vec::new()),
+            interface_script: Mutex::new(Vec::new()),
             interfaces: Mutex::new(Vec::new()),
             addresses: Mutex::new(Vec::new()),
             calls: Mutex::new(Vec::new()),
@@ -129,6 +137,27 @@ impl ScriptedBackend {
         self
     }
 
+    /// Sets the outcomes returned by successive interface lookups, in order.
+    #[must_use]
+    pub fn with_interface_outcomes(self, outcomes: impl IntoIterator<Item = Outcome>) -> Self {
+        if let Ok(mut script) = self.interface_script.lock() {
+            script.extend(outcomes);
+        }
+        self
+    }
+
+    /// Sets the link state an interface reports, so a test can take a link down.
+    ///
+    /// The daemon watches this, so it is how a test reproduces a cable pull
+    /// without a cable.
+    pub fn set_link_state(&self, name: &str, state: LinkState) {
+        if let Ok(mut list) = self.interfaces.lock()
+            && let Some(interface) = list.iter_mut().find(|interface| interface.name == name)
+        {
+            interface.state = state;
+        }
+    }
+
     /// Returns the interactions recorded so far, in order.
     #[must_use]
     pub fn calls(&self) -> Vec<Call> {
@@ -163,6 +192,20 @@ impl ScriptedBackend {
                 .find(|interface| interface.name == name)
                 .map(|interface| interface.id)
         })
+    }
+
+    fn next_interface_outcome(&self) -> Outcome {
+        self.interface_script
+            .lock()
+            .ok()
+            .and_then(|mut script| {
+                if script.is_empty() {
+                    None
+                } else {
+                    Some(script.remove(0))
+                }
+            })
+            .unwrap_or(Outcome::Ok)
     }
 
     fn next_outcome(&self) -> Outcome {
@@ -232,7 +275,7 @@ impl NetworkBackend for ScriptedBackend {
 impl ScriptedBackend {
     fn answer_interface(&self, name: &str) -> Result<Interface> {
         self.record(Call::Interface(name.to_owned()));
-        let outcome = self.next_outcome();
+        let outcome = self.next_interface_outcome();
         if !matches!(outcome, Outcome::Interface | Outcome::Ok) {
             return Err(error_for(&outcome));
         }

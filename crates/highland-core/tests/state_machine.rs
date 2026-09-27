@@ -1357,3 +1357,53 @@ fn i38_the_state_machine_cannot_wait_on_a_health_check() {
         "health adds no timer of its own"
     );
 }
+
+// ----- a master must keep advertising -------------------------------------
+
+/// A master that advertised once and then went quiet is dead as far as its peers
+/// are concerned: they time it out, take the address, and it takes the address
+/// back on its own master-down timer. The address then moves every
+/// `Master_Down_Interval`, which is worse for clients than a plain outage.
+///
+/// This is the invariant the advertisement timer being periodic. It was missing,
+/// and only a chaos suite running long enough with a lossy segment found it.
+#[test]
+fn a_master_re_arms_its_advertisement_timer_so_advertising_continues() {
+    let mut machine = machine_with(config());
+    startup(&mut machine);
+    promote(&mut machine);
+
+    // A full interval passes, so the advertisement is due.
+    machine.clock().advance(ADVERT);
+    let actions = machine.handle(Event::TimerExpired(TimerId::Advertisement));
+    assert!(
+        actions.contains(&Action::SendAdvertisement { priority: 150 }),
+        "the due advertisement was not sent: {actions:?}"
+    );
+
+    // And the next one is due too, which is the part that was broken.
+    machine.clock().advance(ADVERT);
+    let actions = machine.handle(Event::TimerExpired(TimerId::Advertisement));
+    assert!(
+        actions.contains(&Action::SendAdvertisement { priority: 150 }),
+        "advertising stopped after the first one: {actions:?}"
+    );
+
+    // Over a minute of advertising, a peer never sees a gap longer than one
+    // interval, which is the property a backup's master-down timer relies on.
+    let mut worst_gap = Duration::ZERO;
+    let mut since_advert = Duration::ZERO;
+    for _ in 0..60 {
+        machine.clock().advance(ADVERT / 2);
+        since_advert += ADVERT / 2;
+        let actions = machine.handle(Event::TimerExpired(TimerId::Advertisement));
+        if actions.contains(&Action::SendAdvertisement { priority: 150 }) {
+            worst_gap = worst_gap.max(since_advert);
+            since_advert = Duration::ZERO;
+        }
+    }
+    assert!(
+        worst_gap <= ADVERT,
+        "a peer would see a {worst_gap:?} gap between advertisements"
+    );
+}

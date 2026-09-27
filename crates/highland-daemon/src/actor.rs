@@ -252,6 +252,11 @@ where
         }
     }
 
+    /// Whether the instance's interface is usable, as the kernel reports it.
+    pub async fn interface_usable(&self) -> bool {
+        self.executor.interface_usable().await
+    }
+
     /// Records an event the instance received, for the log.
     fn trace_incoming(&self, event: &Event) {
         match event {

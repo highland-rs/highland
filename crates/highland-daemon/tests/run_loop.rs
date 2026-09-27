@@ -151,3 +151,111 @@ async fn the_instruction_channel_is_bounded() {
     assert_eq!(sender.max_capacity(), 64, "L-05: the queue is bounded");
     drop(receiver);
 }
+
+/// A node whose link goes away must stop claiming the address, and it must do so
+/// because it looked, not because an operation failed.
+///
+/// This is what the chaos suite's link-flap scenario exercises against a real
+/// kernel. Here it is checked against a scripted backend so the loop's own logic
+/// is covered without privileges, and so the assertion is about the loop rather
+/// than about the kernel's timing.
+#[tokio::test]
+async fn an_instance_releases_its_address_when_its_link_goes_away() {
+    let (handle, shutdown, _sender, _protocol, backend, transport) = spawn([]);
+
+    tokio::time::sleep(Duration::from_millis(3_600)).await;
+    assert!(!transport.sent().is_empty(), "the instance took over first");
+    let id = backend
+        .interface_id(INTERFACE)
+        .expect("the scripted interface is known");
+    assert!(
+        backend
+            .present()
+            .iter()
+            .any(|(interface, address)| *interface == id && *address == vip()),
+        "the master holds the address"
+    );
+
+    // The cable is pulled.
+    backend.set_link_state(INTERFACE, highland_net::LinkState::NoCarrier);
+
+    let released = wait_for(Duration::from_secs(5), || {
+        !backend
+            .present()
+            .iter()
+            .any(|(interface, address)| *interface == id && *address == vip())
+    })
+    .await;
+    assert!(
+        released,
+        "the instance kept the address on a dead link\ncalls: {:?}",
+        backend.calls()
+    );
+
+    // And it stays gone: an instance that re-added the address would be claiming
+    // it on a link it cannot use.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !backend
+            .present()
+            .iter()
+            .any(|(interface, address)| *interface == id && *address == vip()),
+        "the address came back while the link was down"
+    );
+
+    shutdown.send(true).expect("the watch channel is open");
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("the loop stops promptly")
+        .expect("the task did not panic");
+}
+
+/// The other end of the same scenario: the link comes back, and the instance
+/// rejoins the election rather than staying out of it for good.
+#[tokio::test]
+async fn an_instance_rejoins_the_election_when_its_link_comes_back() {
+    let (handle, shutdown, _sender, _protocol, backend, _transport) = spawn([]);
+    let id = backend
+        .interface_id(INTERFACE)
+        .expect("the scripted interface is known");
+
+    backend.set_link_state(INTERFACE, highland_net::LinkState::NoCarrier);
+    assert!(
+        wait_for(Duration::from_secs(5), || backend.calls().iter().any(
+            |call| *call == highland_net::Call::Interface(INTERFACE.to_owned())
+        ))
+        .await,
+        "the interface is never looked at, so a dead link would go unnoticed"
+    );
+
+    backend.set_link_state(INTERFACE, highland_net::LinkState::Up);
+    let took_over = wait_for(Duration::from_secs(6), || {
+        backend
+            .present()
+            .iter()
+            .any(|(interface, address)| *interface == id && *address == vip())
+    })
+    .await;
+    assert!(
+        took_over,
+        "the instance never rejoined the election after the link came back"
+    );
+
+    shutdown.send(true).expect("the watch channel is open");
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("the loop stops promptly")
+        .expect("the task did not panic");
+}
+
+/// Polls `condition` every 20ms until it holds or the budget runs out.
+async fn wait_for(budget: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let started = std::time::Instant::now();
+    while started.elapsed() < budget {
+        if condition() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    false
+}

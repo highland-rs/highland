@@ -229,6 +229,27 @@ where
         &self.ownership.addresses
     }
 
+    /// Reports whether the instance's interface is usable right now.
+    ///
+    /// Usable means administratively up *and* carrying, which is the pair the
+    /// specification requires before a node may claim an address (§14.1). An
+    /// interface that cannot be read at all counts as unusable: the kernel
+    /// cannot confirm the link, and a node that claims an address on a link it
+    /// cannot verify is how two nodes end up believing they are alone.
+    pub async fn interface_usable(&self) -> bool {
+        match self.backend.interface(&self.ownership.interface).await {
+            Ok(interface) => interface.is_usable(),
+            Err(error) => {
+                tracing::debug!(
+                    interface = %self.ownership.interface,
+                    %error,
+                    "the interface could not be read, treating it as unusable"
+                );
+                false
+            }
+        }
+    }
+
     /// Ensures the interface is known, looking it up once.
     async fn interface_id(&mut self) -> Result<highland_net::InterfaceId, Event> {
         if let Some(id) = self.interface {

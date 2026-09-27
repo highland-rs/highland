@@ -71,6 +71,12 @@ impl Node {
         run(&[
             "link", "add", "dev", &local_end, "type", "veth", "peer", "name", &peer_end,
         ]);
+        // The root-namespace end has to be up as well as the one inside the
+        // namespace: a veth with no carrier on the far side reports no carrier
+        // here, and a node whose interface has no carrier must not claim an
+        // address. The daemon checks that, so a harness that leaves this end
+        // down measures a node that is correctly refusing to take over.
+        run(&["link", "set", "dev", &local_end, "up"]);
         run(&["link", "set", "dev", &peer_end, "netns", &name]);
         run(&[
             "netns", "exec", &name, "ip", "link", "set", "dev", &peer_end, "name", INTERFACE,

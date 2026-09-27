@@ -69,6 +69,41 @@ pub struct CheckResult {
 }
 
 impl CheckResult {
+    /// Creates a result with an explicit status and latency.
+    ///
+    /// The constructors below are the ones production code should use; this one
+    /// exists for a scripted check, where the status is the point rather than an
+    /// outcome.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CheckError::EmptyReason`] when `reason` is blank.
+    pub fn new(
+        check: impl Into<String>,
+        status: CheckStatus,
+        latency: Option<Duration>,
+        observed_at: Instant,
+        generation: Generation,
+        sequence: u64,
+        reason: impl Into<String>,
+    ) -> Result<Self> {
+        let reason = reason.into();
+        if reason.trim().is_empty() {
+            return Err(CheckError::EmptyReason {
+                check: check.into(),
+            });
+        }
+        Ok(Self {
+            check: check.into(),
+            status,
+            latency,
+            reason,
+            observed_at,
+            generation,
+            sequence,
+        })
+    }
+
     /// Creates a passing result.
     ///
     /// # Errors
@@ -94,6 +129,37 @@ impl CheckResult {
         )
     }
 
+    /// Creates a result for a probe that exceeded its timeout.
+    ///
+    /// A timeout is a failure rather than a separate state (`SPEC.md` §15.3): a
+    /// probe that never answers says the service is not answering, and treating
+    /// that as anything other than a failure would leave an instance believing a
+    /// verdict that is no longer true.
+    ///
+    /// The sequence is the one the timed-out probe was given, already advanced, so
+    /// the next result supersedes this one instead of being discarded as stale.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CheckError::EmptyReason`] when `reason` is blank.
+    pub fn timed_out(
+        check: impl Into<String>,
+        observed_at: Instant,
+        generation: Generation,
+        sequence: u64,
+        timeout: Duration,
+    ) -> Result<Self> {
+        Self::new(
+            check,
+            CheckStatus::TimedOut,
+            None,
+            observed_at,
+            generation,
+            sequence,
+            format!("the probe did not answer within {timeout:?}"),
+        )
+    }
+
     /// Creates a failing result.
     ///
     /// # Errors
@@ -116,33 +182,6 @@ impl CheckResult {
             sequence,
             reason,
         )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        check: impl Into<String>,
-        status: CheckStatus,
-        latency: Option<Duration>,
-        observed_at: Instant,
-        generation: Generation,
-        sequence: u64,
-        reason: impl Into<String>,
-    ) -> Result<Self> {
-        let reason = reason.into();
-        if reason.trim().is_empty() {
-            return Err(CheckError::EmptyReason {
-                check: check.into(),
-            });
-        }
-        Ok(Self {
-            check: check.into(),
-            status,
-            latency,
-            reason,
-            observed_at,
-            generation,
-            sequence,
-        })
     }
 
     /// Returns `true` when this result is newer than `other`.

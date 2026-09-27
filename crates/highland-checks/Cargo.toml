@@ -21,6 +21,13 @@ command-checks = []
 [dependencies]
 highland-core.workspace = true
 thiserror.workspace = true
+# The probes are asynchronous and the scheduler bounds them, which is the whole
+# of `R-05`: a check that occupies a runtime worker while it waits on a socket is
+# a check that can stop a node's state machine from running.
+tokio = { workspace = true, features = ["net", "rt", "time", "sync", "io-util"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net"] }
 
 [lints]
 workspace = true

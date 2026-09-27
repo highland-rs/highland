@@ -3,6 +3,7 @@
 //! The check abstraction and its debounce state machine.
 
 use std::fmt;
+use std::pin::Pin;
 use std::time::Duration;
 
 use highland_core::state::Generation;
@@ -234,6 +235,12 @@ pub trait Check: Send + Sync + fmt::Debug {
 
     /// Runs one probe.
     ///
+    /// The future is boxed rather than declared with `impl Future`, and the
+    /// reason is the scheduler: one instance runs checks of *different* types —
+    /// a TCP connect and an HTTP request are not the same type — so they have to
+    /// sit in one collection to be scheduled together. A boxed future is one
+    /// allocation per probe, against a network round trip per probe.
+    ///
     /// # Errors
     ///
     /// Returns a [`CheckError`] describing why the probe could not be run. A
@@ -244,7 +251,7 @@ pub trait Check: Send + Sync + fmt::Debug {
         &self,
         generation: Generation,
         sequence: u64,
-    ) -> impl std::future::Future<Output = Result<CheckResult>> + Send;
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<CheckResult>> + Send + '_>>;
 }
 
 #[cfg(test)]

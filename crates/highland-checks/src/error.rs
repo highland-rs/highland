@@ -38,6 +38,33 @@ pub enum CheckError {
         threshold: &'static str,
     },
 
+    /// A check's target could not be used as configured.
+    ///
+    /// This is a configuration error found when the check is built, not a probe
+    /// failure: a check that can never succeed should stop the daemon starting
+    /// rather than fail on every interval forever.
+    #[error("check {check} cannot use {target}: {detail}")]
+    UnresolvableTarget {
+        /// The check whose target is unusable.
+        check: String,
+        /// The target as configured.
+        target: String,
+        /// What is wrong with it, in a sentence an operator can act on.
+        detail: String,
+    },
+
+    /// The state of an interface could not be read.
+    #[error("could not read the state of interface {interface}: {detail}")]
+    InterfaceUnreadable {
+        /// The interface the check asked about.
+        interface: String,
+        /// The underlying error, as text: the caller may have a typed error, and
+        /// this crate must not depend on where it came from. The field is not
+        /// called `source` because that name means "the error" to `thiserror`,
+        /// and a string is not one.
+        detail: String,
+    },
+
     /// A check type is not implemented in this release.
     #[error("check type {check_type} is not implemented in this release")]
     UnsupportedCheckType {

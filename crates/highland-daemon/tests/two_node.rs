@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use support::{
     A_ADDRESS, B_ADDRESS, BridgeGuard, Node, Observer, VIRTUAL_ADDRESS as VIP, bridge, wait_for,
+    wait_stable,
 };
 
 /// `Master_Down_Interval` for a one-second interval at priority 150 (SPEC.md §13.3).
@@ -120,12 +121,15 @@ fn a_takeover_announces_the_address_to_the_segment() {
     first.start();
     second.start();
 
-    let elected = wait_for("one node holds the VIP", Duration::from_secs(10), || {
+    // Settled, not merely elected: two nodes whose timers expire together both
+    // take the address until the tie is broken, and this test needs to know which
+    // one the segment will end up with before it reads the neighbour's cache.
+    let elected = wait_stable("one node holds the VIP", Duration::from_secs(2), || {
         usize::from(first.holds_vip()) + usize::from(second.holds_vip()) == 1
     });
     assert!(
         elected,
-        "no node took {VIP}\n--- a ---\n{}\n--- b ---\n{}",
+        "the election never settled on one node\n--- a ---\n{}\n--- b ---\n{}",
         first.log(),
         second.log()
     );

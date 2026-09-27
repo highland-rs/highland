@@ -328,6 +328,35 @@ address = "{vip}/24"
     )
 }
 
+/// Polls `condition` until it has held for `window` in a row, or the budget runs
+/// out.
+///
+/// A single observation is not stability, and the difference is what a test is
+/// about. "Exactly one master" observed once is a snapshot that can sit inside a
+/// dual-master startup — two nodes whose master-down timers expire together both
+/// take the address until the tie is broken, which is authentic VRRP and takes as
+/// long as it takes each to hear the other. A test that injects a fault into that
+/// window blames the fault for a split brain that was already happening.
+#[must_use]
+pub fn wait_stable(label: &str, window: Duration, mut condition: impl FnMut() -> bool) -> bool {
+    let started = Instant::now();
+    let mut held_since = None;
+    while started.elapsed() < window * 4 {
+        if condition() {
+            let since = *held_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= window {
+                tracing::info!("{label} after {:?}", started.elapsed());
+                return true;
+            }
+        } else {
+            held_since = None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    tracing::warn!("{label}: never held for {window:?}");
+    false
+}
+
 /// Polls `condition` until it holds or the budget runs out.
 pub fn wait_for(label: &str, budget: Duration, mut condition: impl FnMut() -> bool) -> bool {
     let started = Instant::now();

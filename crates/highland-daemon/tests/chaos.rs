@@ -30,7 +30,9 @@ mod support;
 
 use std::time::{Duration, Instant};
 
-use support::{A_ADDRESS, B_ADDRESS, BridgeGuard, Node, VIRTUAL_ADDRESS as VIP, bridge, wait_for};
+use support::{
+    A_ADDRESS, B_ADDRESS, BridgeGuard, Node, VIRTUAL_ADDRESS as VIP, bridge, wait_for, wait_stable,
+};
 
 /// The budget for a takeover after a fault is injected.
 ///
@@ -125,14 +127,20 @@ fn elected_with_priorities(preempt: bool, first_priority: u8, second_priority: u
     );
 
     // Wait for the election to *settle* rather than merely complete. Two nodes
-    // whose master-down timers expire together both take the address for a
-    // moment before the tie is broken, which is authentic VRRP; a scenario that
-    // started inside that window would be testing the startup race instead of
-    // the fault it is about.
-    let stable = wait_for("the election settled", Duration::from_secs(5), || {
+    // whose master-down timers expire together both take the address until the
+    // tie is broken, which is authentic VRRP and takes as long as it takes each
+    // to hear the other. A scenario that started inside that window would be
+    // testing the startup race instead of the fault it is about, and would
+    // blame the fault for a split brain that was already there.
+    let stable = wait_stable("the election settled", SETTLE, || {
         usize::from(first.holds_vip()) + usize::from(second.holds_vip()) == 1
     });
-    assert!(stable, "the election never settled on one node");
+    assert!(
+        stable,
+        "the election never settled on one node\n--- a ---\n{}\n--- b ---\n{}",
+        first.log(),
+        second.log()
+    );
 
     Segment {
         first,

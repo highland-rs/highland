@@ -11,19 +11,24 @@
 
 #![cfg(all(target_os = "linux", feature = "netlink-tests"))]
 
-use std::net::IpAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// The instance under test.
+/// The address both nodes fight over.
 const VIP: &str = "192.0.2.100";
-const ADDRESS: &str = "192.0.2.21";
 const INTERFACE: &str = "eth0";
+
+/// The first address a node may use, in the documentation range.
+///
+/// Each node takes one, because the tests run at once and two interfaces with
+/// the same address on one segment make every packet ambiguous.
+const FIRST_NODE_ADDRESS: u8 = 21;
 
 struct Node {
     namespace: String,
     directory: PathBuf,
+    metrics_address: String,
     daemon: Option<Child>,
 }
 
@@ -51,6 +56,12 @@ impl Node {
             .nth(3)
             .and_then(|text| text.parse().ok())
             .unwrap_or(0);
+        // The node's own address, its side of the veth, and the port it exports
+        // metrics on all derive from the serial, so parallel tests cannot
+        // collide.
+        let octet = FIRST_NODE_ADDRESS + u8::try_from(serial % 16).unwrap_or(0);
+        let address = format!("192.0.2.{octet}");
+        let metrics_port = 19990 + u16::try_from(serial).unwrap_or(0);
         let _ = Command::new("ip").args(["netns", "del", &name]).output();
 
         let stem = Self::short(serial);
@@ -74,7 +85,7 @@ impl Node {
             "ip",
             "addr",
             "add",
-            &format!("{ADDRESS}/24"),
+            &format!("{address}/24"),
             "dev",
             INTERFACE,
         ]);
@@ -87,11 +98,18 @@ impl Node {
         std::fs::create_dir_all(&directory).expect("the instance directory can be created");
         let socket = directory.join("control.sock");
         let socket_text = socket.to_string_lossy().to_string();
+        // The endpoint is bound to the node's own address, not to loopback, and
+        // the test reaches it from outside the namespace. A network namespace
+        // has its own loopback, so binding to 127.0.0.1 would prove nothing
+        // about reachability, and a scrape endpoint that only answers on
+        // loopback is one no scraper outside the host can use.
+        let metrics_listen = format!("{address}:{metrics_port}");
         std::fs::write(
             directory.join("config.toml"),
             format!(
                 "schema_version = 1\n\
                  \n[node]\nname = \"cli\"\n\
+                 \n[metrics]\nenabled = true\nlisten = \"{metrics_listen}\"\n\
                  \n[control]\nsocket = \"{socket_text}\"\n\
                  \n[[instance]]\nname = \"api\"\ninterface = \"{INTERFACE}\"\n\
                  vrid = 42\npriority = 150\nadvertisement_interval = \"1s\"\n\
@@ -117,6 +135,7 @@ impl Node {
         Self {
             namespace: name,
             directory,
+            metrics_address: format!("{address}:{metrics_port}"),
             daemon: Some(daemon),
         }
     }
@@ -345,7 +364,97 @@ fn holds_vip(node: &Node) -> bool {
 
 /// The test file keeps these so the address and the interface are stated once.
 #[allow(dead_code, reason = "documents the fixture")]
-const _FIXTURE: (&str, &str, &str) = (VIP, ADDRESS, INTERFACE);
+const _FIXTURE: (&str, &str) = (VIP, INTERFACE);
 
-#[allow(dead_code, reason = "documents the fixture")]
-fn _unused(_: &Path, _: IpAddr) {}
+/// A scraper must be able to read the node the same way an operator can, and
+/// both views must agree: the status comes from the registry, and so do the
+/// metrics.
+#[test]
+fn metrics_and_status_agree_about_the_node() {
+    let node = Node::start("metrics");
+    assert!(wait_for_socket(&node), "no control socket:\n{}", node.log());
+
+    // Metrics are enabled on this node's configuration, so the endpoint must
+    // answer while the instance is still starting.
+    // The scrape runs inside the node's namespace, against the node's own
+    // address. A namespace has its own loopback and its own routes, so a scrape
+    // from the test's own namespace would be testing a different network stack
+    // entirely. The endpoint is bound to the node's address rather than to
+    // loopback on purpose: an exporter that only answers on loopback is one no
+    // scraper on the host can use.
+    let address = node.metrics_address.clone();
+    let started = Instant::now();
+    let mut body = String::new();
+    while started.elapsed() < Duration::from_secs(10) {
+        let (ok, text) = scrape_in_namespace(&node, &address);
+        if ok && text.contains("highland_up") {
+            body = text;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        body.contains("highland_up 1"),
+        "the endpoint never answered at {address}\n--- daemon ---\n{}\n--- metrics ---\n{body}",
+        node.log()
+    );
+
+    // Once the node is master, the role in the metrics must match the role the
+    // control API reports, because both are rendered from the same registry.
+    let started = Instant::now();
+    let mut agreed = false;
+    while started.elapsed() < Duration::from_secs(10) {
+        let (_, status) = cli(&node, &["status", "--json"]);
+        let (_, text) = scrape_in_namespace(&node, &address);
+        if status.contains("\"role\":\"MASTER\"")
+            && text.contains("highland_instance_role{instance=\"api\"} 2")
+        {
+            agreed = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let (_, status) = cli(&node, &["status", "--json"]);
+    let (_, text) = scrape_in_namespace(&node, &address);
+    assert!(
+        agreed,
+        "the two views disagree\\n--- status ---\\n{status}\\n--- metrics ---\\n{text}"
+    );
+    assert!(
+        text.contains("highland_advertisements_sent_total{instance=\"api\",family=\"v4\"}"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "highland_instance_transitions_total{instance=\"api\",from=\"BACKUP\",to=\"MASTER\"}"
+        ),
+        "the transition that took ownership is counted: {text}"
+    );
+    assert!(
+        text.contains("highland_control_requests_total"),
+        "control requests are counted: {text}"
+    );
+}
+
+/// Scrapes the metrics endpoint from inside the node's namespace.
+///
+/// The daemon ships no HTTP client, and a test that pulled one in would be
+/// testing that client as much as the server. `curl` is already needed by the
+/// image the kernel tests run in, so the test uses it rather than a dependency.
+fn scrape_in_namespace(node: &Node, address: &str) -> (bool, String) {
+    let url = format!("http://{address}/metrics");
+    let output = Command::new("ip")
+        .args(["netns", "exec", &node.namespace])
+        .args(["curl", "--silent", "--show-error", "--max-time", "2"])
+        .arg(&url)
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            (true, String::from_utf8_lossy(&output.stdout).into_owned())
+        }
+        Ok(output) => (false, String::from_utf8_lossy(&output.stderr).into_owned()),
+        Err(error) => (false, error.to_string()),
+    }
+}

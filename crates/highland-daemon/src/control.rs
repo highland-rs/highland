@@ -162,6 +162,7 @@ pub struct ControlService {
     registry: Arc<StatusRegistry>,
     instances: BTreeMap<String, InstructionSender>,
     force_transition_enabled: bool,
+    metrics: Option<Arc<crate::Metrics>>,
 }
 
 impl ControlService {
@@ -177,7 +178,15 @@ impl ControlService {
             registry,
             instances: BTreeMap::new(),
             force_transition_enabled,
+            metrics: None,
         }
+    }
+
+    /// Attaches the metrics this service reports to.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<crate::Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Registers an instance's instruction channel.
@@ -209,6 +218,7 @@ impl Service for ControlService {
         request: ControlRequest,
         peer: PeerIdentity,
     ) -> impl std::future::Future<Output = ControlResponse> + Send {
+        let operation = request.operation();
         let response = match request {
             ControlRequest::Status | ControlRequest::Instances => {
                 ControlResponse::ok(self.registry.node_status())
@@ -258,6 +268,16 @@ impl Service for ControlService {
                 }
             }
         };
+        // Every request is counted, whether it was answered or refused: a client
+        // hammering an endpoint it cannot use is exactly what a rate limit and a
+        // counter are for.
+        if let Some(metrics) = &self.metrics {
+            let result = match &response {
+                highland_control::ControlResponse::Error { .. } => "error",
+                _ => "ok",
+            };
+            metrics.record_control_request(operation, result);
+        }
         std::future::ready(response)
     }
 }

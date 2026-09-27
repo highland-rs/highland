@@ -161,8 +161,14 @@ typed refusal, a flooding peer is rate limited, an oversized request is refused
 before it is parsed, and a client that says nothing is timed out.
 
 `crates/highland-daemon/tests/cli.rs` runs the real CLI against a real daemon in a
-namespace: it asks the node what it is doing, and it makes a master give up its
-address and checks the kernel released it.
+namespace: it asks the node what it is doing, it makes a master give up its
+address and checks the kernel released it, and it scrapes the metrics endpoint to
+confirm the two views agree about the role.
+
+The scrape runs *inside* the node's namespace, against the node's own address. A
+network namespace has its own loopback and its own routes, so a scrape from the
+test's own namespace would be exercising a different network stack, and an
+exporter bound to loopback would answer without proving it is reachable.
 
 Both are behind `netlink-tests` or `cfg(unix)` and are run by
 `scripts/linux-tests.sh`.

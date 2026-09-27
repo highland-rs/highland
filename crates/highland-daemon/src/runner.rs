@@ -77,14 +77,22 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
         daemon.config().node.name.clone(),
     ));
     registry.mark_started();
+    let metrics = crate::Metrics::shared();
+
+    // Started before the instances, so a scraper that arrives immediately sees
+    // `highland_up` and a node that is still starting rather than a refused
+    // connection.
+    start_metrics_endpoint(&daemon, &registry, &metrics);
 
     let mut service = crate::ControlService::new(
         daemon.config().node.name.clone(),
         std::sync::Arc::clone(&registry),
         daemon.options().force_transition_enabled,
-    );
+    )
+    .with_metrics(std::sync::Arc::clone(&metrics));
 
-    let instances = start_instances(&daemon, &shutdown_rx, &registry, &mut service).await?;
+    let instances =
+        start_instances(&daemon, &shutdown_rx, &registry, &metrics, &mut service).await?;
 
     // The control socket is served after the instances exist, so the first
     // `status` a client asks for already describes the real thing.
@@ -97,15 +105,18 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
             // `SIGHUP` reloads and continues. Once the sequence above has been
             // chosen, a second termination signal is ignored, which keeps
             // shutdown idempotent (`I-31`).
-            _ = reload.recv() => {
-                match reload_config(&daemon.options().config_path) {
-                    Ok(()) => announce(&daemon, "reload_accepted"),
-                    Err(reason) => {
-                        announce(&daemon, "reload_rejected");
-                        tracing::error!(reason = %reason, "reload rejected; the running configuration is unchanged");
-                    }
+            _ = reload.recv() => match reload_config(&daemon.options().config_path) {
+                Ok(()) => {
+                    metrics.record_reload("accepted");
+                    announce(&daemon, "reload_accepted");
+                    tracing::warn!("the configuration was accepted but is not applied yet");
                 }
-            }
+                Err(reason) => {
+                    metrics.record_reload("rejected");
+                    announce(&daemon, "reload_rejected");
+                    tracing::error!(reason = %reason, "reload rejected; the running configuration is unchanged");
+                }
+            },
         }
     };
 
@@ -137,6 +148,7 @@ async fn start_instances(
     daemon: &Daemon,
     shutdown_signal: &tokio::sync::watch::Receiver<bool>,
     registry: &std::sync::Arc<crate::StatusRegistry>,
+    metrics: &std::sync::Arc<crate::Metrics>,
     service: &mut crate::ControlService,
 ) -> Result<Vec<RunningInstance>, DaemonError> {
     let mut running = Vec::new();
@@ -157,6 +169,7 @@ async fn start_instances(
                 &ownership.interface,
                 source,
                 ownership.peers.clone(),
+                std::sync::Arc::clone(metrics),
             )
             .map_err(|error| DaemonError::Runtime(format!("instance {}: {error}", plan.name)))?,
         );
@@ -171,7 +184,8 @@ async fn start_instances(
             ownership,
             backend.clone(),
             transport.clone(),
-        );
+        )
+        .with_metrics(std::sync::Arc::clone(metrics));
 
         // The machine needs its own address to resolve an equal-priority
         // advertisement, which is exactly what two nodes starting together
@@ -229,6 +243,7 @@ fn start_instances(
     _daemon: &Daemon,
     _shutdown_signal: &tokio::sync::watch::Receiver<bool>,
     _registry: &std::sync::Arc<crate::StatusRegistry>,
+    _metrics: &std::sync::Arc<crate::Metrics>,
     _service: &mut crate::ControlService,
 ) -> impl std::future::Future<Output = Result<Vec<RunningInstance>, DaemonError>> {
     std::future::ready(Err(DaemonError::TransportUnavailable))
@@ -290,6 +305,53 @@ async fn source_address(
             })
         }
     }
+}
+
+/// Serves the Prometheus endpoint, if one is configured.
+///
+/// A failure to bind is a warning, not a refusal to start. Metrics are for a
+/// scraper; forwarding addresses are for clients, and a node that will not take
+/// traffic because its exporter could not bind would be a surprising node.
+#[cfg(target_os = "linux")]
+fn start_metrics_endpoint(
+    daemon: &Daemon,
+    registry: &std::sync::Arc<crate::StatusRegistry>,
+    metrics: &std::sync::Arc<crate::Metrics>,
+) {
+    let settings = &daemon.config().metrics;
+    if !settings.enabled {
+        return;
+    }
+    let Some(listen) = settings.listen.as_deref() else {
+        tracing::warn!("metrics are enabled but no listen address is set; continuing without them");
+        return;
+    };
+    let Ok(address) = listen.parse::<std::net::SocketAddr>() else {
+        tracing::warn!(
+            listen,
+            "metrics listen address is not a socket address; continuing without them"
+        );
+        return;
+    };
+
+    let server = crate::MetricsServer::new(
+        std::sync::Arc::clone(metrics),
+        std::sync::Arc::clone(registry),
+        env!("CARGO_PKG_VERSION"),
+    );
+    tokio::spawn(async move {
+        if let Err(error) = server.serve(address).await {
+            tracing::warn!(error = %error, "continuing without a metrics endpoint");
+        }
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+fn start_metrics_endpoint(
+    _daemon: &Daemon,
+    _registry: &std::sync::Arc<crate::StatusRegistry>,
+    _metrics: &std::sync::Arc<crate::Metrics>,
+) {
 }
 
 /// Serves the control socket for the lifetime of the process.

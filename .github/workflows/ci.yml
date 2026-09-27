@@ -143,8 +143,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: install iproute2
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2
+      - name: install test tooling
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 curl
       - name: netlink against a real kernel
         run: sudo -E env "PATH=$PATH" cargo test -p highland-net --features netlink-tests
       - name: two nodes, one segment, a VIP that moves

@@ -38,7 +38,9 @@ docker run --rm --privileged --cap-add=NET_ADMIN --cap-add=NET_RAW \
 		# toolchain already present can override IMAGE.
 		if ! command -v ip >/dev/null 2>&1; then
 			apt-get update -qq
-			apt-get install -y -qq --no-install-recommends iproute2
+			# curl scrapes the metrics endpoint from inside a namespace, since
+			# a namespace has its own loopback and its own routes.
+			apt-get install -y -qq --no-install-recommends iproute2 curl
 		fi
 		cargo fmt --all --check
 		cargo clippy --workspace --all-targets --all-features -- -D warnings

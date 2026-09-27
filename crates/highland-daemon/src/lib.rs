@@ -19,6 +19,8 @@ mod control;
 mod driver;
 mod executor;
 mod logging;
+mod metrics;
+mod metrics_server;
 mod options;
 mod runner;
 
@@ -32,6 +34,8 @@ pub use driver::{Instruction, InstructionReceiver, InstructionSender, channel, r
 pub use executor::{
     Executor, Ownership, RecordingTransport, TestHarness, Transport, TransportError,
 };
+pub use metrics::{CONTENT_TYPE, Metrics, render};
+pub use metrics_server::{MetricsError, MetricsServer};
 pub use options::{InstancePlan, Options, OptionsError};
 pub use runner::{TRANSPORT_AVAILABLE, plan_for, plans, run};
 

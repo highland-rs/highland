@@ -289,12 +289,49 @@ Three defects came out of writing them:
     socket limit is now checked up front with a sentence an operator can act on,
     and the test fixtures use names inside the limits.
 
+### The metrics endpoint
+
+A scraper can read what the daemon is doing, and cannot be told something the
+control API would disagree with.
+
+- `highland-observe` gained the metric primitives: counters, gauges, histograms,
+  and a Prometheus text renderer. It depends on nothing but `serde` and
+  `thiserror`, because a metrics library that drags in a web framework is a
+  metrics library that cannot be tested.
+- Cardinality is a property of the type, not of discipline: label values are
+  fixed when a series is declared, and a rejection reason outside the known set
+  is folded into `other`. A test asserts that a peer address fed in as a reason
+  never appears in a label (`R-20`, `L-10`).
+- A metric that has never fired still appears, as zero. A dashboard that breaks
+  when a node has nothing wrong with it is a dashboard that breaks on the wrong
+  day.
+- The endpoint is four lines of HTTP rather than a framework, it answers `GET`,
+  refuses anything else, states its `Content-Length` so a scraper knows when the
+  body ends, and times out a client that connects and says nothing.
+- Both views come from one status registry, so the role in a scrape and the role
+  from `highland status` are the same fact read twice. The test asserts exactly
+  that, and it is the reason the control API had to be built first.
+- Metrics are bound to the node's address, not to loopback, and the test scrapes
+  from inside the node's namespace: a namespace has its own loopback and its own
+  routes, so a scrape from the test's namespace would be testing a different
+  network stack.
+
+**Only series with a producer are exported.** `highland_check_failures_total` and
+`highland_check_duration_seconds` are named in `SPEC.md` §16.2 but have nothing
+producing them until the checks land in Milestone 6, and a metric that is always
+zero is a lie about the system. They are absent on purpose, and a test asserts
+they are.
+
+A poisoned metrics lock is recovered from rather than propagated: a panic in a
+counter must not stop a node that owns a VIP.
+
 ### Not delivered, and why
 
-- **Metrics and transactional reload.** `SIGHUP` re-reads and re-validates the
-  file and reports a rejection, but the result is not applied to running
-  instances, which is most of what "transactional" means. `highland reload` and
-  the control `reload` operation answer "not implemented" rather than pretending.
+- **Transactional reload.** `SIGHUP` re-reads and re-validates the file and
+  reports the outcome, and the outcome is counted, but the result is not applied
+  to running instances, which is most of what "transactional" means. `highland
+  reload` and the control `reload` operation answer "not implemented" rather than
+  pretending.
 - **The event stream.** `highland events` is wired to the socket and gets an
   explicit "not implemented" rather than silence.
 - **Packet loss, delay, and reordering** between the nodes. The harness has one

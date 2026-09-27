@@ -41,6 +41,9 @@ pub const READER_INTERVAL: Duration = Duration::from_millis(2);
 pub struct VrrpTransport {
     inner: Arc<SocketTransport>,
     vrid: u8,
+    name: String,
+    metrics: Arc<crate::Metrics>,
+    family: &'static str,
 }
 
 impl VrrpTransport {
@@ -55,6 +58,7 @@ impl VrrpTransport {
         interface: &str,
         source: IpAddr,
         peers: PeerSet,
+        metrics: Arc<crate::Metrics>,
     ) -> Result<Self, TransportError> {
         // The instance speaks the family of the address it owns, and a
         // configuration with no peer in that family is refused rather than
@@ -72,7 +76,22 @@ impl VrrpTransport {
         Ok(Self {
             inner: Arc::new(inner),
             vrid: plan.vrid,
+            name: plan.name.clone(),
+            metrics,
+            family: Self::family_name(family),
         })
+    }
+
+    /// The label value for an address family.
+    ///
+    /// A family this build does not know is labelled `other`, so a future family
+    /// cannot add an unbounded label (`R-20`).
+    fn family_name(family: highland_vrrp::IpFamily) -> &'static str {
+        match family {
+            highland_vrrp::IpFamily::V4 => "v4",
+            highland_vrrp::IpFamily::V6 => "v6",
+            _ => "other",
+        }
     }
 
     /// Returns the peers this transport sends to.
@@ -132,6 +151,9 @@ impl VrrpTransport {
                             source: accepted.source,
                             advert_interval: advertisement.advert_interval(),
                         });
+                        transport
+                            .metrics
+                            .record_advertisement_received(&transport.name, transport.family);
                         if instructions
                             .send(crate::Instruction::Event(event))
                             .await
@@ -143,7 +165,17 @@ impl VrrpTransport {
                     // A rejected datagram is counted, not delivered. There is
                     // nothing to do with it here, and inventing an event for it
                     // would let an unauthenticated peer drive the machine.
-                    Ok(None | Some(Accepted::Rejected(_))) => {}
+                    Ok(Some(Accepted::Rejected(reason))) => {
+                        // Counted, never delivered. An unauthenticated peer must
+                        // not be able to move a role, and must not be able to
+                        // grow the metric set either (`R-20`).
+                        transport.metrics.record_rejection(
+                            &transport.name,
+                            reason.as_str(),
+                            crate::Metrics::known_rejections(),
+                        );
+                    }
+                    Ok(None) => {}
                     Err(_) => {
                         // The socket failed. A reader that cannot read is not
                         // useful, and the instance will fault on its own timer
@@ -166,7 +198,16 @@ impl Transport for VrrpTransport {
         let answer = self
             .inner
             .send(advertisement)
-            .map(|sent| sent.destinations)
+            .map(|sent| {
+                // Counted per successful send, so a scraper reads the number of
+                // datagrams that actually went out rather than the number of
+                // attempts.
+                for _ in 0..sent.destinations {
+                    self.metrics
+                        .record_advertisement_sent(&self.name, self.family);
+                }
+                sent.destinations
+            })
             .map_err(|error| TransportError::Unavailable {
                 reason: error.to_string(),
             });

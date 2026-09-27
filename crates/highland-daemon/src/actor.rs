@@ -46,6 +46,8 @@ const MAX_ROUNDS: usize = 16;
 pub struct InstanceActor<C, B, T> {
     machine: InstanceStateMachine<C>,
     executor: Executor<B, T>,
+    metrics: Option<Arc<crate::Metrics>>,
+    previous_role: highland_core::state::Role,
 }
 
 impl<C, B, T> InstanceActor<C, B, T>
@@ -76,7 +78,20 @@ where
         };
         let machine = InstanceStateMachine::new(machine_config, clock);
         let executor = Executor::new(backend, transport, plan, ownership);
-        Self { machine, executor }
+        Self {
+            machine,
+            executor,
+            metrics: None,
+            previous_role: highland_core::state::Role::Init,
+        }
+    }
+
+    /// Attaches the metrics this actor reports to.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<crate::Metrics>) -> Self {
+        self.executor.set_metrics(std::sync::Arc::clone(&metrics));
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Returns the state machine, for inspection and for the status API.
@@ -151,6 +166,17 @@ where
                         effective_priority = self.machine.effective_priority(),
                         "role changed"
                     );
+                    if let Some(metrics) = &self.metrics {
+                        metrics.record_transition(
+                            &self.machine.config().name,
+                            &self.previous_role.to_string(),
+                            &role.to_string(),
+                        );
+                        if reason == highland_core::state::TransitionReason::MasterDownTimeout {
+                            metrics.record_master_down(&self.machine.config().name);
+                        }
+                        self.previous_role = role;
+                    }
                 }
                 if let Some(outcome) = self.executor.apply(&action).await {
                     produced.extend(self.machine.handle(outcome));

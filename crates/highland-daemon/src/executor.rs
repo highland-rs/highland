@@ -158,6 +158,7 @@ pub struct Executor<B, T> {
     plan: InstancePlan,
     ownership: Ownership,
     interface: Option<highland_net::InterfaceId>,
+    metrics: Option<Arc<crate::Metrics>>,
 }
 
 impl<B, T> Executor<B, T>
@@ -179,6 +180,22 @@ where
             plan,
             ownership,
             interface: None,
+            metrics: None,
+        }
+    }
+
+    /// Attaches the metrics the executor reports to.
+    pub fn set_metrics(&mut self, metrics: Arc<crate::Metrics>) {
+        self.metrics = Some(metrics);
+    }
+
+    /// Records one metric, when metrics are attached.
+    ///
+    /// A test drives an executor with no metrics rather than a zeroed registry,
+    /// so the accounting is optional in the same way the clock is.
+    fn record_metric(&self, record: impl FnOnce(&crate::Metrics)) {
+        if let Some(metrics) = &self.metrics {
+            record(metrics);
         }
     }
 
@@ -253,8 +270,9 @@ where
             Ok(id) => id,
             Err(event) => return Some(event),
         };
-        for address in self.ownership.addresses.clone() {
+        for address in self.addresses().to_vec() {
             if let Err(error) = self.backend.add_address(id, address).await {
+                self.record_metric(|metrics| metrics.record_vip_add_failure(&self.plan.name));
                 return Some(Event::ActionFailed {
                     kind: ActionKind::AddAddresses,
                     error: error.to_string(),
@@ -271,8 +289,9 @@ where
             Ok(id) => id,
             Err(event) => return Some(event),
         };
-        for address in self.ownership.addresses.clone() {
+        for address in self.addresses().to_vec() {
             if let Err(error) = self.backend.remove_address(id, address).await {
+                self.record_metric(|metrics| metrics.record_vip_remove_failure(&self.plan.name));
                 return Some(Event::ActionFailed {
                     kind: ActionKind::RemoveAddresses,
                     error: error.to_string(),
@@ -290,7 +309,7 @@ where
             Err(event) => return Some(event),
         };
         let mut failures = Vec::new();
-        for address in self.ownership.addresses.clone() {
+        for address in self.addresses().to_vec() {
             let _ = address;
             failures.push(
                 self.backend

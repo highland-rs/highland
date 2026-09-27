@@ -10,6 +10,11 @@ use crate::{Daemon, DaemonError, Options};
 #[cfg(target_os = "linux")]
 use std::net::IpAddr;
 
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+
 use highland_config::{Config, InstanceConfig, ValidationContext, load, validate};
 use highland_net::{IpCidr, PeerSet};
 use highland_observe::EventSink as _;
@@ -94,32 +99,44 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
     // connection.
     start_metrics_endpoint(&daemon, &registry, &metrics);
 
+    // The event history comes before the reload handle, which comes before the
+    // service: the service holds both, and the handle starts with no channels
+    // and is given them as instances start.
+    let event_log = std::sync::Arc::new(crate::EventLog::new());
+    let reload_handle = std::sync::Arc::new(ReloadHandle::new(
+        daemon.options().config_path.clone(),
+        daemon.config(),
+        std::sync::Arc::clone(&registry),
+        std::collections::BTreeMap::new(),
+        std::sync::Arc::clone(&metrics),
+    ));
+
     let mut service = crate::ControlService::new(
         daemon.config().node.name.clone(),
         std::sync::Arc::clone(&registry),
         daemon.options().force_transition_enabled,
     )
-    .with_metrics(std::sync::Arc::clone(&metrics));
+    .with_metrics(std::sync::Arc::clone(&metrics))
+    .with_reload(std::sync::Arc::clone(&reload_handle))
+    .with_events(std::sync::Arc::clone(&event_log));
 
     // The configuration a reload compares against, and the channels it applies
     // to. The instance map is shared with the control service, so a reload
     // reaches exactly the instances an operator does.
-    let active_config = std::sync::Mutex::new(daemon.config().clone());
-    let senders = std::sync::Arc::new(std::sync::Mutex::new(service.channels().clone()));
-
     let instances = start_instances(
         &daemon,
         &shutdown_rx,
         &registry,
         &metrics,
         &mut service,
-        &senders,
+        &reload_handle,
+        &event_log,
     )
     .await?;
 
     // The control socket is served after the instances exist, so the first
     // `status` a client asks for already describes the real thing.
-    start_control_socket(&daemon, std::sync::Arc::new(service)).await?;
+    start_control_socket(&daemon, std::sync::Arc::new(service), event_log).await?;
 
     let reason = loop {
         tokio::select! {
@@ -129,22 +146,11 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
             // chosen, a second termination signal is ignored, which keeps
             // shutdown idempotent (`I-31`).
             _ = reload.recv() => {
-                tracing::info!("reload requested");
-                let outcome = crate::runner::reload(
-                    &daemon.options().config_path,
-                    &locked(&active_config),
-                    &registry,
-                    &senders,
-                    registry.node_status().generation,
-                );
-                match outcome {
-                    ReloadOutcome::Applied { generation, reloadable, added, config } => {
-                        metrics.record_reload("accepted");
+                // The same handle the control API holds, so a `SIGHUP` and a
+                // `highland reload` cannot disagree about what a reload does.
+                match reload_handle.reload() {
+                    ReloadOutcome::Applied { generation, reloadable, added, .. } => {
                         announce(&daemon, "reload_accepted");
-                        // The running configuration is replaced, so the next
-                        // reload compares against what is actually running and
-                        // not against the file the daemon started from.
-                        *locked(&active_config) = *config;
                         tracing::info!(
                             generation,
                             reconfigured = reloadable.len(),
@@ -153,7 +159,6 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
                         );
                     }
                     ReloadOutcome::Rejected { reason } => {
-                        metrics.record_reload("rejected");
                         announce(&daemon, "reload_rejected");
                         tracing::error!(reason = %reason, "reload rejected; the running configuration is unchanged");
                     }
@@ -192,9 +197,8 @@ async fn start_instances(
     registry: &std::sync::Arc<crate::StatusRegistry>,
     metrics: &std::sync::Arc<crate::Metrics>,
     service: &mut crate::ControlService,
-    senders: &std::sync::Arc<
-        std::sync::Mutex<std::collections::BTreeMap<String, crate::InstructionSender>>,
-    >,
+    reload: &std::sync::Arc<ReloadHandle>,
+    log: &std::sync::Arc<crate::EventLog>,
 ) -> Result<Vec<RunningInstance>, DaemonError> {
     let mut running = Vec::new();
     for (plan, ownership) in plans(daemon.config()) {
@@ -230,7 +234,11 @@ async fn start_instances(
             backend.clone(),
             transport.clone(),
         )
-        .with_metrics(std::sync::Arc::clone(metrics));
+        .with_metrics(std::sync::Arc::clone(metrics))
+        .with_events(
+            daemon.config().node.name.clone(),
+            std::sync::Arc::clone(log),
+        );
 
         // The machine needs its own address to resolve an equal-priority
         // advertisement, which is exactly what two nodes starting together
@@ -246,10 +254,9 @@ async fn start_instances(
         let (sender, receiver) = crate::channel();
         let (reader_sender, reader_receiver) = crate::channel();
         registry.publish(actor.publish_status());
+        log.record_instance(&daemon.config().node.name, &actor.publish_status());
         service.register(plan.name.clone(), sender.clone());
-        if let Ok(mut channels) = senders.lock() {
-            channels.insert(plan.name.clone(), sender);
-        }
+        reload.register(plan.name.clone(), sender);
 
         let reader = transport.spawn_reader(reader_sender);
         let watch = shutdown_signal.clone();
@@ -293,9 +300,8 @@ fn start_instances(
     _registry: &std::sync::Arc<crate::StatusRegistry>,
     _metrics: &std::sync::Arc<crate::Metrics>,
     _service: &mut crate::ControlService,
-    _senders: &std::sync::Arc<
-        std::sync::Mutex<std::collections::BTreeMap<String, crate::InstructionSender>>,
-    >,
+    _reload: &std::sync::Arc<ReloadHandle>,
+    _log: &std::sync::Arc<crate::EventLog>,
 ) -> impl std::future::Future<Output = Result<Vec<RunningInstance>, DaemonError>> {
     std::future::ready(Err(DaemonError::TransportUnavailable))
 }
@@ -414,6 +420,7 @@ fn start_metrics_endpoint(
 async fn start_control_socket(
     daemon: &Daemon,
     service: std::sync::Arc<crate::ControlService>,
+    log: std::sync::Arc<crate::EventLog>,
 ) -> Result<(), DaemonError> {
     let settings = &daemon.config().control;
     let policy = highland_control::SocketPolicy {
@@ -447,6 +454,7 @@ async fn start_control_socket(
 fn start_control_socket(
     _daemon: &Daemon,
     _service: std::sync::Arc<crate::ControlService>,
+    _log: std::sync::Arc<crate::EventLog>,
 ) -> impl std::future::Future<Output = Result<(), DaemonError>> {
     std::future::ready(Ok(()))
 }
@@ -457,12 +465,6 @@ fn start_control_socket(
 /// VIP, so the data is taken even from a poisoned lock. The worst case is a
 /// reload compared against a stale configuration, which the next reload
 /// corrects.
-fn locked<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
 /// What a reload decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReloadOutcome {
@@ -485,79 +487,145 @@ pub enum ReloadOutcome {
     },
 }
 
-/// Reads the candidate configuration, plans the change, and applies it.
+/// A reload, shared by the signal loop and the control API.
 ///
-/// A reload is a transaction (`I-09`, `R-46`): if any instance would need a
-/// restart, nothing is applied and the refusal names the instance and the change.
-/// The caller keeps the configuration that is actually running, so the next
-/// reload compares against reality rather than against the file it started from.
-pub fn reload(
-    path: &std::path::Path,
-    running: &Config,
-    registry: &crate::StatusRegistry,
-    senders: &std::sync::Mutex<std::collections::BTreeMap<String, crate::InstructionSender>>,
-    current_generation: u64,
-) -> ReloadOutcome {
-    let candidate = match load(path, false) {
-        Ok(candidate) => candidate,
-        Err(error) => {
+/// One handle, one implementation: a `SIGHUP` and `highland reload` must not be
+/// able to disagree about what a reload does, so both call the same code against
+/// the same state.
+#[derive(Debug)]
+pub struct ReloadHandle {
+    path: PathBuf,
+    running: Mutex<Config>,
+    registry: Arc<crate::StatusRegistry>,
+    senders: Mutex<BTreeMap<String, crate::InstructionSender>>,
+    metrics: Arc<crate::Metrics>,
+    generation: AtomicU64,
+}
+
+impl ReloadHandle {
+    /// Creates a handle for `path`, starting from the configuration the daemon
+    /// loaded.
+    #[must_use]
+    pub fn new(
+        path: PathBuf,
+        running: &Config,
+        registry: Arc<crate::StatusRegistry>,
+        senders: BTreeMap<String, crate::InstructionSender>,
+        metrics: Arc<crate::Metrics>,
+    ) -> Self {
+        Self {
+            path,
+            running: Mutex::new(running.clone()),
+            registry,
+            senders: Mutex::new(senders),
+            metrics,
+            generation: AtomicU64::new(0),
+        }
+    }
+
+    /// Registers an instance's channel, so a reload reaches it.
+    pub fn register(&self, name: String, sender: crate::InstructionSender) {
+        if let Ok(mut senders) = self.senders.lock() {
+            senders.insert(name, sender);
+        }
+    }
+
+    /// Forgets an instance that is going away.
+    pub fn forget(&self, name: &str) {
+        if let Ok(mut senders) = self.senders.lock() {
+            senders.remove(name);
+        }
+    }
+
+    /// The generation currently in force.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    /// Reads the candidate configuration, plans the change, and applies it.
+    ///
+    /// A reload is a transaction (`I-09`, `R-46`): if any instance would need
+    /// a restart, nothing is applied and the refusal names the instance and the
+    /// change. Applying bumps the generation, so a result still carrying the old
+    /// one is discarded (`R-47`).
+    pub fn reload(&self) -> ReloadOutcome {
+        let candidate = match load(&self.path, false) {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.metrics.record_reload("rejected");
+                return ReloadOutcome::Rejected {
+                    reason: error.to_string(),
+                };
+            }
+        };
+        if let Err(violations) = validate(&candidate, &ValidationContext::permissive()) {
+            self.metrics.record_reload("rejected");
+            let reason = violations
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return ReloadOutcome::Rejected { reason };
+        }
+
+        let running = Self::lock(&self.running).clone();
+        let plan = crate::reload::plan(&running, &candidate);
+        if !plan.is_applicable() {
+            // Nothing has been touched at this point, and nothing will be.
+            self.metrics.record_reload("rejected");
             return ReloadOutcome::Rejected {
-                reason: error.to_string(),
+                reason: plan.refusals().join("; "),
             };
         }
-    };
-    if let Err(violations) = validate(&candidate, &ValidationContext::permissive()) {
-        let reason = violations
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("; ");
-        return ReloadOutcome::Rejected { reason };
-    }
 
-    let plan = crate::reload::plan(running, &candidate);
-    if !plan.is_applicable() {
-        // Nothing has been touched at this point, and nothing will be.
-        return ReloadOutcome::Rejected {
-            reason: plan.refusals().join("; "),
-        };
-    }
-
-    let generation = current_generation + 1;
-    let mut reloadable = Vec::new();
-    for (name, change) in &plan.changes {
-        if !matches!(change, crate::reload::Change::Reloadable { .. }) {
-            continue;
+        let generation = self.generation() + 1;
+        let mut reloadable = Vec::new();
+        for (name, change) in &plan.changes {
+            if !matches!(change, crate::reload::Change::Reloadable { .. }) {
+                continue;
+            }
+            let Some(instance) = candidate
+                .instances
+                .iter()
+                .find(|instance| &instance.name == name)
+            else {
+                continue;
+            };
+            let Some(sender) = Self::lock(&self.senders).get(name).cloned() else {
+                continue;
+            };
+            let instruction = crate::Instruction::Reload {
+                plan: crate::reload::plan_for(instance),
+                ownership: ownership_for(instance),
+                generation: highland_core::state::Generation::from_number(generation),
+            };
+            // `try_send`, not `send`: a reload must not wait behind a flood of
+            // advertisements, and an undelivered reload is reported as
+            // unapplied rather than half-applied.
+            if sender.try_send(instruction).is_ok() {
+                reloadable.push(name.clone());
+            }
         }
-        let Some(instance) = candidate
-            .instances
-            .iter()
-            .find(|instance| &instance.name == name)
-        else {
-            continue;
-        };
-        let Some(sender) = senders.lock().ok().and_then(|map| map.get(name).cloned()) else {
-            continue;
-        };
-        let instruction = crate::Instruction::Reload {
-            plan: crate::reload::plan_for(instance),
-            ownership: ownership_for(instance),
-            generation: highland_core::state::Generation::from_number(generation),
-        };
-        // `try_send`, not `send`: a reload must not wait behind a flood of
-        // advertisements, and an undelivered reload is reported as unapplied
-        // rather than half-applied.
-        if sender.try_send(instruction).is_ok() {
-            reloadable.push(name.clone());
+
+        *Self::lock(&self.running) = candidate.clone();
+        self.generation.store(generation, Ordering::Relaxed);
+        self.registry.set_generation(generation);
+        self.metrics.record_reload("accepted");
+        ReloadOutcome::Applied {
+            generation,
+            reloadable,
+            added: plan.added().into_iter().map(ToOwned::to_owned).collect(),
+            config: Box::new(candidate),
         }
     }
 
-    registry.set_generation(generation);
-    ReloadOutcome::Applied {
-        generation,
-        reloadable,
-        added: plan.added().into_iter().map(ToOwned::to_owned).collect(),
-        config: Box::new(candidate),
+    fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+        // A panic while recording a reload outcome must not stop a node that owns
+        // a VIP, so the data is taken even from a poisoned lock. The worst case is
+        // a reload compared against a stale configuration, which the next reload
+        // corrects.
+        mutex.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -727,14 +795,16 @@ address = "192.0.2.10/24"
     #[test]
     fn an_unreadable_reload_is_rejected_and_changes_nothing() {
         let registry = std::sync::Arc::new(crate::StatusRegistry::new("node-a"));
-        let senders = std::sync::Mutex::new(std::collections::BTreeMap::new());
-        let outcome = reload(
-            std::path::Path::new("/nonexistent/highland.toml"),
+        let metrics = crate::Metrics::shared();
+        let handle = ReloadHandle::new(
+            std::path::PathBuf::from("/nonexistent/highland.toml"),
             &empty_config(),
-            &registry,
-            &senders,
-            0,
+            std::sync::Arc::clone(&registry),
+            std::collections::BTreeMap::new(),
+            metrics,
         );
+
+        let outcome = handle.reload();
 
         assert!(
             matches!(outcome, ReloadOutcome::Rejected { .. }),
@@ -745,5 +815,17 @@ address = "192.0.2.10/24"
             0,
             "a rejected reload bumps nothing"
         );
+    }
+
+    #[test]
+    fn a_fresh_handle_starts_at_generation_zero() {
+        let handle = ReloadHandle::new(
+            std::path::PathBuf::from("/nonexistent/highland.toml"),
+            &empty_config(),
+            std::sync::Arc::new(crate::StatusRegistry::new("node-a")),
+            std::collections::BTreeMap::new(),
+            crate::Metrics::shared(),
+        );
+        assert_eq!(handle.generation(), 0);
     }
 }

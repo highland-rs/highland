@@ -560,3 +560,109 @@ fn a_reload_is_applied_in_place_or_refused_whole() {
         node.log()
     );
 }
+
+/// A reload over the control socket and a `SIGHUP` must be the same reload.
+/// They used to be two different code paths, and the test exists because that is
+/// how they drift apart.
+#[test]
+fn a_reload_over_the_socket_applies_and_refuses_whole() {
+    let node = Node::start("sockreload");
+    assert!(wait_for_socket(&node), "no control socket:\n{}", node.log());
+
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        let (ok, text) = cli(&node, &["status", "--json"]);
+        if ok && text.contains("\"vips_owned\":true") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // A priority change is reloadable, so the socket applies it.
+    node.rewrite_config(|text| text.replace("priority = 150", "priority = 90"));
+    let (ok, text) = cli(&node, &["reload", "--yes", "--json"]);
+    assert!(
+        ok,
+        "the reload over the socket failed: {text}\n--- daemon ---\n{}",
+        node.log()
+    );
+    assert!(
+        text.contains("\"generation\":1"),
+        "the generation advanced: {text}"
+    );
+
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        let (_, status) = cli(&node, &["status", "--json"]);
+        if status.contains("\"priority\":90") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let (_, applied) = cli(&node, &["status", "--json"]);
+    assert!(
+        applied.contains("\"priority\":90"),
+        "the reload did not reach the instance: {applied}"
+    );
+    assert!(
+        applied.contains("\"vips_owned\":true"),
+        "and it must not move the address: {applied}"
+    );
+
+    // A VIP change is not reloadable, so the socket refuses it and changes
+    // nothing.
+    node.rewrite_config(|text| text.replace("192.0.2.100/24", "192.0.2.101/24"));
+    let (ok, text) = cli(&node, &["reload", "--yes", "--json"]);
+    assert!(!ok, "a refused reload is a failure: {text}");
+    assert!(text.contains("reload_rejected"), "and it says why: {text}");
+
+    let (_, refused) = cli(&node, &["status", "--json"]);
+    assert!(
+        refused.contains("\"priority\":90"),
+        "the applied reload stands: {refused}"
+    );
+    assert!(
+        !refused.contains("192.0.2.101"),
+        "the refused reload changed nothing: {refused}"
+    );
+}
+
+/// The event history is what happened, not a reconstruction, and a follower
+/// asks for what it has not seen.
+#[test]
+fn the_event_history_records_what_happened() {
+    let node = Node::start("events");
+    assert!(wait_for_socket(&node), "no control socket:\n{}", node.log());
+
+    // Let the instance take over, so there is a transition to report.
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        let (ok, text) = cli(&node, &["status", "--json"]);
+        if ok && text.contains("\"role\":\"MASTER\"") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    let (ok, history) = cli(&node, &["events", "--json", "--limit", "200"]);
+    assert!(ok, "events failed: {history}");
+
+    let transitions = history.matches("\"name\":\"role_transition\"").count();
+    assert!(transitions >= 2, "the takeover must be recorded: {history}");
+    assert!(
+        history.contains("master_down_timeout"),
+        "with its reason: {history}"
+    );
+    assert!(
+        history.contains("\"sequence\""),
+        "and a cursor, so a follower can resume: {history}"
+    );
+
+    // A cursor past the end returns nothing new, which is what makes following
+    // cheap rather than a re-read of the whole buffer.
+    let (_, none) = cli(&node, &["events", "--json", "--since", "100000"]);
+    assert!(
+        !none.contains("role_transition"),
+        "asking past the end returns nothing: {none}"
+    );
+}

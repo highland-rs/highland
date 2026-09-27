@@ -48,6 +48,8 @@ pub struct InstanceActor<C, B, T> {
     machine: InstanceStateMachine<C>,
     executor: Executor<B, T>,
     metrics: Option<Arc<crate::Metrics>>,
+    log: Option<Arc<crate::EventLog>>,
+    node: String,
     previous_role: highland_core::state::Role,
 }
 
@@ -83,8 +85,18 @@ where
             machine,
             executor,
             metrics: None,
+            log: None,
+            node: String::new(),
             previous_role: highland_core::state::Role::Init,
         }
+    }
+
+    /// Attaches the node name and the event history this actor reports to.
+    #[must_use]
+    pub fn with_events(mut self, node: impl Into<String>, log: Arc<crate::EventLog>) -> Self {
+        self.node = node.into();
+        self.log = Some(log);
+        self
     }
 
     /// Attaches the metrics this actor reports to.
@@ -195,6 +207,17 @@ where
                 // that cannot be explained from the log is a failover nobody
                 // can debug (`D-08`, `R-33`).
                 if let Action::EnterRole { role, reason } = action {
+                    if let Some(log) = &self.log {
+                        // Recorded as it happens, so `highland events` is the
+                        // history that occurred rather than a reconstruction.
+                        log.record_transition(
+                            &self.node,
+                            &self.machine.config().name,
+                            &self.previous_role.to_string(),
+                            &role.to_string(),
+                            &reason.to_string(),
+                        );
+                    }
                     tracing::info!(
                         instance = %self.machine.config().name,
                         role = %role,

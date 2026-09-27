@@ -13,7 +13,7 @@ use std::process::ExitCode;
 use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use highland_config::{ValidationContext, load_and_validate};
-use highland_control::{ControlRequest, MAX_REQUEST_BYTES};
+use highland_control::{ControlRequest, ControlResponse, MAX_REQUEST_BYTES};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 mod run_daemon;
@@ -102,14 +102,17 @@ enum Command {
         #[arg(long)]
         enable: bool,
     },
-    /// Stream events.
+    /// Show the event history.
     Events {
-        /// How many recent events to print first.
+        /// How many events to show at a time.
         #[arg(long, default_value_t = 50)]
         limit: usize,
-        /// Keep streaming new events.
+        /// Keep asking for new events until interrupted.
         #[arg(long, short)]
         follow: bool,
+        /// Return only events after this sequence number.
+        #[arg(long, default_value_t = 0)]
+        since: u64,
     },
     /// Print the version.
     Version,
@@ -162,6 +165,14 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             send(&cli.socket, request, cli.json).await?;
             Ok(ExitCode::SUCCESS)
         }
+        Command::Events {
+            limit,
+            follow,
+            since,
+        } => {
+            events(&cli.socket, *limit, *follow, *since, cli.json).await?;
+            Ok(ExitCode::SUCCESS)
+        }
         other => {
             send(&cli.socket, request_for(other), cli.json).await?;
             Ok(ExitCode::SUCCESS)
@@ -185,9 +196,14 @@ fn request_for(command: &Command) -> ControlRequest {
         Command::Resume { instance } => ControlRequest::Resume {
             instance: instance.clone(),
         },
-        Command::Events { limit, follow } => ControlRequest::Events {
+        Command::Events {
+            limit,
+            follow,
+            since,
+        } => ControlRequest::Events {
             limit: Some(*limit),
             follow: *follow,
+            since: Some(*since),
         },
         Command::ForceTransition {
             instance,
@@ -262,6 +278,111 @@ async fn send(socket: &std::path::Path, request: ControlRequest, json: bool) -> 
     }
 }
 
+/// Prints the event history, and follows it by asking for what is new.
+///
+/// Following is a poll rather than a held-open connection on purpose: the
+/// server must not keep a task per follower, because a client that disappeared
+/// mid-stream would leave that task waiting on a socket forever. The cursor makes
+/// each poll cheap, so a follower asks for a handful of new events rather than
+/// re-reading the buffer.
+async fn events(
+    socket: &std::path::Path,
+    limit: usize,
+    follow: bool,
+    since: u64,
+    json: bool,
+) -> anyhow::Result<()> {
+    let mut cursor = since;
+
+    loop {
+        let request = ControlRequest::Events {
+            limit: Some(limit),
+            follow: true,
+            since: Some(cursor),
+        };
+        let response = ask(socket, &request).await?;
+
+        match response {
+            ControlResponse::Events { events, latest } => {
+                for event in events {
+                    if json {
+                        println!("{event}");
+                    } else {
+                        print_event(&event);
+                    }
+                }
+                cursor = latest.max(cursor);
+            }
+            ControlResponse::Error { reason, message } => {
+                anyhow::bail!("{reason}: {message}");
+            }
+            other @ ControlResponse::Ok { .. } => {
+                print_human(&other);
+            }
+        }
+
+        if !follow {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+/// Sends one request and returns the decoded response.
+async fn ask(
+    socket: &std::path::Path,
+    request: &ControlRequest,
+) -> anyhow::Result<ControlResponse> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let stream = tokio::net::UnixStream::connect(socket)
+        .await
+        .with_context(|| format!("could not reach the daemon at {}", socket.display()))?;
+    let (reader, mut writer) = stream.into_split();
+
+    let mut line = request.encode().context("encoding the control request")?;
+    line.push('\n');
+    writer
+        .write_all(line.as_bytes())
+        .await
+        .context("writing the request")?;
+
+    let mut reader = BufReader::new(reader);
+    let mut response = String::new();
+    reader
+        .read_line(&mut response)
+        .await
+        .context("reading the response")?;
+    ControlResponse::decode(response.trim_end()).context("decoding the response")
+}
+
+/// Renders one event for a human reader.
+fn print_event(event: &serde_json::Value) {
+    let role_change = if event.get("from").is_some() {
+        format!("{} -> {}", field_of(event, "from"), field_of(event, "to"))
+    } else {
+        field_of(event, "reason")
+    };
+    println!(
+        "{:>5}  {:<20} {:<12} {}",
+        event
+            .get("sequence")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        field_of(event, "name"),
+        field_of(event, "instance"),
+        role_change
+    );
+}
+
+fn field_of(event: &serde_json::Value, name: &str) -> String {
+    event
+        .get(name)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
 /// Renders a response for a human reader.
 fn print_human(decoded: &highland_control::ControlResponse) {
     match decoded {
@@ -282,7 +403,7 @@ fn print_human(decoded: &highland_control::ControlResponse) {
                 );
             }
         }
-        highland_control::ControlResponse::Events { events } => {
+        highland_control::ControlResponse::Events { events, .. } => {
             for event in events {
                 println!("{event}");
             }

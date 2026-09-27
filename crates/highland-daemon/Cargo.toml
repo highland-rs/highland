@@ -28,6 +28,7 @@ highland-checks.workspace = true
 highland-core.workspace = true
 highland-net.workspace = true
 highland-observe.workspace = true
+serde_json.workspace = true
 highland-vrrp.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

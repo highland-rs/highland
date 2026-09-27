@@ -163,8 +163,11 @@ pub struct ControlService {
     instances: BTreeMap<String, InstructionSender>,
     force_transition_enabled: bool,
     metrics: Option<Arc<crate::Metrics>>,
-    /// The channel map, shared with the reload path when one is running.
-    shared: Option<Arc<std::sync::Mutex<BTreeMap<String, InstructionSender>>>>,
+    /// The shared event history `highland events` reads.
+    log: Option<Arc<crate::EventLog>>,
+    /// The reload, shared with the signal loop so there is one implementation of
+    /// what a reload does.
+    reload: Option<Arc<crate::ReloadHandle>>,
 }
 
 impl ControlService {
@@ -181,8 +184,23 @@ impl ControlService {
             instances: BTreeMap::new(),
             force_transition_enabled,
             metrics: None,
-            shared: None,
+            log: None,
+            reload: None,
         }
+    }
+
+    /// Attaches the event history this service serves.
+    #[must_use]
+    pub fn with_events(mut self, log: Arc<crate::EventLog>) -> Self {
+        self.log = Some(log);
+        self
+    }
+
+    /// Attaches the reload this service triggers.
+    #[must_use]
+    pub fn with_reload(mut self, reload: Arc<crate::ReloadHandle>) -> Self {
+        self.reload = Some(reload);
+        self
     }
 
     /// Attaches the metrics this service reports to.
@@ -201,15 +219,6 @@ impl ControlService {
     #[must_use]
     pub fn channels(&self) -> &BTreeMap<String, InstructionSender> {
         &self.instances
-    }
-
-    /// Shares the channel map, so a reload reaches the same instances an
-    /// operator does.
-    pub fn watch_channels(
-        &mut self,
-        channels: std::sync::Arc<std::sync::Mutex<BTreeMap<String, InstructionSender>>>,
-    ) {
-        self.shared = Some(channels);
     }
 
     /// Forgets an instance.
@@ -242,13 +251,11 @@ impl Service for ControlService {
                 ControlResponse::ok(self.registry.node_status())
             }
             ControlRequest::Show { instance } => self.show(&instance),
-            ControlRequest::Events { limit, .. } => ControlResponse::error(
-                "not_implemented",
-                format!(
-                    "the event stream returns at most {} events and is not served yet",
-                    limit.unwrap_or(0)
-                ),
-            ),
+            ControlRequest::Events {
+                since,
+                limit,
+                follow,
+            } => self.events(since, limit, follow),
             ControlRequest::Reload => self.reload(),
             ControlRequest::Pause { instance } => self.send(&instance, Instruction::pause(), peer),
             ControlRequest::Resume { instance } => {
@@ -300,19 +307,72 @@ impl Service for ControlService {
 impl ControlService {
     /// Applies a reload requested over the control socket.
     ///
-    /// The reload itself is driven by the signal loop, which owns the
-    /// configuration and the registry. Here it is a request to do the same thing,
-    /// and the loop performs it, so there is one implementation of "what a
-    /// reload does" rather than two.
-    #[expect(
-        clippy::unused_self,
-        reason = "it is a method for symmetry with the other requests"
-    )]
+    /// It calls the same handle the signal loop calls, so a `SIGHUP` and a
+    /// `highland reload` cannot disagree about what a reload does.
     fn reload(&self) -> ControlResponse {
-        ControlResponse::error(
-            "reload_in_progress",
-            "the reload runs on the signal loop; this build applies it and reports the outcome in the log and in highland_reloads_total",
-        )
+        let Some(handle) = &self.reload else {
+            return ControlResponse::error("not_implemented", "this build cannot reload");
+        };
+        match handle.reload() {
+            crate::ReloadOutcome::Applied {
+                generation,
+                reloadable,
+                added,
+                ..
+            } => {
+                let mut status = self.registry.node_status();
+                status.generation = generation;
+                tracing::info!(
+                    generation,
+                    reconfigured = reloadable.len(),
+                    started = added.len(),
+                    "reload applied"
+                );
+                ControlResponse::ok(status)
+            }
+            crate::ReloadOutcome::Rejected { reason } => {
+                ControlResponse::error("reload_rejected", reason)
+            }
+        }
+    }
+
+    /// Answers an events request.
+    ///
+    /// The response carries the sequence number of the newest event returned, so
+    /// the client sends it back as `since` next time. A client that asks for
+    /// nothing it has not seen gets nothing, rather than the whole buffer on
+    /// every poll.
+    fn events(&self, since: Option<u64>, limit: Option<usize>, follow: bool) -> ControlResponse {
+        let Some(log) = &self.log else {
+            return ControlResponse::error(
+                "not_implemented",
+                "this build records no event history",
+            );
+        };
+        let limit = limit.unwrap_or(100).clamp(1, 1000);
+        let entries = log.since(since.unwrap_or(0), limit);
+        let latest = entries.last().map_or_else(
+            || since.unwrap_or_else(|| log.latest()),
+            |(sequence, _)| *sequence,
+        );
+        let events = entries
+            .into_iter()
+            .filter_map(|(sequence, event)| {
+                serde_json::to_value(&event).ok().map(|mut value| {
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert("sequence".to_owned(), serde_json::json!(sequence));
+                    }
+                    value
+                })
+            })
+            .collect();
+
+        // `follow` is recorded rather than acted on: the client polls, and the
+        // server must not hold a connection open per follower, because a client
+        // that disappeared mid-stream would leave a task waiting on a socket
+        // forever.
+        let _ = follow;
+        ControlResponse::Events { events, latest }
     }
 
     fn show(&self, instance: &str) -> ControlResponse {

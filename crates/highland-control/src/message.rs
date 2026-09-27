@@ -28,10 +28,22 @@ pub enum ControlRequest {
     },
     /// The event history, optionally following new events.
     Events {
-        /// How many recent events to return.
+        /// Return events after this sequence number.
+        ///
+        /// A client that has read up to a sequence sends it here, so a follower
+        /// asks for what is new rather than re-reading the whole buffer on every
+        /// poll.
+        #[serde(default)]
+        since: Option<u64>,
+        /// The most to return.
         #[serde(default)]
         limit: Option<usize>,
-        /// Whether to keep the connection open and stream events.
+        /// Whether the client intends to follow.
+        ///
+        /// The client polls with this set: the connection is answered once and
+        /// the client asks again. Keeping the server from holding a connection
+        /// open per follower is deliberate, because a client that disappeared
+        /// mid-stream would otherwise leave a task waiting on a socket forever.
         #[serde(default)]
         follow: bool,
     },
@@ -196,8 +208,11 @@ pub enum ControlResponse {
     },
     /// The request succeeded and carries an event stream as JSON lines.
     Events {
-        /// The events, oldest first.
+        /// The events, oldest first, each with its sequence number.
         events: Vec<serde_json::Value>,
+        /// The sequence number of the newest event returned, which a client sends
+        /// back as `since` on its next request.
+        latest: u64,
     },
     /// The request was refused.
     Error {
@@ -283,6 +298,7 @@ mod tests {
             ControlRequest::Events {
                 limit: Some(10),
                 follow: true,
+                since: Some(0),
             },
             ControlRequest::Reload,
             ControlRequest::Pause {

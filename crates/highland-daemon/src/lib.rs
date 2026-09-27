@@ -17,6 +17,7 @@
 mod actor;
 mod control;
 mod driver;
+mod events;
 mod executor;
 mod logging;
 mod metrics;
@@ -32,6 +33,7 @@ mod vrrp_transport;
 pub use actor::{Applied, InstanceActor};
 pub use control::{ControlService, InstanceStatus, StatusRegistry};
 pub use driver::{Instruction, InstructionReceiver, InstructionSender, channel, run_instance};
+pub use events::EventLog;
 pub use executor::{
     Executor, Ownership, RecordingTransport, TestHarness, Transport, TransportError,
 };
@@ -39,7 +41,7 @@ pub use metrics::{CONTENT_TYPE, Metrics, render};
 pub use metrics_server::{MetricsError, MetricsServer};
 pub use options::{InstancePlan, Options, OptionsError};
 pub use reload::{Change, Plan, classify, plan, plan_for};
-pub use runner::{ReloadOutcome, TRANSPORT_AVAILABLE, plans, reload, run};
+pub use runner::{ReloadHandle, ReloadOutcome, TRANSPORT_AVAILABLE, plans, run};
 
 pub use shutdown::{DEFAULT_SHUTDOWN_BUDGET, ShutdownPlan, ShutdownReason};
 #[cfg(target_os = "linux")]

@@ -52,3 +52,49 @@ pub use types::{
     HEADER_LEN, IpFamily, MAX_MAX_ADVER_INT, MIN_MAX_ADVER_INT, MaxAdverInt, PacketType, Priority,
     REQUIRED_TTL, TYPE_ADVERTISEMENT, VERSION_3, VRRP_PROTOCOL, Version, Vrid,
 };
+
+#[cfg(test)]
+mod hygiene {
+    //! Guards against the mistake that left a file behind.
+
+    //! A file in `src/` that no module declares is never compiled, so it cannot
+    //! fail a build, cannot fail a test, and cannot be caught by a reader who
+    //! does not remember it. That is exactly how `advertisement.rs` survived the
+    //! codec rewrite carrying the superseded 8-bit interval bound and a second,
+    //! contradictory `Advertisement` type. The check is one line of filesystem
+    //! work, and it makes the rot impossible rather than merely unlikely.
+
+    use std::fs;
+    use std::path::Path;
+
+    #[test]
+    fn every_source_file_is_a_declared_module() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let declared = fs::read_to_string(source.join("lib.rs")).expect("lib.rs is readable");
+
+        let mut orphans = Vec::new();
+        for entry in fs::read_dir(&source).expect("src/ is readable") {
+            let path = entry.expect("the entry is readable").path();
+            if path.extension().is_none_or(|extension| extension != "rs") {
+                continue;
+            }
+            let name = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or_default()
+                .to_owned();
+            if name == "lib" {
+                continue;
+            }
+            if !declared.contains(&format!("mod {name};")) {
+                orphans.push(name);
+            }
+        }
+        orphans.sort();
+
+        assert!(
+            orphans.is_empty(),
+            "these files are in src/ but no module declares them, so nothing compiles or tests them: {orphans:?}"
+        );
+    }
+}

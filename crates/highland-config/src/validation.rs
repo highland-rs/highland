@@ -237,7 +237,13 @@ fn validate_instance(
     if !(MIN_ADVERTISEMENT_INTERVAL..=MAX_ADVERTISEMENT_INTERVAL).contains(&interval) {
         violations.push((
             "V-04",
-            format!("{key}.advertisement_interval: {interval:?} is outside 10ms..=2550ms"),
+            // The range is interpolated rather than written out. A hand-written
+            // bound in a message is a bound that eventually disagrees with the
+            // check above it, and an operator reading a wrong range is worse
+            // off than one reading no range at all.
+            format!(
+                "{key}.advertisement_interval: {interval:?} is outside {MIN_ADVERTISEMENT_INTERVAL}..={MAX_ADVERTISEMENT_INTERVAL}"
+            ),
         ));
     }
     if !instance.preempt && !instance.preempt_delay.is_zero() {

@@ -516,7 +516,8 @@ pub struct InstanceConfig {
     pub vrid: u8,
     /// The configured priority. Must be in `1..=255`.
     pub priority: u8,
-    /// The advertisement interval. Must be in `10ms..=2550ms`.
+    /// The advertisement interval, bounded by the 12-bit `Max Adver Int` field
+    /// and validated by `V-04` before the machine ever sees it.
     pub advertisement_interval: Duration,
     /// The delay between startup and entering election.
     pub startup_delay: Duration,

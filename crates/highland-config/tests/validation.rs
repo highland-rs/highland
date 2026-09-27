@@ -549,3 +549,73 @@ fn the_fixture_agrees_with_the_inline_reference_document() {
         inline.instances[0].priority
     );
 }
+
+/// The message for `V-04` must state the bound the check enforces.
+///
+/// This exists because it once did not: the check allowed 40.95s, following the
+/// 12-bit `Max Adver Int` field, while the message still said 2.55s from when
+/// the field was assumed to be 8 bits. An operator whose 3-second interval was
+/// rejected was told a range that would have accepted it, and the two numbers
+/// were only related by the fact that someone had edited one of them.
+#[test]
+fn the_v04_message_states_the_bound_the_check_enforces() {
+    // Only the rejected cases: 3s is inside the bound, which is the point of
+    // the second test below.
+    for interval in ["9ms", "40951ms"] {
+        let text = VALID.replace(
+            "advertisement_interval = \"1s\"",
+            &format!("advertisement_interval = \"{interval}\""),
+        );
+        let config = parse(&text).expect("the document parses");
+        let violations = validate(&config, &ValidationContext::permissive()).expect_err("rejected");
+        let message = violations
+            .iter()
+            .find(|violation| violation.rule == "V-04")
+            .map_or_else(
+                || panic!("no V-04 violation for {interval}"),
+                |violation| violation.message.clone(),
+            );
+
+        assert!(
+            message.contains("10ms..=40950ms"),
+            "the message must quote the real bounds, got: {message}"
+        );
+        assert!(
+            !message.contains("2550ms"),
+            "the message must not quote the superseded 8-bit bound, got: {message}"
+        );
+    }
+}
+
+/// The bound the configuration accepts is the bound the wire field can carry.
+///
+/// A 3-second interval must be accepted here, and must also survive the codec:
+/// if either side disagreed, a configuration the validator passed would fail
+/// later with no way to tell which of them was wrong.
+#[test]
+fn the_configured_bound_is_the_bound_the_codec_accepts() {
+    let accepted = "3s";
+    let text = VALID.replace(
+        "advertisement_interval = \"1s\"",
+        &format!("advertisement_interval = \"{accepted}\""),
+    );
+    let config =
+        load_and_validate(&text, &ValidationContext::permissive()).expect("3s is inside the field");
+
+    let advertisement = highland_vrrp::Advertisement::new(
+        highland_vrrp::Vrid::new(config.instances[0].vrid).expect("V-01"),
+        highland_vrrp::Priority::new(config.instances[0].priority).expect("V-02"),
+        highland_vrrp::MaxAdverInt::from_duration(
+            config.instances[0].advertisement_interval.as_duration(),
+        )
+        .expect("the interval fits the field"),
+        vec!["192.0.2.10".parse().expect("valid address")],
+    )
+    .expect("the codec accepts what the validator passed");
+
+    assert_eq!(
+        advertisement.max_adver_int().centiseconds(),
+        300,
+        "3s is 300 centiseconds"
+    );
+}

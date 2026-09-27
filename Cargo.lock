@@ -297,6 +297,7 @@ dependencies = [
 name = "highland-config"
 version = "0.1.0"
 dependencies = [
+ "highland-vrrp",
  "serde",
  "thiserror",
  "toml",

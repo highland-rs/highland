@@ -34,7 +34,7 @@ fuzz_target!(|message: AddressMessage| {
     let prefix = message.prefix_len;
     let dotted =
         format!("{}.{}.{}.{}", message.octets[0], message.octets[1], message.octets[2], message.octets[3]);
-    let text = if message.family % 2 == 0 {
+    let text = if message.family.is_multiple_of(2) {
         format!("{dotted}/{prefix}")
     } else {
         format!("::ffff:{dotted}/{prefix}")

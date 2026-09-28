@@ -1681,12 +1681,31 @@ properties over random event sequences, and configuration normalization idempote
 
 ### 21.3 Fuzzing `[I]`
 
-Targets: `fuzz_vrrp_ipv4_packet`, `fuzz_vrrp_ipv6_packet`, `fuzz_config_document`,
-`fuzz_check_response`, `fuzz_netlink_message`, `fuzz_control_request`.
+Targets: `fuzz_vrrp_ipv4_packet`, `fuzz_vrrp_ipv6_packet`, `fuzz_vrrp_round_trip`,
+`fuzz_config_document`, `fuzz_check_response`, `fuzz_netlink_event`,
+`fuzz_control_request`.
 
 Each target MUST have bounded input, no network access, no filesystem access unless
 required, a checked-in regression corpus for every fixed crash, and CI integration with
 a smoke budget.
+
+`fuzz_vrrp_round_trip` does not mutate bytes. The two packet targets hand raw input to
+the decoder, which leaves the encoder reachable only by accident: a message that
+survives `decode_verified` needs a correct version, type, VRID, a count that agrees with
+the length, and a verifying checksum, and 307 million executions of
+`fuzz_vrrp_ipv4_packet` never entered it. The round-trip target constructs a valid
+advertisement from arbitrary fields and asserts that encoding then decoding preserves
+every field, that re-encoding is the identity, and that the checksum depends on the
+RFC 2460 pseudo-header. The last property is the defect interop work found once, and
+it is invisible to every other check: such a message decodes correctly, its lengths
+agree, and the peer silently drops it.
+
+The minimized corpus under `fuzz/corpus/` is checked in. A 60-second CI smoke that
+starts from nothing spends its budget rediscovering each format, and the packet targets
+reached only 29 and 24 inputs; CI's effective coverage should grow with the repository
+rather than reset on every run. The "corpora are large" objection applies to the working
+tree -- 19MB -- and not to the repository, where git stores the same corpus in roughly
+580KB.
 
 ### 21.4 Network-namespace integration `[I]`
 

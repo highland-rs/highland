@@ -33,6 +33,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_vrrp_round_trip"
+path = "fuzz_targets/fuzz_vrrp_round_trip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_vrrp_ipv6_packet"
 path = "fuzz_targets/fuzz_vrrp_ipv6_packet.rs"
 test = false

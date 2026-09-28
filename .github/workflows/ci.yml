@@ -37,6 +37,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: clippy, all targets, all features
         run: cargo clippy --all-targets --all-features -- -D warnings
+      # The fuzz package is excluded from the workspace, so `--workspace` never
+      # linted it and a clippy error sat in `fuzz_netlink_event` unnoticed. It
+      # lints on stable even though its targets need nightly to build.
+      - name: clippy the fuzz package
+        run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
 
   test:
     name: test (${{ matrix.os }})
@@ -102,6 +107,7 @@ jobs:
         target:
           - fuzz_vrrp_ipv4_packet
           - fuzz_vrrp_ipv6_packet
+          - fuzz_vrrp_round_trip
           - fuzz_config_document
           - fuzz_check_response
           - fuzz_netlink_event

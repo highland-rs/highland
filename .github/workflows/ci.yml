@@ -73,6 +73,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: EmbarkStudios/cargo-deny-action@v2
+      # Same reason as cargo-fuzz: the audit step was failing on
+      # `no such command: audit`, so the job reported a failure that was not about
+      # an advisory, and a job that cannot install its tool is a job that is not
+      # testing anything.
+      - name: install cargo-audit
+        run: cargo install cargo-audit --locked
       - name: audit
         run: cargo audit --deny warnings
 
@@ -103,8 +109,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
+      # `cargo install --locked` rather than a prebuilt-binary action: the action
+      # resolved to nothing and every target failed on `no such command: fuzz`,
+      # which is a green-looking job that checked nothing.
       - name: install cargo-fuzz
-        uses: taiki-e/install-action@cargo-fuzz
+        run: cargo install cargo-fuzz --locked
       - name: build the target
         run: cargo fuzz build ${{ matrix.target }}
       # A smoke run, not a campaign. Its purpose is to prove the target builds
@@ -145,6 +154,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install test tooling
         run: sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 curl
+      # The workspace first, because the operator tests drive the `highland`
+      # binary, and cargo does not build another package's binaries. The local gate
+      # in `scripts/linux-tests.sh` does this; the job did not, so the CLI tests
+      # failed on a missing binary rather than on anything about Highland.
+      - name: build the workspace
+        run: cargo build --workspace
       - name: netlink against a real kernel
         run: sudo -E env "PATH=$PATH" cargo test -p highland-net --features netlink-tests
       # One test at a time: each of these builds a bridge and a pair of

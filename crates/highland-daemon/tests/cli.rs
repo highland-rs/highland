@@ -213,7 +213,9 @@ fn cli_binary() -> PathBuf {
     let candidate = path.join("highland");
     assert!(
         candidate.exists(),
-        "expected the CLI at {}; run this through `scripts/linux-tests.sh`",
+        "expected the `highland` binary at {}. `cargo test -p highland-daemon` does not \
+         build another package's binaries, so build the workspace first: \
+         `cargo build --workspace` — which `scripts/linux-tests.sh` and CI both do.",
         candidate.display()
     );
     candidate

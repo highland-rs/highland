@@ -79,7 +79,7 @@ impl VrrpTransport {
     ///
     /// Returns [`TransportError`] when the socket cannot be created or bound,
     /// which needs `CAP_NET_RAW`, or when the address is still unusable after
-    /// [`BIND_ATTEMPTS`] tries.
+    /// `BIND_ATTEMPTS` tries.
     pub async fn bind(
         plan: &InstancePlan,
         interface: &str,

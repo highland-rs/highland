@@ -11,6 +11,14 @@ categories.workspace = true
 keywords.workspace = true
 publish.workspace = true
 
+[[bin]]
+# The command operators type. The crate keeps the name `highland-cli` because
+# that is what the dependency graph and `SPEC.md` §9.9 refer to, but a binary
+# called `highland-cli` is not what a package manager installs onto a PATH, and
+# the shipped systemd unit already expects `/usr/bin/highland`.
+name = "highland"
+path = "src/main.rs"
+
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true

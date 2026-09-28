@@ -210,7 +210,7 @@ fn cli_binary() -> PathBuf {
     if path.ends_with("deps") {
         path.pop();
     }
-    let candidate = path.join("highland-cli");
+    let candidate = path.join("highland");
     assert!(
         candidate.exists(),
         "expected the CLI at {}; run this through `scripts/linux-tests.sh`",

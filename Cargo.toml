@@ -25,7 +25,11 @@ homepage = "https://github.com/highland-rs/highland"
 authors = ["The Highland contributors"]
 categories = ["network-programming"]
 keywords = ["vrrp", "high-availability", "failover", "networking"]
-publish = false
+# Every crate here is publishable. This was `false` until 0.1.0, and it is the
+# first thing `cargo publish` checks: a crate another published crate depends on
+# has to be published for the dependency to resolve for anyone outside this
+# repository (`R-34`).
+publish = true
 
 [workspace.dependencies]
 highland-core = { path = "crates/highland-core", version = "0.1.0" }

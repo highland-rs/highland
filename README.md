@@ -3,14 +3,14 @@
 A memory-safe, observable, Linux-focused Rust implementation of high-availability
 virtual IP failover, built around VRRPv3.
 
-> **Status: Milestones 0–6 landed. A VIP moves.** A whole failover — election,
+> **Status: 0.1.0.** Milestones 0–6 have landed. A whole failover — election,
 > ownership confirmed by kernel read-back, a takeover announced to the segment, and
 > the address moving — runs in the test suite between two real network
 > namespaces, over IPv4 and IPv6, unicast and multicast, with loss, reordering, a
 > one-way partition, a link flap, and a frozen node injected into the segment.
 > Keepalived interoperability is tested for IPv4 and IPv6, unicast and multicast.
-> See [`docs/SPEC.md`](docs/SPEC.md) §27 for the milestone plan and
-> [`CHANGELOG.md`](CHANGELOG.md) for what has landed.
+> APIs are not stable before 1.0 ([`SPEC.md`](docs/SPEC.md) §26). See that
+> §27 for the milestone plan and [`CHANGELOG.md`](CHANGELOG.md) for what landed.
 
 ## What Highland is
 
@@ -40,12 +40,16 @@ The full specification, including every requirement identifier, lives in
 ## Quick start
 
 ```console
-$ cargo build --workspace
+$ cargo build --release --workspace
 $ cargo test --workspace
 $ cargo run -p highland-cli -- check-config crates/highland-config/tests/fixtures/basic.toml
 basic.toml is valid: 1 instance(s), schema version 1
 $ cargo run -p highland-cli -- --help
 ```
+
+The release builds two binaries: `highland`, which operators type, and
+`highland-daemon`, which `highland run` hands over to. Install both — see the
+[installation guide](docs/user/installation.md).
 
 A minimal configuration:
 

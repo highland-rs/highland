@@ -6,12 +6,61 @@ All notable changes to Highland are recorded here. The format follows
 
 ## [Unreleased]
 
-Milestones 0 through 4 have landed. The daemon carries VRRP over a real socket,
-answers operators over a control socket, exports Prometheus metrics, applies a
-transactional reload without dropping the address it holds, records an event
-history, and announces a takeover to the segment. Two namespaces on a bridge
-elect one master, the virtual IP moves when that node is killed, and a third
-namespace that runs no daemon sees its neighbour cache entry change with it.
+## [0.1.0] - 2026-09-28
+
+The first public release. Milestones 0 through 6 have landed, which is more than
+0.1.0's scope asked for: the milestone plan placed IPv6, multicast, and health
+checks after it, and they are here because they were needed to interoperate and
+because leaving them out would have meant shipping a VRRP implementation that
+only spoke to itself.
+
+Nothing in this release is a stable API. `SPEC.md` §26 permits API changes before
+1.0; configuration changes get a note here; protocol behaviour is
+standards-compliant and tested against Keepalived.
+
+What is *not* in it, and is on the landing page rather than buried here: a node
+that is killed, frozen, or partitioned keeps the address it holds, because nothing
+can tell it otherwise. See the [split-brain notes](docs/user/compatibility.md).
+
+### Release procedure
+
+The nine crates must be published in dependency order, because a crate that
+depends on a sibling cannot be published before it:
+
+```console
+$ for c in highland-core highland-vrrp highland-observe highland-control \
+           highland-config highland-checks highland-net \
+           highland-daemon highland-cli; do cargo publish -p $c; done
+```
+
+The order is not alphabetical and not the crate table's: it is the dependency
+graph. `highland-config` needs `highland-vrrp`, `highland-checks` needs
+`highland-core`, `highland-net` needs both, and the daemon needs everything.
+
+Before publishing, once:
+
+- `publish` is `true` in `[workspace.package]`. It was `false` until now, and it
+  is the first thing `cargo publish` checks.
+- Every crate directory carries `LICENSE-MIT`, `LICENSE-APACHE`, and `README.md`
+  as symlinks to the repository root. Cargo follows them, and without them every
+  crate publishes with neither a licence file nor a readme in its tarball —
+  which is exactly the sort of thing nobody notices until a crate page renders
+  blank.
+- The CLI's binary is `highland`, not `highland-cli`. The systemd unit and the
+  installation guide already said `/usr/bin/highland`; the build disagreed with
+  them.
+
+`cargo package` succeeds only for crates with no unpublished sibling, so a local
+sweep proves packaging for the leaves and the rest are proven by publishing.
+
+### Historical notes
+
+Milestones 0 through 4 first landed together, when the daemon carried VRRP over a
+real socket, answered operators over a control socket, exported Prometheus
+metrics, applied a transactional reload without dropping the address it held,
+recorded an event history, and announced a takeover to the segment. Two namespaces
+on a bridge elect one master, the virtual IP moves when that node is killed, and a
+third namespace that runs no daemon sees its neighbour cache entry change with it.
 
 A segment with faults on it is now part of the test suite: loss, reordering,
 duplication, a one-way partition, a link flap, and a frozen process, each
@@ -20,7 +69,7 @@ defects, listed below.
 
 Milestone 4 is complete. What remains is Milestone 5, IPv6 and multicast.
 
-### Added — Milestone 0, the repository
+#### Milestone 0, the repository
 
 - `docs/SPEC.md`: the normative specification, with scope tiers (`[I]` initial
   release, `[1]` version 1.0, `[F]` post-1.0), RFC 2119 language, and stable
@@ -41,7 +90,7 @@ Milestone 4 is complete. What remains is Milestone 5, IPv6 and multicast.
 - End-user documentation under `docs/user/`, plus architecture, testing, threat
   model, compatibility, and three ADRs.
 
-### Added — Milestone 1, the pure state machine
+#### Milestone 1, the pure state machine
 
 - `timer` (a `TimerSet` and a `RetryPolicy`), `health` (the policy arithmetic of
   `SPEC.md` §12.2), `election` (the four-step tie-break of §12.3), and `machine`
@@ -55,7 +104,7 @@ Milestone 4 is complete. What remains is Milestone 5, IPv6 and multicast.
 - `Event::ActionSucceeded`, `Event::InterfaceBroughtUp`, and the transition
   reason `preemption_delay_elapsed`.
 
-### Changed — Milestone 1
+#### Milestone 1, changed
 
 - Ownership is a two-phase handshake: the machine requests addresses and enters
   `MASTER` only on `Event::ActionSucceeded`. There is no path from `BACKUP` to
@@ -67,7 +116,7 @@ Milestone 4 is complete. What remains is Milestone 5, IPv6 and multicast.
 - A shutdown or a pause cancels an in-flight ownership request and owes a
   best-effort removal, so a late confirmation cannot revive an instance.
 
-### Added — Milestone 2, the VRRPv3 codec
+#### Milestone 2, the VRRPv3 codec
 
 - A working codec: `Version`, `PacketType`, `Vrid`, `Priority`, `MaxAdverInt`,
   `IpFamily`, `Advertisement`, `Checksum`, and `ChecksumScope`, all validated on
@@ -84,7 +133,7 @@ Milestone 4 is complete. What remains is Milestone 5, IPv6 and multicast.
   including one that flips every bit of a valid packet and requires each
   corruption to be detected or rejected.
 
-### Fixed — Milestone 2
+#### Milestone 2, fixed
 
 - The checksum accumulator dropped an odd trailing octet instead of padding it
   with a zero as RFC 1071 requires. Found by the cross-check against a naive
@@ -92,7 +141,7 @@ Milestone 4 is complete. What remains is Milestone 5, IPv6 and multicast.
 - `MaxAdverInt::from_duration` truncated to milliseconds before converting to
   centiseconds, so 1.5s became 100 centiseconds instead of 150.
 
-### Added — Milestone 3, the Linux backend and the executor
+#### Milestone 3, the Linux backend and the executor
 
 - A real Linux netlink backend: interface lookup with addresses, link state,
   address add and remove **confirmed by read-back** rather than by acknowledgment
@@ -113,7 +162,7 @@ Milestone 4 is complete. What remains is Milestone 5, IPv6 and multicast.
   of claiming the address, relinquishment, shutdown, and a paused instance
   staying out.
 
-### Changed — Milestone 3
+#### Milestone 3, changed
 
 - `NetworkBackend` is now `async`. Netlink is an asynchronous socket, and a
   synchronous trait would have forced a blocking wrapper on the runtime thread,
@@ -124,7 +173,7 @@ Milestone 4 is complete. What remains is Milestone 5, IPv6 and multicast.
   produced by an outcome must be applied too. A single pass left a master that
   owned its address and never said so; the failover test caught it.
 
-### Corrected — Milestone 3
+#### Milestone 3, corrections
 
 - **The advertisement interval is a 12-bit centisecond field** (RFC 5798
   §5.2.7), not the 8-bit field the specification assumed, so the accepted range
@@ -177,7 +226,7 @@ Two more bugs only a live socket found, both invisible in the types:
   - A raw socket's receive buffer can carry the whole IP packet, not just the
     payload, so the header is parsed and removed rather than assumed absent.
 
-### Fixed, by running it on Linux
+#### Milestone 3, fixed by running it on Linux
 
 The Netlink backend had never been compiled, because it is `cfg`'d out on
 macOS. Compiling it in a container found **thirteen errors** and then two real

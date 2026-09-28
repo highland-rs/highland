@@ -103,7 +103,7 @@ walkthrough and [the CLI reference](docs/user/cli.md) for every command.
 | `highland-cli`: `run`, `status`, `show`, `events`, `reload`, `pause`, `resume`, `relinquish`, `force-transition`, `check-config` | Implemented, tested against a live daemon |
 | Chaos: loss, one-way partition, reordering, duplication, link flap, frozen process | Implemented, five scenarios |
 | Keepalived interoperability, IPv4 and IPv6, unicast and multicast | Implemented and tested; five of six scenarios converge, and it found a real protocol defect (the IPv4 checksum scope the RFC requires) |
-| Keepalived as an IPv6 **unicast** master | Does not converge: Keepalived sends a hop limit of 64 where §5.1.2.3 requires 255, and a conforming receiver discards it. Asserted, not skipped |
+| Keepalived as an IPv6 **unicast** master | Needs one configuration line: `allow_unconforming_hop_limit = true`. Keepalived sends a hop limit of 64 where §5.1.2.3 requires 255, and rejects `hop_limit` in its own configuration, so the peer cannot be corrected. Off by default, logged when used, and the cutover is in [`docs/user/migration.md`](docs/user/migration.md) |
 | One instance holding both IPv4 and IPv6 addresses | Refused (`V-03`); use one instance per family |
 | `sd_notify` readiness, configurable hold-down and retry, a `--yes` confirmation prompt | Not implemented |
 

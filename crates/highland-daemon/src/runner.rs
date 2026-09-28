@@ -219,6 +219,7 @@ async fn start_instances(
                 source,
                 ownership.peering.clone(),
                 std::sync::Arc::clone(metrics),
+                plan.allow_unconforming_hop_limit,
             )
             .await
             .map_err(|error| DaemonError::Runtime(format!("instance {}: {error}", plan.name)))?,

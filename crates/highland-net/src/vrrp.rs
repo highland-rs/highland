@@ -183,7 +183,7 @@ pub struct Datagram<'a> {
 ///
 ///
 /// ```
-/// use highland_net::{Accepted, AllowedSources, Datagram, PeerSet, validate};
+/// use highland_net::{Accepted, AllowedSources, Datagram, PeerSet, ReceptionPolicy, validate};
 /// use std::net::IpAddr;
 /// use std::time::Duration;
 ///
@@ -204,6 +204,7 @@ pub struct Datagram<'a> {
 ///     &AllowedSources::Peers(peers),
 ///     destination,
 ///     42,
+///     ReceptionPolicy::Strict,
 ///     Duration::ZERO,
 ///     None,
 /// );
@@ -239,6 +240,35 @@ impl Peering {
             Peering::Unicast(_) => "unicast",
             Peering::Multicast { .. } => "multicast",
         }
+    }
+}
+
+/// What a receiver insists on beyond the protocol itself.
+///
+/// A sum type rather than a flag so that "relax this one rule" cannot become
+/// "relax whatever is convenient later": the only relaxation that exists is the
+/// hop limit, and it has a name that says which implementation needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReceptionPolicy {
+    /// Enforce every rule the RFC states. The default, and the only safe one: a
+    /// TTL or hop limit of 255 is what proves an advertisement did not cross a
+    /// router.
+    #[default]
+    Strict,
+    /// Accept an advertisement whose TTL or hop limit is not 255.
+    ///
+    /// For a peer that sends the wrong value and cannot be configured otherwise.
+    /// Keepalived 2.3.3 sends IPv6 unicast advertisements with a hop limit of 64
+    /// and rejects `hop_limit` in both its instance and global blocks, so a
+    /// deployment cannot fix it at the other end.
+    LenientHopLimit,
+}
+
+impl ReceptionPolicy {
+    /// Returns `true` when this policy will accept a non-255 hop limit.
+    #[must_use]
+    pub fn accepts_unconforming_hop_limit(self) -> bool {
+        matches!(self, ReceptionPolicy::LenientHopLimit)
     }
 }
 
@@ -280,6 +310,7 @@ pub fn validate(
     allowed: &AllowedSources,
     destination: IpAddr,
     vrid: u8,
+    policy: ReceptionPolicy,
     now: Duration,
     limiter: Option<&mut RateWindow>,
 ) -> Accepted {
@@ -289,7 +320,7 @@ pub fn validate(
         return Accepted::Rejected(Rejection::RateLimited);
     }
 
-    if datagram.ttl != REQUIRED_TTL {
+    if datagram.ttl != REQUIRED_TTL && !policy.accepts_unconforming_hop_limit() {
         return Accepted::Rejected(Rejection::BadTtl);
     }
     if datagram.bytes.len() > MAX_DATAGRAM {

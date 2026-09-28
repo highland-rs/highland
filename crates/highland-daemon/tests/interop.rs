@@ -43,7 +43,7 @@ mod support;
 use std::net::IpAddr;
 use std::time::Duration;
 
-use highland_net::{AllowedSources, Datagram, VrrpSocket, validate};
+use highland_net::{AllowedSources, Datagram, ReceptionPolicy, VrrpSocket, validate};
 use highland_vrrp::{ChecksumScope, IpFamily};
 
 use support::{Keepalived, Node, bridge, wait_for};
@@ -241,7 +241,7 @@ fn highland_master_and_keepalived_backup_agree_over_ipv6() {
     let mut segment = ipv6_pair(100);
     segment
         .peer
-        .write_ipv6_config(&segment.highland, 100, false, 43);
+        .write_ipv6_config(&segment.highland, 100, false, 43, "");
     segment
         .highland
         .write_ipv6_config(&segment.peer, 150, false, 43);
@@ -307,7 +307,7 @@ fn an_ipv6_unicast_advertisement_with_the_wrong_hop_limit_is_discarded() {
     let mut segment = ipv6_pair(150);
     segment
         .peer
-        .write_ipv6_config(&segment.highland, 150, false, 43);
+        .write_ipv6_config(&segment.highland, 150, false, 43, "");
     segment
         .highland
         .write_ipv6_config(&segment.peer, 100, false, 43);
@@ -340,6 +340,103 @@ fn an_ipv6_unicast_advertisement_with_the_wrong_hop_limit_is_discarded() {
     );
 }
 
+/// With the switch on, a Keepalived that sends a hop limit of 64 is understood,
+/// and the handover works.
+///
+/// This is the whole of the migration story for one combination, and the reason
+/// the switch exists: `hop_limit` is an unknown keyword to Keepalived 2.3.3 in
+/// both its instance block and its `global_defs`, so the peer cannot be corrected
+/// and a node either hears it or cannot be a backup to it at all.
+#[test]
+fn a_keepalived_that_sends_64_is_understood_when_the_switch_is_on() {
+    if !require_keepalived("ipv6_lenient_hop_limit") {
+        return;
+    }
+    let mut segment = ipv6_pair(150);
+    segment
+        .peer
+        .write_ipv6_config(&segment.highland, 150, false, 43, "");
+    // The one line that differs from the strict scenario, and the only thing an
+    // operator has to add to their Highland configuration.
+    segment.highland.write_lenient(
+        VIP6,
+        64,
+        100,
+        Some(&peer_link_local(&segment)),
+        "",
+        false,
+        43,
+        true,
+    );
+    segment.peer.start();
+    segment.highland.start();
+
+    let took = wait_for(
+        "keepalived took the address",
+        Duration::from_secs(12),
+        || segment.peer.says_master() && segment.peer.holds_address(VIP6),
+    );
+    assert!(
+        took,
+        "keepalived never took {VIP6} even with the switch on\n--- highland config ---\n{}\n--- keepalived log ---\n{}\n--- highland log ---\n{}",
+        segment.highland.config_text(),
+        segment.peer.log(),
+        segment.highland.log()
+    );
+    let heard = wait_for(
+        "highland accepted an advertisement",
+        Duration::from_secs(8),
+        || segment.highland.log().contains("advertisement received"),
+    );
+    assert!(
+        heard,
+        "highland still discards the hop limit with the switch on\n--- highland log ---\n{}",
+        segment.highland.log()
+    );
+    assert!(
+        !segment.highland.log().contains("discarded a VRRP packet"),
+        "and discards nothing\n--- highland log ---\n{}",
+        segment.highland.log()
+    );
+    // The operator must be able to tell, from the log alone, that this node is in
+    // the degraded mode. A switch nobody can see being used is a switch nobody
+    // will remember turning on.
+    assert!(
+        segment
+            .highland
+            .log()
+            .contains("accepting advertisements whose hop limit is not 255"),
+        "and it is announced at startup:\n{}",
+        segment.highland.log()
+    );
+
+    let held_off = wait_for("highland held off", Duration::from_secs(4), || {
+        !segment.highland.holds(VIP6)
+    });
+    assert!(
+        held_off,
+        "highland took the address from a live higher-priority master"
+    );
+
+    segment.peer.kill();
+    let took_over = wait_for("highland took over", MASTER_DOWN_BUDGET, || {
+        segment.highland.holds(VIP6)
+    });
+    assert!(
+        took_over,
+        "highland did not take over within {MASTER_DOWN_BUDGET:?}\n--- highland log ---\n{}",
+        segment.highland.log()
+    );
+}
+
+/// The peer's link-local address, for the one configuration line above.
+fn peer_link_local(segment: &Segment) -> String {
+    segment
+        .peer
+        .link_local()
+        .expect("the peer has a link-local address")
+}
+
 /// IPv4 multicast, where neither node names a peer.
 ///
 /// This is the mode the multicast code was written for and never tested against
@@ -354,7 +451,9 @@ fn highland_and_keepalived_agree_over_ipv4_multicast() {
     segment
         .highland
         .write_config(VIP, 24, 150, None, "", false, 42);
-    segment.peer.write_config(&format!("{VIP}/24"), None, None);
+    segment
+        .peer
+        .write_config(&format!("{VIP}/24"), None, None, "");
     let highland = &mut segment.highland;
     let peer = &mut segment.peer;
     peer.start();
@@ -398,7 +497,7 @@ async fn highland_and_keepalived_agree_over_ipv6_multicast() {
         .write_ipv6_config(&segment.peer, 150, true, 43);
     segment
         .peer
-        .write_ipv6_config(&segment.highland, 100, true, 43);
+        .write_ipv6_config(&segment.highland, 100, true, 43, "");
     let (highland, peer) = (&mut segment.highland, &mut segment.peer);
     peer.start();
     highland.start();
@@ -483,6 +582,7 @@ async fn highland_and_keepalived_agree_over_ipv6_multicast() {
         &AllowedSources::Group { group },
         group,
         43,
+        ReceptionPolicy::Strict,
         Duration::ZERO,
         None,
     );

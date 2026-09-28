@@ -86,6 +86,7 @@ impl VrrpTransport {
         source: IpAddr,
         peering: Peering,
         metrics: Arc<crate::Metrics>,
+        allow_unconforming_hop_limit: bool,
     ) -> Result<Self, TransportError> {
         // The instance speaks the family of the address it owns, and a
         // configuration with no peer in that family is refused rather than
@@ -98,10 +99,29 @@ impl VrrpTransport {
             return Err(TransportError::NoPeers { family });
         }
 
+        // Strict unless the configuration says otherwise, and the policy is named
+        // for the rule it relaxes rather than for the peer that needs it.
+        let policy = if allow_unconforming_hop_limit {
+            highland_net::ReceptionPolicy::LenientHopLimit
+        } else {
+            highland_net::ReceptionPolicy::Strict
+        };
+        if allow_unconforming_hop_limit {
+            // Said once, at startup, and said plainly: a node in this mode is
+            // accepting advertisements that may have crossed a router, and an
+            // operator reading only the log must be able to learn that.
+            tracing::warn!(
+                instance = %plan.name,
+                interface,
+                "accepting advertisements whose hop limit is not 255; the check that proves an \
+                 advertisement stayed on this link is disabled for this instance"
+            );
+        }
+
         let mut last = String::new();
         let mut inner = None;
         for attempt in 1..=BIND_ATTEMPTS {
-            match SocketTransport::bind(family, interface, source, peering.clone()) {
+            match SocketTransport::bind(family, interface, source, peering.clone(), policy) {
                 Ok(transport) => {
                     inner = Some(transport);
                     break;

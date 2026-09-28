@@ -12,6 +12,9 @@
 
 Everything below is `1.0` work unless stated otherwise.
 
+For the cutover procedure, the field mapping, and what to check at each step, see
+the [migration guide](migration.md).
+
 ## Keepalived mapping
 
 | Keepalived | Highland |
@@ -73,7 +76,8 @@ IPVS, and the LVS integration.
   | IPv6 unicast, Keepalived master | **Does not converge** — see below |
 
 - **IPv6 unicast from Keepalived does not converge, and the reason is
-  Keepalived's.** Keepalived 2.3.3 advertises IPv6 unicast with a hop limit of
+  Keepalived's.** One line in your Highland configuration fixes it; see
+  [the migration guide](migration.md#the-switch-allow_unconforming_hop_limit). Keepalived 2.3.3 advertises IPv6 unicast with a hop limit of
   **64**; its IPv6 multicast advertisements carry 255, which is why the multicast
   scenario passes. RFC 5798 §5.1.2.3 says a receiver MUST discard a packet whose
   hop limit is not 255, so Highland is right to discard it and an implementation

@@ -22,7 +22,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use highland_net::{IpCidr, LinkState, NetError, NetlinkBackend, NetworkBackend};
+use highland_net::{IpCidr, LinkState, NetError, NetlinkBackend, NetworkBackend, ReceptionPolicy};
 use highland_vrrp::{Advertisement, IpFamily, MaxAdverInt, Priority, Vrid};
 
 /// Distinguishes the dummy interfaces one run creates.
@@ -195,6 +195,7 @@ async fn a_packet_that_did_not_travel_with_255_is_discarded() {
         &highland_net::AllowedSources::Peers(highland_net::PeerSet::new([address])),
         address,
         42,
+        ReceptionPolicy::Strict,
         Duration::ZERO,
         None,
     );
@@ -234,6 +235,7 @@ async fn an_advertisement_that_passes_every_check_is_accepted() {
         &highland_net::AllowedSources::Peers(highland_net::PeerSet::new([address])),
         address,
         42,
+        ReceptionPolicy::Strict,
         Duration::ZERO,
         None,
     );

@@ -1227,6 +1227,12 @@ and emits an actionable error naming the interface, address, and kernel error.
 - In multicast mode the group MUST be `224.0.0.18` for IPv4 and `ff02::12` for IPv6 unless
   overridden; TTL MUST be 255; membership MUST be joined on entering the instance and left
   on teardown.
+- The hop limit of an accepted advertisement MUST be 255. An instance MAY opt out of that
+  check with `allow_unconforming_hop_limit`, which is off by default, relaxes nothing
+  else, and MUST be logged at startup when it is on. It exists because Keepalived 2.3.3
+  sends IPv6 unicast advertisements with a hop limit of 64 and rejects `hop_limit` in both
+  its instance and global blocks, so a deployment cannot correct the peer; a node that
+  cannot hear its master is not a working backup.
 
 ### 14.4 Network namespaces `[I]`
 

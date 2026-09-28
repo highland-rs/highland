@@ -20,6 +20,8 @@ use std::time::{Duration, Instant};
 
 use highland_vrrp::{Advertisement, IpFamily};
 
+use crate::vrrp::ReceptionPolicy;
+
 use crate::error::{NetError, Result};
 use crate::vrrp::{Accepted, Datagram, Destinations, Peering, RateWindow, VRRP_IP_PROTOCOL};
 
@@ -41,6 +43,8 @@ pub struct SocketTransport {
     /// The TTL or hop limit of the last datagram read, so a caller that is told
     /// *why* a packet was refused can also say what it saw.
     last_ttl: std::sync::atomic::AtomicU8,
+    /// What this transport insists on beyond the protocol.
+    policy: ReceptionPolicy,
 }
 
 impl SocketTransport {
@@ -55,6 +59,7 @@ impl SocketTransport {
         interface: &str,
         source: IpAddr,
         peering: Peering,
+        policy: ReceptionPolicy,
     ) -> Result<Self> {
         // A group transport's socket is bound for receiving, which on IPv4 means
         // not being bound to the source address at all.
@@ -88,7 +93,14 @@ impl SocketTransport {
             destinations,
             source,
             last_ttl: std::sync::atomic::AtomicU8::new(0),
+            policy,
         })
+    }
+
+    /// What this transport insists on beyond the protocol, for a diagnostic.
+    #[must_use]
+    pub fn policy(&self) -> ReceptionPolicy {
+        self.policy
     }
 
     /// The TTL or hop limit of the last datagram read, or zero when nothing has
@@ -252,6 +264,7 @@ impl SocketTransport {
             &allowed,
             destination,
             vrid,
+            self.policy,
             now,
             Some(rate),
         );

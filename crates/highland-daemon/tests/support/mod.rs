@@ -262,6 +262,26 @@ impl Node {
         preempt: bool,
         vrid: u8,
     ) {
+        self.write_lenient(vip, prefix, priority, peer, extra, preempt, vrid, false);
+    }
+
+    /// As [`Node::write_config`], with the hop-limit compatibility switch set.
+    ///
+    /// It is a parameter rather than part of `extra` because it is a *key*, and a
+    /// key appended to the end of an instance lands inside whichever table came
+    /// last.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_lenient(
+        &self,
+        vip: &str,
+        prefix: u8,
+        priority: u8,
+        peer: Option<&str>,
+        extra: &str,
+        preempt: bool,
+        vrid: u8,
+        allow_unconforming_hop_limit: bool,
+    ) {
         let config = format!(
             "{}{extra}",
             configuration(
@@ -273,6 +293,7 @@ impl Node {
                 priority,
                 peer,
                 vrid,
+                allow_unconforming_hop_limit,
             )
         );
         std::fs::write(self.directory.join("config.toml"), config)
@@ -460,6 +481,9 @@ impl Node {
     /// Takes the peer rather than an address so the two configurations cannot be
     /// written from two different beliefs about the topology, which is the kind of
     /// mistake that produces a test that passes for the wrong reason.
+    ///
+    /// `extra` goes inside the `vrrp_instance` block; see
+    /// [`Keepalived::write_ipv6_config`].
     pub fn write_ipv6_config(&self, peer: &Keepalived, priority: u16, multicast: bool, vrid: u8) {
         let address = peer
             .link_local()
@@ -536,11 +560,17 @@ pub fn configuration(
     priority: u8,
     peer: Option<&str>,
     vrid: u8,
+    allow_unconforming_hop_limit: bool,
 ) -> String {
-    let network = match peer {
+    let mut network = match peer {
         Some(peer) => format!("mode = \"unicast\"\npeers = [\"{peer}\"]"),
         None => "mode = \"multicast\"".to_owned(),
     };
+    if allow_unconforming_hop_limit {
+        // Inside the network block, which is where the key belongs; appended to
+        // the instance it would land inside whichever table came last.
+        network.push_str("\nallow_unconforming_hop_limit = true");
+    }
     format!(
         r#"schema_version = 1
 
@@ -1155,7 +1185,7 @@ impl Keepalived {
         };
         if !deferred {
             let address = node.address.clone();
-            node.write_config(vip, peer, Some(&address));
+            node.write_config(vip, peer, Some(&address), "");
         }
         node
     }
@@ -1179,7 +1209,7 @@ impl Keepalived {
     ///
     /// Panics when the file cannot be written, which in a test means the
     /// temporary directory is gone.
-    pub fn write_config(&self, vip: &str, peer: Option<&str>, source: Option<&str>) {
+    pub fn write_config(&self, vip: &str, peer: Option<&str>, source: Option<&str>, extra: &str) {
         let addressing = match peer {
             // `source` is `None` for IPv6, where saying nothing is what makes
             // Keepalived use the link-local address that §5.1.2.1 names. Setting a
@@ -1196,13 +1226,14 @@ impl Keepalived {
         };
         let configuration = format!(
             "vrrp_instance VI_{vrid} {{\n    state BACKUP\n    version 3\n    interface {INTERFACE}\n    \
-             virtual_router_id {vrid}\n    priority {priority}\n    advert_int 1\n{addressing}    \
+             virtual_router_id {vrid}\n    priority {priority}\n    advert_int 1\n{extra}{addressing}    \
              authentication {{ auth_type PASS\n        auth_pass highland }}\n    \
              virtual_ipaddress {{ {vip} dev {INTERFACE} }}\n}}\n",
             vrid = self.vrid,
             INTERFACE = INTERFACE,
             priority = self.priority,
             addressing = addressing,
+            extra = extra,
             vip = vip,
         );
         std::fs::write(self.directory.join("keepalived.conf"), configuration)
@@ -1276,26 +1307,35 @@ impl Keepalived {
     #[must_use]
     pub fn holds_address(&self, address: &str) -> bool {
         let wanted = address.split('/').next().unwrap_or(address);
-        let output = Command::new("ip")
-            .args([
-                "netns",
-                "exec",
-                &self.namespace,
-                "ip",
-                "-o",
-                "-4",
-                "addr",
-                "show",
-                INTERFACE,
-            ])
-            .output()
-            .expect("ip runs");
-        String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-            // `ip -o addr` prints `inet 192.0.2.100/24`, so the prefix is
-            // stripped from the field as well as from the wanted address.
-            line.split_whitespace()
-                .any(|field| field.split('/').next().unwrap_or(field) == wanted)
-        })
+        // Both families: the IPv6 scenarios assert on an IPv6 address, and a
+        // helper that read only `ip -4` reports every IPv6 node as holding
+        // nothing, which looks like a protocol failure and is not one.
+        for family in ["-4", "-6"] {
+            let output = Command::new("ip")
+                .args([
+                    "netns",
+                    "exec",
+                    &self.namespace,
+                    "ip",
+                    family,
+                    "-o",
+                    "addr",
+                    "show",
+                    INTERFACE,
+                ])
+                .output()
+                .expect("ip runs");
+            let found = String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                // `ip -o addr` prints `inet6 2001:db8::100/64`, so the prefix is
+                // stripped from the field as well as from the wanted address.
+                line.split_whitespace()
+                    .any(|field| field.split('/').next().unwrap_or(field) == wanted)
+            });
+            if found {
+                return true;
+            }
+        }
+        false
     }
 
     /// The configuration this node was given, for a failure that is about it.
@@ -1398,7 +1438,19 @@ impl Keepalived {
         );
     }
     /// Writes this node's configuration from the *peer's* view of the segment.
-    pub fn write_ipv6_config(&self, peer: &Node, priority: u16, multicast: bool, _vrid: u8) {
+    ///
+    /// `extra` goes inside the `vrrp_instance` block, for the settings that are
+    /// about how this implementation sends rather than about what it claims:
+    /// `hop_limit 255` is the one that matters, and it is the whole of the
+    /// migration story for a Keepalived peer.
+    pub fn write_ipv6_config(
+        &self,
+        peer: &Node,
+        priority: u16,
+        multicast: bool,
+        _vrid: u8,
+        extra: &str,
+    ) {
         let address = peer
             .link_local()
             .expect("an IPv6 peer has a link-local address");
@@ -1406,7 +1458,12 @@ impl Keepalived {
         // No `unicast_src_ip`: §5.1.2.1 names the link-local address, and the
         // way to say that to Keepalived is to say nothing. Setting a global source
         // makes it relax the hop limit, which a conforming receiver discards.
-        self.write_config(&format!("{VIRTUAL_ADDRESS6}/64"), peer.as_deref(), None);
+        self.write_config(
+            &format!("{VIRTUAL_ADDRESS6}/64"),
+            peer.as_deref(),
+            None,
+            extra,
+        );
         let _ = priority;
     }
 }

@@ -90,6 +90,11 @@ pub struct InstancePlan {
     pub checks: Vec<CheckPlan>,
     /// The health policy the state machine applies to them.
     pub health: highland_core::health::HealthPolicyConfig,
+    /// Whether advertisements whose hop limit is not 255 are accepted.
+    ///
+    /// Off by default, and off means the check is enforced. See
+    /// `SPEC.md` §14.3 and `docs/user/migration.md`.
+    pub allow_unconforming_hop_limit: bool,
 }
 
 /// The health policy in force, with the instance's own total weight as the
@@ -190,6 +195,7 @@ impl InstancePlan {
             startup_delay: Duration::ZERO,
             checks: Vec::new(),
             health: highland_core::health::HealthPolicyConfig::default(),
+            allow_unconforming_hop_limit: false,
         }
     }
 
@@ -210,6 +216,7 @@ impl InstancePlan {
             startup_delay: instance.startup_delay.as_duration(),
             checks: instance.checks.iter().map(CheckPlan::from_config).collect(),
             health: health_policy(instance),
+            allow_unconforming_hop_limit: instance.network.allow_unconforming_hop_limit,
         }
     }
 }

@@ -66,8 +66,8 @@ pub use types::{
 };
 pub use vrrp::{
     Accepted, AllowedSources, DEFAULT_ACCEPT_RATE, Datagram, Destinations, FIXTURE_DESTINATION,
-    FIXTURE_SOURCE, MAX_DATAGRAM, PeerSet, Peering, REQUIRED_TTL, RateWindow, Rejection,
-    VRRP_IP_PROTOCOL, build, default_interval, fixture_advertisement,
+    FIXTURE_SOURCE, MAX_DATAGRAM, PeerSet, Peering, REQUIRED_TTL, RateWindow, ReceptionPolicy,
+    Rejection, VRRP_IP_PROTOCOL, build, default_interval, fixture_advertisement,
     fixture_advertisement_between, validate,
 };
 

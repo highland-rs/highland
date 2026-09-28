@@ -10,7 +10,9 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
-use highland_net::{Accepted, AllowedSources, Datagram, PeerSet, RateWindow, Rejection, validate};
+use highland_net::{
+    Accepted, AllowedSources, Datagram, PeerSet, RateWindow, ReceptionPolicy, Rejection, validate,
+};
 use highland_vrrp::{Advertisement, IpFamily, MaxAdverInt, Priority, Vrid};
 
 const VRID: u8 = 42;
@@ -61,6 +63,7 @@ fn accepted(bytes: &[u8]) -> Accepted {
         &allowed(peers()),
         destination(),
         VRID,
+        ReceptionPolicy::Strict,
         Duration::ZERO,
         None,
     )
@@ -117,6 +120,7 @@ fn a_ttl_other_than_255_is_rejected() {
             &allowed(peers()),
             destination(),
             VRID,
+            ReceptionPolicy::Strict,
             Duration::ZERO,
             None,
         );
@@ -137,6 +141,7 @@ fn an_advertisement_from_a_stranger_is_rejected() {
         &allowed(peers()),
         destination(),
         VRID,
+        ReceptionPolicy::Strict,
         Duration::ZERO,
         None,
     );
@@ -151,6 +156,7 @@ fn an_empty_peer_list_accepts_nothing() {
         &allowed(PeerSet::default()),
         destination(),
         VRID,
+        ReceptionPolicy::Strict,
         Duration::ZERO,
         None,
     );
@@ -165,6 +171,7 @@ fn an_advertisement_for_another_vrid_is_rejected() {
         &allowed(peers()),
         destination(),
         7,
+        ReceptionPolicy::Strict,
         Duration::ZERO,
         None,
     );
@@ -253,6 +260,7 @@ fn the_rate_window_drops_the_excess() {
             &allowed(peers()),
             destination(),
             VRID,
+            ReceptionPolicy::Strict,
             Duration::ZERO,
             Some(&mut window)
         ),
@@ -264,6 +272,7 @@ fn the_rate_window_drops_the_excess() {
             &allowed(peers()),
             destination(),
             VRID,
+            ReceptionPolicy::Strict,
             Duration::from_millis(10),
             Some(&mut window)
         ),
@@ -275,6 +284,7 @@ fn the_rate_window_drops_the_excess() {
             &allowed(peers()),
             destination(),
             VRID,
+            ReceptionPolicy::Strict,
             Duration::from_millis(20),
             Some(&mut window)
         )
@@ -290,6 +300,7 @@ fn the_rate_window_drops_the_excess() {
             &allowed(peers()),
             destination(),
             VRID,
+            ReceptionPolicy::Strict,
             Duration::from_millis(1020),
             Some(&mut window)
         ),
@@ -307,6 +318,7 @@ fn the_rate_limit_is_checked_before_the_expensive_checks() {
             &allowed(peers()),
             destination(),
             VRID,
+            ReceptionPolicy::Strict,
             Duration::ZERO,
             Some(&mut window)
         )
@@ -386,6 +398,7 @@ fn a_group_instance_accepts_a_source_that_is_not_on_any_list() {
         &AllowedSources::Group { group },
         group,
         VRID,
+        ReceptionPolicy::Strict,
         Duration::ZERO,
         None,
     );
@@ -415,6 +428,7 @@ fn a_group_instance_rejects_a_datagram_addressed_to_the_host() {
         &AllowedSources::Group { group },
         group,
         VRID,
+        ReceptionPolicy::Strict,
         Duration::ZERO,
         None,
     );
@@ -460,6 +474,7 @@ fn an_ipv6_checksum_is_verified_against_the_address_the_packet_arrived_at() {
         &AllowedSources::Group { group },
         group,
         VRID,
+        ReceptionPolicy::Strict,
         Duration::ZERO,
         None,
     );
@@ -480,6 +495,7 @@ fn an_ipv6_checksum_is_verified_against_the_address_the_packet_arrived_at() {
         &AllowedSources::Group { group: elsewhere },
         elsewhere,
         VRID,
+        ReceptionPolicy::Strict,
         Duration::ZERO,
         None,
     );

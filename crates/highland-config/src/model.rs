@@ -192,6 +192,25 @@ pub struct NetworkConfig {
     /// The multicast settings, used when `mode` is `multicast`.
     #[serde(default)]
     pub multicast: MulticastConfig,
+    /// Accept advertisements whose TTL or hop limit is not 255.
+    ///
+    /// Off by default, and off means the check is enforced: RFC 5798 §5.1.1.3 and
+    /// §5.1.2.3 both say a receiver MUST discard such a packet, and the reason is
+    /// that a value of 255 is the only one a packet can have if it did not cross a
+    /// router. Turning it on gives up that guarantee — an advertisement that
+    /// arrived from off this link would be believed — in exchange for hearing a
+    /// peer that gets it wrong.
+    ///
+    /// This exists for Keepalived 2.3.3, which sends IPv6 *unicast*
+    /// advertisements with a hop limit of 64 and has no setting to change it:
+    /// `hop_limit` is rejected in both `vrrp_instance` and `global_defs`. Its IPv6
+    /// *multicast* advertisements carry 255 and need nothing.
+    ///
+    /// The daemon logs a warning and counts a metric for every packet accepted
+    /// only because of this, so an operator is never guessing whether they are in
+    /// the degraded mode.
+    #[serde(default)]
+    pub allow_unconforming_hop_limit: bool,
 }
 
 impl NetworkConfig {

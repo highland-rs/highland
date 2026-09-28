@@ -612,6 +612,32 @@ Four more interoperability scenarios, and the IPv6 half of `G-01`:
   bug. The test asserts the conforming behaviour — discarded, with the value it
   carried in the reason — rather than skipping.
 
+### A switch for one Keepalived behaviour, and a migration guide
+
+Keepalived 2.3.3 sends IPv6 **unicast** advertisements with a hop limit of 64, and
+it rejects `hop_limit` as an unknown keyword in both a `vrrp_instance` block and
+`global_defs` — so the peer cannot be corrected from its side. Highland discards
+such a packet, as §5.1.2.3 requires, which means a Highland node cannot be a
+working backup to a Keepalived master over IPv6 unicast: it never takes over, and
+the only clue is a rejection counter.
+
+`[instance.network] allow_unconforming_hop_limit = true` changes that, and
+nothing else. It is off by default, it relaxes the hop limit only — version, VRID,
+checksum, peer identity and the rate limit are all still enforced — and the daemon
+logs a warning at startup when it is on, so an operator can tell from the log
+alone that a node is in the degraded mode.
+
+Both sides are tested against Keepalived: with the switch off the packet is
+discarded and the value is in the reason; with it on, Highland hears the master,
+holds off, and takes the address over inside `Master_Down_Interval`.
+
+`docs/user/migration.md` is new: which family and mode combinations interoperate,
+the field mapping, why IPv6 peers are link-local addresses, a cutover procedure
+that converts one instance at a time, how to confirm the advertisements are being
+heard, and how to roll back. The check that matters in that procedure is
+watching for `advertisement received` before trusting a failover, because a node
+that is hearing nothing looks exactly like a node that is working.
+
 ### Five more defects, all of them IPv6 or multicast
 
 - **A multicast node stepped down against itself.** The kernel loops group traffic
@@ -643,14 +669,9 @@ Four more interoperability scenarios, and the IPv6 half of `G-01`:
 
 ### Not delivered, and why
 
-- **Keepalived interoperability for IPv6 unicast** does not converge: Keepalived
-  sends a hop limit of 64 where §5.1.2.3 requires 255, and a conforming receiver
-  discards it. The interoperability suite asserts the discard rather than skipping
-  the case, and the handover is proven in the other direction, where the
-  advertisement that matters is one Highland produced.
-- **A hold-down `initial_grace_period` for the link-local** is handled by retrying
-  the bind, not by a configuration knob. A link-local that is still tentative is a
-  condition with a known duration, and waiting it out is the whole fix.
+- **Keepalived interoperability for IPv6 unicast** needs
+  `allow_unconforming_hop_limit = true`; see above and
+  `docs/user/migration.md`.
 - **Mixed-family instances** are still refused (`V-03`): one instance speaks one
   family per socket and one source address.
 

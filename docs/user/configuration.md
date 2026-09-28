@@ -71,6 +71,7 @@ address family (`V-03`).
 | `peers` | array of IP | `[]` | Family is inferred per entry, and a list may hold both families: peers of the other family are ignored. A VIP family with no peer is rejected in unicast mode (`V-07`). A local address is rejected (`V-08`); a multicast address is rejected (`V-09`); at most 255 (`L-03`). **For IPv6, name the peer's link-local address**: RFC 5798 §5.1.2.1 makes the link-local the source of every IPv6 advertisement, and a global address in the peer list is an address nothing will ever hear from |
 | `multicast.group` | IP | per family | Unset, so the group is `224.0.0.18` for an IPv4 instance and `ff02::12` for an IPv6 one, which is not the same address. A configured group must be a multicast address of the instance's family, or the instance is refused (`V-24`) |
 | `multicast.ttl` | integer | `255` | Anything else is rejected (`V-24`). The multicast TTL is a different socket option from the unicast one and defaults to 1, which every receiver would discard |
+| `allow_unconforming_hop_limit` | boolean | `false` | Accepts advertisements whose TTL or hop limit is not 255. Off means the check is enforced, as RFC 5798 requires. Turning it on gives up the only proof that an advertisement stayed on this link; it exists for Keepalived 2.3.3, which sends IPv6 unicast with a hop limit of 64 and rejects `hop_limit` in its own configuration. The daemon logs a warning at startup when it is on. See the [migration guide](migration.md) |
 
 ### `[instance.health]`
 

@@ -32,7 +32,7 @@
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
-use highland_net::{Accepted, AllowedSources, Datagram, VrrpSocket, validate};
+use highland_net::{Accepted, AllowedSources, Datagram, ReceptionPolicy, VrrpSocket, validate};
 use highland_vrrp::{IpFamily, Peek};
 
 #[test]
@@ -118,6 +118,7 @@ fn a_live_peers_packets_can_be_dumped() {
             },
             joined.or(received.destination).unwrap_or(bind),
             vrid,
+            ReceptionPolicy::Strict,
             Duration::ZERO,
             None,
         );

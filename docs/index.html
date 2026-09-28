@@ -813,7 +813,7 @@
     <div class="board__col board--no">
       <h3>Not yet</h3>
       <ul>
-        <li>Keepalived interoperability for <b>IPv4 unicast</b>, tested in both directions; IPv6 and multicast are not yet run against a second implementation</li>
+        <li>Keepalived interoperability for <b>IPv4 and IPv6, unicast and multicast</b>, five of six scenarios converging; the sixth is Keepalived sending an IPv6 hop limit of 64, which a conforming receiver must discard</li>
         <li>One instance holding both IPv4 and IPv6 addresses — refused, with a reason, rather than half-supported</li>
         <li><code class="mono">https</code>, <code class="mono">dns</code>, and <code class="mono">process</code> health checks, all refused by name at startup</li>
         <li>Changing a check list without restarting the instance</li>

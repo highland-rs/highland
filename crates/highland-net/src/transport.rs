@@ -38,6 +38,9 @@ pub struct SocketTransport {
     peering: Peering,
     destinations: Destinations,
     source: IpAddr,
+    /// The TTL or hop limit of the last datagram read, so a caller that is told
+    /// *why* a packet was refused can also say what it saw.
+    last_ttl: std::sync::atomic::AtomicU8,
 }
 
 impl SocketTransport {
@@ -84,7 +87,15 @@ impl SocketTransport {
             peering,
             destinations,
             source,
+            last_ttl: std::sync::atomic::AtomicU8::new(0),
         })
+    }
+
+    /// The TTL or hop limit of the last datagram read, or zero when nothing has
+    /// been read yet.
+    #[must_use]
+    pub fn last_ttl(&self) -> u8 {
+        self.last_ttl.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Returns how this transport reaches its peers.
@@ -205,6 +216,19 @@ impl SocketTransport {
         let Some(received) = self.socket.receive()? else {
             return Ok(None);
         };
+        // Recorded before validation, because the reason a packet was refused is
+        // only half the story without what it carried.
+        self.last_ttl
+            .store(received.ttl, std::sync::atomic::Ordering::Relaxed);
+        // Our own advertisements come back to us in multicast mode: the kernel
+        // loops group traffic back to the sending host, so a node hears itself
+        // once a second. Treating that as a peer's advertisement makes a master
+        // step down against itself, and since it is then a backup it times out,
+        // takes over again, and flaps forever. A node ignores its own.
+        if received.source == self.source {
+            return Ok(None);
+        }
+
         // The destination is needed for an IPv6 checksum, and it is known rather
         // than guessed: a multicast datagram arrived at the group this transport
         // joined, and a unicast one at the address this socket is bound to.

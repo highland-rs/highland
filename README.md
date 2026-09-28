@@ -8,9 +8,8 @@ virtual IP failover, built around VRRPv3.
 > the address moving — runs in the test suite between two real network
 > namespaces, over IPv4 and IPv6, unicast and multicast, with loss, reordering, a
 > one-way partition, a link flap, and a frozen node injected into the segment.
-> Keepalived interoperability is tested for IPv4 unicast, in both directions; IPv6
-> and multicast are not yet run against a second implementation, and the table
-> below says so. See [`docs/SPEC.md`](docs/SPEC.md) §27 for the milestone plan and
+> Keepalived interoperability is tested for IPv4 and IPv6, unicast and multicast.
+> See [`docs/SPEC.md`](docs/SPEC.md) §27 for the milestone plan and
 > [`CHANGELOG.md`](CHANGELOG.md) for what has landed.
 
 ## What Highland is
@@ -103,8 +102,8 @@ walkthrough and [the CLI reference](docs/user/cli.md) for every command.
 | `highland-checks`: spec, thresholds, debouncer, scheduler, and `tcp` / `http` / `unix` / `interface` probes | Implemented, tested. `https`, `dns`, `process`, `file`, and `composite` are refused by name |
 | `highland-cli`: `run`, `status`, `show`, `events`, `reload`, `pause`, `resume`, `relinquish`, `force-transition`, `check-config` | Implemented, tested against a live daemon |
 | Chaos: loss, one-way partition, reordering, duplication, link flap, frozen process | Implemented, five scenarios |
-| Keepalived interoperability, IPv4 unicast, both directions | Implemented, tested, and it found a real protocol defect: the IPv4 checksum scope the RFC requires |
-| Keepalived interoperability for IPv6 and multicast | Not run yet |
+| Keepalived interoperability, IPv4 and IPv6, unicast and multicast | Implemented and tested; five of six scenarios converge, and it found a real protocol defect (the IPv4 checksum scope the RFC requires) |
+| Keepalived as an IPv6 **unicast** master | Does not converge: Keepalived sends a hop limit of 64 where §5.1.2.3 requires 255, and a conforming receiver discards it. Asserted, not skipped |
 | One instance holding both IPv4 and IPv6 addresses | Refused (`V-03`); use one instance per family |
 | `sd_notify` readiness, configurable hold-down and retry, a `--yes` confirmation prompt | Not implemented |
 

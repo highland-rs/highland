@@ -22,6 +22,13 @@ use std::time::{Duration, Instant};
 /// The interface inside each namespace, named as an operator would name it.
 pub const INTERFACE: &str = "eth0";
 
+/// The VRID the default configuration uses.
+///
+/// A test that puts another implementation on a different VRID has to say so on
+/// both sides: two nodes on different virtual routers cannot hear each other at
+/// all, and the failure looks exactly like a firewall.
+pub const VRID: u8 = 42;
+
 /// The other node's address in the default IPv4 pair.
 ///
 /// The pair is the one the failover and chaos suites use, so deriving the peer
@@ -38,7 +45,7 @@ pub fn peer_of(address: &str) -> &'static str {
 /// The address the two nodes fight over, from the RFC 5737 documentation range.
 pub const VIRTUAL_ADDRESS: &str = "192.0.2.100";
 /// The same address, in IPv6, from the RFC 3849 documentation range.
-pub const VIRTUAL_ADDRESS6: &str = "2001:db8::100";
+pub const VIRTUAL_ADDRESS6: &str = "2001:db8:c::100";
 /// The address node A sends from.
 pub const A_ADDRESS: &str = "192.0.2.11";
 /// The address node B sends from.
@@ -115,8 +122,8 @@ impl Node {
         )
     }
 
-    /// As [`Node::create_full`], with extra configuration appended to the
-    /// instance, which is how a test adds a health check.
+    /// Creates a node and gives it extra configuration, which is how a test adds
+    /// a health check.
     #[allow(clippy::too_many_arguments)]
     pub fn create_with_checks(
         namespace: &str,
@@ -129,10 +136,20 @@ impl Node {
         peer: Option<&str>,
         extra: &str,
     ) -> Self {
-        // The address and the virtual address share a prefix length, because
-        // they are on the same segment; a test that wanted otherwise would be
-        // building a topology, not a node.
-        let address_prefix = prefix;
+        let node = Self::attach(namespace, address, bridge, prefix);
+        node.write_config(vip, prefix, priority, peer, extra, preempt, VRID);
+        node
+    }
+
+    /// Creates the namespace, the link, and the node's own address, but no
+    /// configuration file.
+    ///
+    /// Split in two because of IPv6. The address a peer must be told about is the
+    /// link-local one, and a link-local address does not exist until the link is
+    /// up — so a test cannot write node A's peer list before it has created node
+    /// B. [`Node::write_config`] closes that gap.
+    #[must_use]
+    pub fn attach(namespace: &str, address: &str, bridge: &str, prefix: u8) -> Self {
         let name = Self::name(namespace);
         run(&["netns", "del", &name], true);
 
@@ -166,13 +183,9 @@ impl Node {
             &["netns", "exec", &name, "ip", "link", "set", "lo", "up"],
             false,
         );
-        // `nodad` for IPv6, because a tentative address cannot be bound to: the
-        // kernel refuses a socket whose address is still being checked for
-        // duplicates, so a daemon that starts immediately after an address is
-        // added fails with `EADDRNOTAVAIL` for a while. A deployment that
-        // configures an address statically wants the same thing, and the
-        // alternative — sleeping and hoping — is a flaky test rather than a
-        // fix.
+        // `nodad` for IPv6: a tentative address cannot be bound to, and a test
+        // that binds immediately after adding one would fail for a reason that
+        // has nothing to do with the protocol.
         let mut address_command = vec![
             "netns".to_owned(),
             "exec".to_owned(),
@@ -180,7 +193,7 @@ impl Node {
             "ip".to_owned(),
             "addr".to_owned(),
             "add".to_owned(),
-            format!("{address}/{address_prefix}"),
+            format!("{address}/{prefix}"),
             "dev".to_owned(),
             INTERFACE.to_owned(),
         ];
@@ -195,18 +208,81 @@ impl Node {
 
         let directory = std::env::temp_dir().join(format!("highland-{name}"));
         std::fs::create_dir_all(&directory).expect("the instance directory can be created");
-        let config = format!(
-            "{}{extra}",
-            configuration(namespace, &directory, preempt, vip, prefix, priority, peer)
-        );
-        std::fs::write(directory.join("config.toml"), config)
-            .expect("the configuration can be written");
 
         Self {
             namespace: name,
             directory,
             daemon: None,
         }
+    }
+
+    /// The node's link-local address, or `None` when it has none.
+    ///
+    /// The address RFC 5798 §5.1.2.1 says an IPv6 advertisement is sent from, and
+    /// therefore the address a peer has to be configured with.
+    #[must_use]
+    pub fn link_local(&self) -> Option<String> {
+        let output = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &self.namespace,
+                "ip",
+                "-o",
+                "-6",
+                "addr",
+                "show",
+                "dev",
+                INTERFACE,
+                "scope",
+                "link",
+            ])
+            .output()
+            .expect("ip runs");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| line.split_whitespace().nth(3))
+            .map(|address| address.split('/').next().unwrap_or(address).to_owned())
+    }
+
+    /// Writes the configuration file this node will run.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the file cannot be written, which in a test means the
+    /// temporary directory is gone.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_config(
+        &self,
+        vip: &str,
+        prefix: u8,
+        priority: u8,
+        peer: Option<&str>,
+        extra: &str,
+        preempt: bool,
+        vrid: u8,
+    ) {
+        let config = format!(
+            "{}{extra}",
+            configuration(
+                &self.namespace,
+                &self.directory,
+                preempt,
+                vip,
+                prefix,
+                priority,
+                peer,
+                vrid,
+            )
+        );
+        std::fs::write(self.directory.join("config.toml"), config)
+            .expect("the configuration can be written");
+    }
+
+    /// The configuration this node was given, for a failure that is about it.
+    #[must_use]
+    pub fn config_text(&self) -> String {
+        std::fs::read_to_string(self.directory.join("config.toml")).unwrap_or_default()
     }
 
     /// Starts the daemon, capturing its output so a failure can explain itself.
@@ -336,6 +412,69 @@ impl Node {
             .iter()
             .any(|address| address.to_string() == vip)
     }
+    /// Waits until this node's link-local address is no longer tentative.
+    ///
+    /// An IPv6 interface gets a link-local address from the kernel the moment the
+    /// link is up, and it is *tentative* while duplicate address detection runs. A
+    /// test that starts a daemon in that window is measuring IPv6 rather than
+    /// VRRP, so the harness waits — which is also what an operator does, since a
+    /// node's configuration is written after its interfaces exist.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no link-local address appears within the budget, which means
+    /// IPv6 is disabled for the interface rather than slow.
+    pub fn wait_for_stable_link_local(&self) {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(10) {
+            let tentative = Command::new("ip")
+                .args([
+                    "netns",
+                    "exec",
+                    &self.namespace,
+                    "ip",
+                    "-o",
+                    "-6",
+                    "addr",
+                    "show",
+                    "dev",
+                    INTERFACE,
+                    "scope",
+                    "link",
+                ])
+                .output()
+                .expect("ip runs");
+            let text = String::from_utf8_lossy(&tentative.stdout);
+            if text.contains("inet6") && !text.contains("tentative") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!(
+            "no stable link-local address on {} after 10s",
+            self.namespace
+        );
+    }
+    /// Writes this node's configuration from the *peer's* view of the segment.
+    ///
+    /// Takes the peer rather than an address so the two configurations cannot be
+    /// written from two different beliefs about the topology, which is the kind of
+    /// mistake that produces a test that passes for the wrong reason.
+    pub fn write_ipv6_config(&self, peer: &Keepalived, priority: u16, multicast: bool, vrid: u8) {
+        let address = peer
+            .link_local()
+            .expect("an IPv6 peer has a link-local address");
+        let peer = if multicast { None } else { Some(address) };
+        self.write_config(
+            VIRTUAL_ADDRESS6,
+            64,
+            u8::try_from(priority).expect("a VRRP priority fits in a byte"),
+            peer.as_deref(),
+            "",
+            false,
+            vrid,
+        );
+    }
 }
 
 impl Drop for Node {
@@ -396,6 +535,7 @@ pub fn configuration(
     prefix: u8,
     priority: u8,
     peer: Option<&str>,
+    vrid: u8,
 ) -> String {
     let network = match peer {
         Some(peer) => format!("mode = \"unicast\"\npeers = [\"{peer}\"]"),
@@ -416,7 +556,7 @@ socket = "{socket}"
 [[instance]]
 name = "api"
 interface = "{INTERFACE}"
-vrid = 42
+vrid = {vrid}
 priority = {priority}
 advertisement_interval = "1s"
 startup_delay = "0s"
@@ -430,6 +570,7 @@ address = "{vip}/{prefix}"
 "#,
         namespace = namespace,
         vip = vip,
+        vrid = vrid,
         prefix = prefix,
         priority = priority,
         socket = directory.join("control.sock").display(),
@@ -867,6 +1008,9 @@ pub struct Keepalived {
 
 impl Keepalived {
     /// Creates the namespace and writes Keepalived's configuration.
+    ///
+    /// `peer` is `None` for multicast mode, which is Keepalived's default and is
+    /// what the specification names: no peer list, and the group.
     #[must_use]
     pub fn create(
         namespace: &str,
@@ -875,7 +1019,77 @@ impl Keepalived {
         bridge: &str,
         priority: u16,
         vrid: u8,
-        peer: &str,
+        peer: Option<&str>,
+    ) -> Self {
+        Self::create_full(namespace, address, vip, bridge, priority, vrid, peer, false)
+    }
+
+    /// Creates the namespace and writes Keepalived's configuration, without a
+    /// peer list, which is multicast mode.
+    #[must_use]
+    pub fn multicast(
+        namespace: &str,
+        address: &str,
+        vip: &str,
+        bridge: &str,
+        priority: u16,
+        vrid: u8,
+    ) -> Self {
+        Self::create_full(namespace, address, vip, bridge, priority, vrid, None, true)
+    }
+
+    /// Creates the namespace, the link, and the address, and writes the
+    /// configuration later, for the same reason `Node::attach` exists: an IPv6
+    /// link-local address is not known until the link is up.
+    #[must_use]
+    pub fn attach(
+        namespace: &str,
+        address: &str,
+        vip: &str,
+        bridge: &str,
+        priority: u16,
+        vrid: u8,
+        peer: Option<&str>,
+    ) -> Self {
+        Self::create_full(namespace, address, vip, bridge, priority, vrid, peer, false)
+    }
+
+    /// The node's link-local address, or `None` when it has none.
+    #[must_use]
+    pub fn link_local(&self) -> Option<String> {
+        let output = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &self.namespace,
+                "ip",
+                "-o",
+                "-6",
+                "addr",
+                "show",
+                "dev",
+                INTERFACE,
+                "scope",
+                "link",
+            ])
+            .output()
+            .expect("ip runs");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| line.split_whitespace().nth(3))
+            .map(|address| address.split('/').next().unwrap_or(address).to_owned())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_full(
+        namespace: &str,
+        address: &str,
+        vip: &str,
+        bridge: &str,
+        priority: u16,
+        vrid: u8,
+        peer: Option<&str>,
+        deferred: bool,
     ) -> Self {
         let name = Node::name(namespace);
         run(&["netns", "del", &name], true);
@@ -905,7 +1119,17 @@ impl Keepalived {
         );
         run(
             &[
-                "netns", "exec", &name, "ip", "addr", "add", address, "dev", INTERFACE,
+                "netns",
+                "exec",
+                &name,
+                "ip",
+                "addr",
+                "add",
+                // The prefix comes from the family, so a caller cannot ask for an
+                // IPv6 address on a /24 and wonder why the kernel objects.
+                &format!("{address}/{}", if address.contains(':') { 64 } else { 24 }),
+                "dev",
+                INTERFACE,
             ],
             false,
         );
@@ -921,32 +1145,68 @@ impl Keepalived {
         // `version 3` is not optional: without it Keepalived speaks VRRPv2, and
         // a version-3-only receiver discards the result as `bad_version`. The
         // first interoperability failure was exactly that.
-        let configuration = format!(
-            "vrrp_instance VI_{vrid} {{
-    state BACKUP
-    version 3
-    interface {INTERFACE}
-    virtual_router_id {vrid}
-    priority {priority}
-    advert_int 1
-    unicast_src_ip {address}
-    unicast_peer {{ {peer} }}
-    authentication {{ auth_type PASS
-        auth_pass highland }}
-    virtual_ipaddress {{ {vip} dev {INTERFACE} }}
-}}\n"
-        );
-        let path = directory.join("keepalived.conf");
-        std::fs::write(&path, configuration).expect("the configuration can be written");
-
-        Self {
+        let node = Self {
             namespace: name,
             directory,
             address: address.to_owned(),
             priority,
             vrid,
             process: None,
+        };
+        if !deferred {
+            let address = node.address.clone();
+            node.write_config(vip, peer, Some(&address));
         }
+        node
+    }
+
+    /// Writes Keepalived's configuration.
+    ///
+    /// `peer` is `None` for multicast mode, and `source` is the address to
+    /// configure as `unicast_src_ip` — or `None` to let Keepalived choose.
+    ///
+    /// The distinction is the RFC's, and it is the whole of IPv6:
+    ///
+    /// - §5.1.1.1 names the *primary IPv4 address* as the IPv4 source, so a
+    ///   unicast IPv4 configuration states it.
+    /// - §5.1.2.1 names the *link-local* address as the IPv6 source, and the
+    ///   right way to say that to Keepalived is to say nothing: it then uses the
+    ///   link-local address. Configuring a global IPv6 source makes Keepalived
+    ///   relax the hop limit, which a conforming receiver must discard (§5.1.2.3),
+    ///   and the two nodes then time each other out.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the file cannot be written, which in a test means the
+    /// temporary directory is gone.
+    pub fn write_config(&self, vip: &str, peer: Option<&str>, source: Option<&str>) {
+        let addressing = match peer {
+            // `source` is `None` for IPv6, where saying nothing is what makes
+            // Keepalived use the link-local address that §5.1.2.1 names. Setting a
+            // global source there makes it relax the hop limit, which a
+            // conforming receiver then discards.
+            Some(peer) => {
+                let src = match source {
+                    Some(address) => format!("    unicast_src_ip {address}\n"),
+                    None => String::new(),
+                };
+                format!("{src}    unicast_peer {{ {peer} }}\n")
+            }
+            None => String::new(),
+        };
+        let configuration = format!(
+            "vrrp_instance VI_{vrid} {{\n    state BACKUP\n    version 3\n    interface {INTERFACE}\n    \
+             virtual_router_id {vrid}\n    priority {priority}\n    advert_int 1\n{addressing}    \
+             authentication {{ auth_type PASS\n        auth_pass highland }}\n    \
+             virtual_ipaddress {{ {vip} dev {INTERFACE} }}\n}}\n",
+            vrid = self.vrid,
+            INTERFACE = INTERFACE,
+            priority = self.priority,
+            addressing = addressing,
+            vip = vip,
+        );
+        std::fs::write(self.directory.join("keepalived.conf"), configuration)
+            .expect("the configuration can be written");
     }
 
     /// Starts Keepalived and waits until it has reported a state.
@@ -1038,10 +1298,49 @@ impl Keepalived {
         })
     }
 
+    /// The configuration this node was given, for a failure that is about it.
+    #[must_use]
+    pub fn config_text(&self) -> String {
+        std::fs::read_to_string(self.directory.join("keepalived.conf")).unwrap_or_default()
+    }
+
     /// The address this node sends from.
     #[must_use]
     pub fn address(&self) -> &str {
         &self.address
+    }
+
+    /// The multicast groups this node's interface has joined, read from the
+    /// kernel.
+    #[must_use]
+    pub fn multicast_groups(&self) -> Vec<String> {
+        let output = Command::new("ip")
+            .args([
+                "netns",
+                "exec",
+                &self.namespace,
+                "ip",
+                "-o",
+                "maddr",
+                "show",
+                "dev",
+                INTERFACE,
+            ])
+            .output()
+            .expect("ip runs");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut groups = Vec::new();
+        for line in text.lines() {
+            for prefix in ["inet6 ", "inet "] {
+                if let Some(rest) = line.split(prefix).nth(1) {
+                    let address = rest.split_whitespace().next().unwrap_or_default();
+                    if !address.is_empty() {
+                        groups.push(address.to_owned());
+                    }
+                }
+            }
+        }
+        groups
     }
 
     /// The priority this node advertises.
@@ -1055,12 +1354,59 @@ impl Keepalived {
     pub fn vrid(&self) -> u8 {
         self.vrid
     }
-}
-
-impl Drop for Keepalived {
-    fn drop(&mut self) {
-        self.kill();
-        run(&["netns", "del", &self.namespace], true);
-        let _ = std::fs::remove_dir_all(&self.directory);
+    /// Waits until this node's link-local address is no longer tentative.
+    ///
+    /// An IPv6 interface gets a link-local address from the kernel the moment the
+    /// link is up, and it is *tentative* while duplicate address detection runs. A
+    /// test that starts a daemon in that window is measuring IPv6 rather than
+    /// VRRP, so the harness waits — which is also what an operator does, since the
+    /// node's configuration is written after its interfaces exist.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no link-local address appears within the budget, which means
+    /// IPv6 is disabled for the interface rather than slow.
+    pub fn wait_for_stable_link_local(&self) {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(10) {
+            let tentative = Command::new("ip")
+                .args([
+                    "netns",
+                    "exec",
+                    &self.namespace,
+                    "ip",
+                    "-o",
+                    "-6",
+                    "addr",
+                    "show",
+                    "dev",
+                    INTERFACE,
+                    "scope",
+                    "link",
+                ])
+                .output()
+                .expect("ip runs");
+            let text = String::from_utf8_lossy(&tentative.stdout);
+            if text.contains("inet6") && !text.contains("tentative") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        panic!(
+            "no stable link-local address on {} after 10s",
+            self.namespace
+        );
+    }
+    /// Writes this node's configuration from the *peer's* view of the segment.
+    pub fn write_ipv6_config(&self, peer: &Node, priority: u16, multicast: bool, _vrid: u8) {
+        let address = peer
+            .link_local()
+            .expect("an IPv6 peer has a link-local address");
+        let peer = if multicast { None } else { Some(address) };
+        // No `unicast_src_ip`: §5.1.2.1 names the link-local address, and the
+        // way to say that to Keepalived is to say nothing. Setting a global source
+        // makes it relax the hop limit, which a conforming receiver discards.
+        self.write_config(&format!("{VIRTUAL_ADDRESS6}/64"), peer.as_deref(), None);
+        let _ = priority;
     }
 }

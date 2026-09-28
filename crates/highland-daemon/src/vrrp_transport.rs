@@ -28,6 +28,18 @@ use highland_net::{Accepted, Peering, RateWindow, SocketTransport};
 use crate::executor::{Transport, TransportError};
 use crate::options::InstancePlan;
 
+/// How many times a socket bind is attempted before giving up.
+///
+/// Enough to outlast duplicate address detection. The kernel's default is one
+/// solicitation with a one-second retransmit, and a link that has just come up
+/// can be a second or two from usable; six seconds is comfortably past that and
+/// still short enough that a genuinely misconfigured address is reported without
+/// an operator thinking the daemon has hung.
+pub(crate) const BIND_ATTEMPTS: u32 = 6;
+
+/// How long to wait between bind attempts.
+pub(crate) const BIND_RETRY: Duration = Duration::from_secs(1);
+
 /// How long the reader sleeps when nothing has arrived.
 ///
 /// The socket read is non-blocking, so this is the whole of the reader's
@@ -50,13 +62,25 @@ pub struct VrrpTransport {
 }
 
 impl VrrpTransport {
-    /// Binds a transport for one instance.
+    /// Binds a transport for one instance, waiting out IPv6 duplicate address
+    /// detection if it is in the way.
+    ///
+    /// RFC 5798 §5.1.2.1 says an IPv6 advertisement is sent from the interface's
+    /// link-local address, and a link-local address the kernel has just created is
+    /// *tentative* for about a second while duplicate address detection runs. A
+    /// socket cannot be bound to a tentative address — the kernel answers
+    /// `EINVAL` — so a daemon that started in that window would refuse to start
+    /// for a second, on every boot, with a message about a socket.
+    ///
+    /// Retrying is the difference between a node that is briefly late and a node
+    /// that does not come up.
     ///
     /// # Errors
     ///
     /// Returns [`TransportError`] when the socket cannot be created or bound,
-    /// which needs `CAP_NET_RAW`.
-    pub fn bind(
+    /// which needs `CAP_NET_RAW`, or when the address is still unusable after
+    /// [`BIND_ATTEMPTS`] tries.
+    pub async fn bind(
         plan: &InstancePlan,
         interface: &str,
         source: IpAddr,
@@ -74,10 +98,35 @@ impl VrrpTransport {
             return Err(TransportError::NoPeers { family });
         }
 
-        let inner = SocketTransport::bind(family, interface, source, peering).map_err(|error| {
-            TransportError::Unavailable {
-                reason: error.to_string(),
+        let mut last = String::new();
+        let mut inner = None;
+        for attempt in 1..=BIND_ATTEMPTS {
+            match SocketTransport::bind(family, interface, source, peering.clone()) {
+                Ok(transport) => {
+                    inner = Some(transport);
+                    break;
+                }
+                Err(error) => {
+                    last = error.to_string();
+                    if attempt < BIND_ATTEMPTS {
+                        tracing::debug!(
+                            instance = %plan.name,
+                            %source,
+                            attempt,
+                            "waiting for the source address to become usable"
+                        );
+                        tokio::time::sleep(BIND_RETRY).await;
+                    }
+                }
             }
+        }
+        let inner = inner.ok_or_else(|| TransportError::Unavailable {
+            reason: format!(
+                "could not bind a VRRP socket to {source} on {interface} after {BIND_ATTEMPTS} \
+                 attempts: {last}. An IPv6 link-local address is unusable while duplicate address \
+                 detection is still running, and for a second or so after the link comes up; if \
+                 the address is not IPv6, check that it is configured and not a virtual address"
+            ),
         })?;
         Ok(Self {
             inner: Arc::new(inner),
@@ -105,6 +154,12 @@ impl VrrpTransport {
     #[must_use]
     pub fn peering_mode(&self) -> &'static str {
         self.inner.peering().mode()
+    }
+
+    /// The TTL or hop limit of the last datagram read, for a rejection message.
+    #[must_use]
+    pub fn last_ttl(&self) -> u8 {
+        self.inner.last_ttl()
     }
 
     /// Returns the peers this transport sends to.
@@ -179,6 +234,11 @@ impl VrrpTransport {
                     // nothing to do with it here, and inventing an event for it
                     // would let an unauthenticated peer drive the machine.
                     Ok(Some(Accepted::Rejected(reason))) => {
+                        // With the value that caused it: a `bad_ttl` rejection is
+                        // a very different problem from a `bad_checksum` one, and
+                        // "why" alone sends an operator looking in the wrong
+                        // place.
+                        let received_ttl = transport.last_ttl();
                         // Counted, never delivered. An unauthenticated peer must
                         // not be able to move a role, and must not be able to
                         // grow the metric set either (`R-20`).
@@ -208,6 +268,7 @@ impl VrrpTransport {
                                 instance = %transport.name,
                                 reason = reason.as_str(),
                                 seen = count,
+                                ttl = received_ttl,
                                 "discarded a VRRP packet; if a peer is configured, it is not \
                                  being heard"
                             );

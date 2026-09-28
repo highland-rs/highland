@@ -589,16 +589,70 @@ it discards for each reason**, and every thousandth after that. The defect was
 invisible for a whole milestone because the count only reached a metric
 endpoint, and a metric nobody has enabled is not an explanation.
 
+### IPv6 and multicast, against a second implementation
+
+Four more interoperability scenarios, and the IPv6 half of `G-01`:
+
+- IPv4 multicast, with no peer list on either side: the group is joined on both
+  nodes (read from the kernel, not from the configuration that asked for it), one
+  node takes the address, and the other stays a backup.
+- IPv6 multicast over `ff02::12`, and Keepalived's advertisement is then
+  **decoded and re-encoded byte for byte** — the IPv6 counterpart of
+  `KEEPALIVED_V4_ADVERTISEMENT`, covering the two things an encoder is most
+  likely to get wrong: a sixteen-octet address list, and a pseudo-header with
+  sixteen-octet addresses in it. Captured rather than frozen, because the link-local
+  source differs on every machine and a checked-in vector could never be compared.
+- IPv6 unicast with Highland the master: the peer stays a backup, which is the
+  proof that it understood the advertisements.
+- IPv6 unicast with Keepalived the master: **not reachable, and the reason is
+  recorded rather than worked around.** Keepalived 2.3.3 advertises IPv6 unicast
+  with a hop limit of 64; its IPv6 multicast advertisements carry 255, which is why
+  the multicast scenario passes. RFC 5798 §5.1.2.3 says a receiver MUST discard such
+  a packet, so Highland is right to and a receiver that accepted it would be the
+  bug. The test asserts the conforming behaviour — discarded, with the value it
+  carried in the reason — rather than skipping.
+
+### Five more defects, all of them IPv6 or multicast
+
+- **A multicast node stepped down against itself.** The kernel loops group traffic
+  back to the sending host, so a master heard its own advertisement once a second
+  and, at equal priority, lost the tie-break against its own address. A node now
+  ignores datagrams from its own source address (`I-50`). Multicast between two
+  Highland nodes hid this, because their tie-break went the other way by luck.
+- **The received destination was never read.** `IP_PKTINFO` and `IPV6_PKTINFO`
+  arrive as *typed* control messages in `nix`, and the reader looked only for
+  untyped ones — so the destination was always `None`, the IPv6 checksum was
+  verified against a guess, and the narrowing that lets a multicast instance reject
+  a datagram addressed to the host rather than to the group was dead code.
+- **An IPv6 socket could not be bound to a link-local address at all.** A
+  link-local address is only meaningful with an interface, and binding one with a
+  scope of zero is `EINVAL` — so IPv6 VRRP, which §5.1.2.1 says is sent *from* the
+  link-local address, could not start. The bind now carries the scope.
+- **A demoted IPv6 node advertised from the wrong address.** The runner took the
+  first IPv6 address on the interface, which on a host with a global address is not
+  the link-local the RFC names. The source is now the link-local for IPv6, and the
+  IPv4 rule — the primary address — is unchanged, because the difference is the
+  RFC's (`I-51`).
+- **The daemon would not start during IPv6 duplicate address detection.** A
+  link-local the kernel has just created is *tentative* for about a second, and a
+  socket cannot bind to a tentative address. Without a retry a node refused to
+  start on every boot, with a message about a socket; now it waits, and the error
+  that eventually surfaces names the cause.
+
 ### A capture that works, because `tcpdump` did not
 
-`tcpdump` sees nothing in this container's networking, and neither does an
-`AF_PACKET` socket — which is why a capture-based interoperability test was not
-an option and the bytes had to come from the socket that was already receiving
-them. That is now a test-only module, `highland_net::frames`, and a probe that
-prints a live peer's frames field by field. One audited `unsafe`, the
-initialisation of bytes a packet socket has just written.
-
 ### Not delivered, and why
+
+- **Keepalived interoperability for IPv6 unicast** does not converge: Keepalived
+  sends a hop limit of 64 where §5.1.2.3 requires 255, and a conforming receiver
+  discards it. The interoperability suite asserts the discard rather than skipping
+  the case, and the handover is proven in the other direction, where the
+  advertisement that matters is one Highland produced.
+- **A hold-down `initial_grace_period` for the link-local** is handled by retrying
+  the bind, not by a configuration knob. A link-local that is still tentative is a
+  condition with a known duration, and waiting it out is the whole fix.
+- **Mixed-family instances** are still refused (`V-03`): one instance speaks one
+  family per socket and one source address.
 
 ### Known limitations
 

@@ -50,20 +50,35 @@ IPVS, and the LVS integration.
 - **Mixed families.** An instance is single-family (`V-03`). Split the
   configuration if you need both: one instance per family, with the addresses
   split between them.
+- **IPv6 peers are link-local addresses.** RFC 5798 §5.1.2.1 makes the link-local
+  address the source of every IPv6 advertisement, so a peer list naming a global
+  address is an address nothing will ever hear from. The configuration reference
+  says so where the key is described.
 - **Preemption.** A master that sees a higher-priority advertisement steps down
   regardless of `preempt` (`R-16`). `preempt` only governs whether a backup may
   take over an existing master.
 - **Degraded advertisement.** Highland never advertises master without owning
   the VIPs. There is no compatibility switch for this (`I-04`).
-- **IPv4 unicast is tested against Keepalived, in both directions.** A Highland
-  master holds the address against a Keepalived backup, and a Keepalived master
-  hands the address over to a Highland backup when it is killed. Both are in
-  `crates/highland-daemon/tests/interop.rs` and both run in CI.
-- **IPv6 and multicast have not been run against another implementation.** The
-  two-node suite covers them between two Highland nodes, and the IPv6 checksum
-  scope is answered by the RFC text and by the IPv4 finding — the same
-  pseudo-header for both families — but a second implementation has not been on
-  the other end of an IPv6 or multicast segment.
+- **Unicast and multicast, IPv4 and IPv6, are tested against Keepalived**, in
+  `crates/highland-daemon/tests/interop.rs`, in CI. Five of the six scenarios
+  converge:
+
+  | Scenario | Result |
+  |---|---|
+  | IPv4 unicast, Highland master | Converges; Keepalived stays a backup |
+  | IPv4 unicast, Keepalived master | Converges, and the address is handed over on a kill |
+  | IPv4 multicast | Converges, with `224.0.0.18` joined on both nodes |
+  | IPv6 multicast | Converges, with `ff02::12` joined on both |
+  | IPv6 unicast, Highland master | Converges; Keepalived stays a backup |
+  | IPv6 unicast, Keepalived master | **Does not converge** — see below |
+
+- **IPv6 unicast from Keepalived does not converge, and the reason is
+  Keepalived's.** Keepalived 2.3.3 advertises IPv6 unicast with a hop limit of
+  **64**; its IPv6 multicast advertisements carry 255, which is why the multicast
+  scenario passes. RFC 5798 §5.1.2.3 says a receiver MUST discard a packet whose
+  hop limit is not 255, so Highland is right to discard it and an implementation
+  that accepted it would be the bug. The test asserts the discard, with the value
+  in the reason, rather than skipping the case.
 
 ## Capture-based diagnosis
 

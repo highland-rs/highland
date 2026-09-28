@@ -1585,10 +1585,13 @@ Each invariant is a named test requirement.
 20. `I-48` The instance's interface is watched continuously, and the loss of the interface or
     of carrier causes the address to be relinquished without waiting for a timer to expire.
     A node learns of a dead link by looking, not by having an operation fail.
-21. `I-49` A claimed address is announced to the segment, and a takeover is observable by a
-    third party: a namespace running no daemon resolves the address to the old master and
-    must see it change to the new one within seconds, rather than when a cache entry ages
-    out.
+22. `I-50` A node MUST NOT treat a datagram it sent as a peer's advertisement. The kernel
+    loops multicast traffic back to the sending host, so without this a master steps down
+    against itself on a tie, and the address oscillates.
+23. `I-51` An IPv6 advertisement MUST be sent from, and received by, the interface's
+    link-local address (§5.1.2.1), and a peer list naming a global address names an address
+    no advertisement will arrive from.
+
 
 ---
 
@@ -2019,11 +2022,18 @@ documentation, packaging.
 Exit (`M-09`): every `L-nn` is asserted by a test; `docs/user/threat-model.md` covers every
 `S-nn`; compatibility tests pass in both directions.
 
-The IPv4 direction passes today in `crates/highland-daemon/tests/interop.rs`, against
-Keepalived 2.3.3 in two namespaces on a bridge: Highland master with Keepalived backup
-(the backup's staying a backup is the proof that it understood the advertisements), and
-Keepalived master with Highland backup, handing the address over when the master is
-killed. The suite needs the `keepalived` binary and reports a skip without it.
+`crates/highland-daemon/tests/interop.rs` runs Highland against Keepalived 2.3.3 in two
+namespaces on a bridge, in six scenarios: IPv4 and IPv6, unicast and multicast, each with
+the master on either side. Five converge. The sixth — Keepalived as an IPv6 *unicast*
+master — does not, because Keepalived sends a hop limit of 64 where §5.1.2.3 requires
+255; a conforming receiver MUST discard that, so the test asserts the discard, with the
+value in the reason, and the handover is proven in the other direction. The suite needs
+the `keepalived` binary and reports a skip without it.
+
+One scenario also decodes a real implementation's IPv6 advertisement and re-encodes it,
+comparing byte for byte. It is the IPv6 counterpart of `KEEPALIVED_V4_ADVERTISEMENT` and
+covers a sixteen-octet address list and a sixteen-octet pseudo-header; it is captured
+rather than frozen because the link-local source differs on every machine.
 
 ### Milestone 9 — 1.0 candidate `[1]`
 

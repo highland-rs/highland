@@ -211,6 +211,11 @@ impl VrrpSocket {
             source: std::io::Error::from_raw_os_error(error as i32),
         })?;
 
+        // Resolved before the address is built, because a link-local bind needs
+        // the scope and a link-local *send* needs it as well.
+        let self_index = interface_index(interface)?;
+        let index = self_index;
+
         let bound = match (bound_source, any_address) {
             (SocketAddrV4Bound::V4(_), true) => SockAddr::from(std::net::SocketAddrV4::new(
                 std::net::Ipv4Addr::UNSPECIFIED,
@@ -220,7 +225,17 @@ impl VrrpSocket {
                 SockAddr::from(std::net::SocketAddrV4::new(address, 0))
             }
             (SocketAddrV4Bound::V6(address), _) => {
-                SockAddr::from(std::net::SocketAddrV6::new(address, 0, 0, 0))
+                // A link-local address is only meaningful together with an
+                // interface, and the kernel says so: binding one with a scope of
+                // zero is `EINVAL`. RFC 5798 §5.1.2.1 makes the link-local
+                // address the source of every IPv6 advertisement, so this is not
+                // an edge case — it is the only case IPv6 has.
+                let scope = if address.is_unicast_link_local() {
+                    self_index as u32
+                } else {
+                    0
+                };
+                SockAddr::from(std::net::SocketAddrV6::new(address, 0, 0, scope))
             }
         };
         socket.bind(&bound).map_err(|source| NetError::Io {
@@ -233,8 +248,6 @@ impl VrrpSocket {
                 operation: "binding a VRRP socket to an interface",
                 source,
             })?;
-
-        let index = interface_index(interface)?;
 
         Ok(Self {
             socket,
@@ -636,10 +649,11 @@ fn address_v6(address: Option<SockaddrIn6>) -> Result<IpAddr> {
 
 /// Reads the address an IPv4 datagram was sent to, from `IP_PKTINFO`.
 ///
-/// The message arrives untyped, as eight octets: an interface index and the
-/// address. They are read as bytes rather than through a cast, because a
-/// family-agnostic control buffer is not a `struct in_pktinfo`, and treating it as
-/// one would be a reinterpretation this crate has no reason to make.
+/// The message is a *typed* `in_pktinfo` in `nix`, so reading it means matching
+/// the variant. Looking only for an unknown message finds nothing, and the
+/// destination is then unknown to every caller — which for a VRRP receiver is
+/// the difference between verifying an IPv6 checksum against the address the
+/// packet arrived at and verifying it against a guess.
 fn received_destination_v4<S>(outcome: &nix::sys::socket::RecvMsg<'_, '_, S>) -> Option<IpAddr>
 where
     S: nix::sys::socket::SockaddrLike,
@@ -647,14 +661,10 @@ where
     use nix::sys::socket::ControlMessageOwned;
 
     for message in outcome.cmsgs().ok()? {
-        if let ControlMessageOwned::Unknown(unknown) = message
-            && unknown.cmsg_header.cmsg_type == nix::libc::IP_PKTINFO
-            && unknown.data_bytes.len() >= 8
-        {
-            let octets: [u8; 4] = unknown.data_bytes[4..8].try_into().ok()?;
-            return Some(IpAddr::V4(std::net::Ipv4Addr::from(u32::from_ne_bytes(
-                octets,
-            ))));
+        if let ControlMessageOwned::Ipv4PacketInfo(info) = message {
+            return Some(IpAddr::V4(std::net::Ipv4Addr::from(
+                info.ipi_spec_dst.s_addr,
+            )));
         }
     }
     None
@@ -662,8 +672,7 @@ where
 
 /// Reads the address an IPv6 datagram was sent to, from `IPV6_PKTINFO`.
 ///
-/// Twenty-four octets: an interface index, the address, and the length of that
-/// address. Only the address is wanted here.
+/// A typed `in6_pktinfo`, for the reason the IPv4 reader gives.
 fn received_destination_v6<S>(outcome: &nix::sys::socket::RecvMsg<'_, '_, S>) -> Option<IpAddr>
 where
     S: nix::sys::socket::SockaddrLike,
@@ -671,12 +680,8 @@ where
     use nix::sys::socket::ControlMessageOwned;
 
     for message in outcome.cmsgs().ok()? {
-        if let ControlMessageOwned::Unknown(unknown) = message
-            && unknown.cmsg_header.cmsg_type == nix::libc::IPV6_PKTINFO
-            && unknown.data_bytes.len() >= 20
-        {
-            let octets: [u8; 16] = unknown.data_bytes[4..20].try_into().ok()?;
-            return Some(IpAddr::V6(std::net::Ipv6Addr::from(octets)));
+        if let ControlMessageOwned::Ipv6PacketInfo(info) = message {
+            return Some(IpAddr::V6(std::net::Ipv6Addr::from(info.ipi6_addr.s6_addr)));
         }
     }
     None

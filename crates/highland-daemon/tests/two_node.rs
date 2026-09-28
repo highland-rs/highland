@@ -34,6 +34,52 @@ use support::{
     VIRTUAL_ADDRESS6, bridge, wait_for, wait_stable,
 };
 
+/// Two IPv6 nodes whose peer lists name each other's link-local address.
+///
+/// RFC 5798 §5.1.2.1 makes the link-local address the source of every IPv6
+/// advertisement, and a peer list has to match it: a peer named by its global
+/// address is an address nothing will ever hear from. Neither address is known
+/// until the link is up, which is why this is two steps rather than one.
+fn ipv6_pair_with_link_local_peers(
+    first_namespace: &str,
+    second_namespace: &str,
+    vip: &str,
+    first_priority: u8,
+    second_priority: u8,
+    peer: Option<&str>,
+) -> (Node, Node) {
+    let guard = bridge();
+    let name = guard.name.clone();
+    let first = Node::attach(first_namespace, "2001:db8:c::11", &name, 64);
+    let second = Node::attach(second_namespace, "2001:db8:c::12", &name, 64);
+    first.wait_for_stable_link_local();
+    second.wait_for_stable_link_local();
+    let first_link_local = first.link_local().expect("the first node has one");
+    let second_link_local = second.link_local().expect("the second node has one");
+    first.write_config(
+        vip,
+        64,
+        first_priority,
+        peer.map(|_| second_link_local.as_str()),
+        "",
+        false,
+        support::VRID,
+    );
+    second.write_config(
+        vip,
+        64,
+        second_priority,
+        peer.map(|_| first_link_local.as_str()),
+        "",
+        false,
+        support::VRID,
+    );
+    // The bridge is forgotten rather than dropped, and the nodes hold their veth
+    // ends by name, so the segment outlives this function.
+    std::mem::forget(guard);
+    (first, second)
+}
+
 /// `Master_Down_Interval` for a one-second interval at priority 150 (SPEC.md §13.3).
 const MASTER_DOWN_BUDGET: Duration = Duration::from_millis(3600);
 
@@ -295,31 +341,8 @@ fn two_nodes_in_ipv4_multicast_mode_elect_one_master_and_fail_over() {
 /// produces packets that are correct in every field and rejected by the peer.
 #[test]
 fn two_nodes_in_ipv6_unicast_mode_elect_one_master_and_fail_over() {
-    let guard = bridge();
-    let name = guard.name.clone();
-    let (mut first, mut second) = (
-        Node::create_full(
-            "v6a",
-            "2001:db8:a::11",
-            &name,
-            false,
-            150,
-            VIRTUAL_ADDRESS6,
-            64,
-            Some("2001:db8:a::12"),
-        ),
-        Node::create_full(
-            "v6b",
-            "2001:db8:a::12",
-            &name,
-            false,
-            150,
-            VIRTUAL_ADDRESS6,
-            64,
-            Some("2001:db8:a::11"),
-        ),
-    );
-    let _bridge_guard = guard;
+    let (mut first, mut second) =
+        ipv6_pair_with_link_local_peers("v6a", "v6b", VIRTUAL_ADDRESS6, 150, 100, Some("peer"));
     first.start();
     second.start();
 
@@ -330,30 +353,32 @@ fn two_nodes_in_ipv6_unicast_mode_elect_one_master_and_fail_over() {
     assert!(
         elected,
         "IPv6 unicast elected no master: a={:?} b={:?}\n--- a ---\n{}\n--- b ---\n{}",
-        first.addresses_of(VIRTUAL_ADDRESS6),
-        second.addresses_of(VIRTUAL_ADDRESS6),
+        first.addresses(),
+        second.addresses(),
         first.log(),
         second.log()
     );
 
+    // Whichever node won, killing it must hand the address over inside the
+    // budget, and the survivor must be the one holding it.
     let (master, survivor) = if first.holds(VIRTUAL_ADDRESS6) {
         (&mut first, &second)
     } else {
         (&mut second, &first)
     };
-    let old = master.hardware_address();
     master.kill();
     let moved = wait_for("the IPv6 VIP moved", MASTER_DOWN_BUDGET, || {
         survivor.holds(VIRTUAL_ADDRESS6)
     });
     assert!(
         moved,
-        "the IPv6 address did not move\n--- survivor ---\n{}",
-        survivor.log()
+        "the IPv6 address did not move: a={:?} b={:?}",
+        first.addresses(),
+        second.addresses()
     );
     assert_ne!(
+        master.hardware_address(),
         survivor.hardware_address(),
-        old,
         "the survivor is a different node, which is the point"
     );
 }
@@ -362,12 +387,8 @@ fn two_nodes_in_ipv6_unicast_mode_elect_one_master_and_fail_over() {
 /// a link-local destination has to carry.
 #[test]
 fn two_nodes_in_ipv6_multicast_mode_elect_one_master_and_fail_over() {
-    let (mut first, mut second) = multicast_pair(
-        "v6m",
-        ["2001:db8:b::11", "2001:db8:b::12"],
-        VIRTUAL_ADDRESS6,
-        64,
-    );
+    let (mut first, mut second) =
+        ipv6_pair_with_link_local_peers("v6m", "v6n", VIRTUAL_ADDRESS6, 150, 100, None);
     first.start();
     second.start();
 
@@ -381,8 +402,8 @@ fn two_nodes_in_ipv6_multicast_mode_elect_one_master_and_fail_over() {
     assert!(
         elected,
         "IPv6 multicast elected no master: a={:?} b={:?}\n--- a ---\n{}\n--- b ---\n{}",
-        first.addresses_of(VIRTUAL_ADDRESS6),
-        second.addresses_of(VIRTUAL_ADDRESS6),
+        first.addresses(),
+        second.addresses(),
         first.log(),
         second.log()
     );
@@ -398,8 +419,9 @@ fn two_nodes_in_ipv6_multicast_mode_elect_one_master_and_fail_over() {
     });
     assert!(
         moved,
-        "the IPv6 multicast address did not move\n--- survivor ---\n{}",
-        survivor.log()
+        "the IPv6 multicast address did not move: a={:?} b={:?}",
+        first.addresses(),
+        second.addresses()
     );
 }
 

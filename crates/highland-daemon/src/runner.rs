@@ -220,6 +220,7 @@ async fn start_instances(
                 ownership.peering.clone(),
                 std::sync::Arc::clone(metrics),
             )
+            .await
             .map_err(|error| DaemonError::Runtime(format!("instance {}: {error}", plan.name)))?,
         );
 
@@ -369,11 +370,33 @@ async fn source_address(
         .iter()
         .map(highland_net::IpCidr::address)
         .collect();
-    let primary = interface
+    let real: Vec<IpAddr> = interface
         .addresses
         .iter()
         .map(highland_net::IpCidr::address)
-        .find(|address| !virtual_addresses.contains(address));
+        .filter(|address| !virtual_addresses.contains(address))
+        .collect();
+
+    // RFC 5798 §5.1.2.1: "This is the IPv6 link-local address of the interface
+    // the packet is being sent from." Not the first IPv6 address on the
+    // interface, and not a configured one. The link-local address is the one a
+    // peer can keep sending to across a renumbering, and an implementation that
+    // advertises from a global address is sending from an address the protocol
+    // does not name.
+    //
+    // For IPv4 the primary address is correct (§5.1.1.1), so the families differ
+    // here and the difference is the RFC's, not a preference.
+    let primary = match ownership.family() {
+        Some(highland_vrrp::IpFamily::V6) => real
+            .iter()
+            .copied()
+            .find(|address| match address {
+                IpAddr::V6(address) => address.is_unicast_link_local(),
+                IpAddr::V4(_) => false,
+            })
+            .or_else(|| real.first().copied()),
+        _ => real.first().copied(),
+    };
 
     match primary {
         Some(address) => {

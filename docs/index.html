@@ -772,10 +772,10 @@
 
       <div class="sim__ctl">
         <button class="ctl ctl--danger" id="btnFail" type="button">Kill master</button>
-        <button class="ctl" id="btnHealth" type="button">Fail health check</button>
+        <button class="ctl" id="btnHealth" type="button" title="Assumes the peer has preempt enabled — a demoted master keeps advertising, and only a preempting backup takes over">Fail health check</button>
         <button class="ctl" id="btnReturn" type="button" disabled>Return master</button>
         <button class="ctl" id="btnReset" type="button">Reset</button>
-        <span class="sim__hint">master-down = 3 × adver_int + Skew_Time · depends on priority</span>
+        <span class="sim__hint">master-down = 3 × adver_int + Skew_Time · depends on priority · the health scenario assumes preempt on the peer</span>
       </div>
     </div>
   </div>
@@ -791,7 +791,10 @@
     to the segment, and the address moving — runs in the test suite between two
     real network namespaces, over IPv4 and IPv6, unicast and multicast, with
     packet loss, reordering, a one-way partition, a link flap, and a frozen node
-    injected into the segment. What is left is written down, not implied.
+    injected into the segment. The same suite runs Highland against
+    <b>Keepalived</b>, the implementation most deployments already have, in seven
+    scenarios, and decodes a real peer's advertisement to compare it byte for
+    byte. What is left is written down, not implied.
   </p>
 
   <div class="board reveal" style="margin-block-start:2.5rem">
@@ -807,15 +810,16 @@
         <li>Control socket, Prometheus metrics, and an event history with a cursor</li>
         <li>Transactional reload, applied by <code class="mono">highland reload</code> or <code class="mono">SIGHUP</code> — one path, so the two cannot disagree</li>
         <li>Native <code class="mono">tcp</code>, <code class="mono">http</code>, <code class="mono">unix</code>, and <code class="mono">interface</code> health checks, with thresholds and weighted demotion</li>
-        <li>Interoperability with Keepalived over IPv4 unicast, in both directions, which found a checksum scope the RFC requires and the two implementations disagreed about</li>
+        <li>Interoperability with Keepalived across IPv4 and IPv6, unicast and multicast, with the master on either side — seven scenarios, which found a checksum scope the RFC requires and the two implementations disagreed about</li>
       </ul>
     </div>
     <div class="board__col board--no">
       <h3>Not yet</h3>
       <ul>
-        <li>Keepalived interoperability for <b>IPv4 and IPv6, unicast and multicast</b>, five of six scenarios converging; the sixth is Keepalived sending an IPv6 hop limit of 64, which a conforming receiver must discard</li>
+
         <li>One instance holding both IPv4 and IPv6 addresses — refused, with a reason, rather than half-supported</li>
         <li><code class="mono">https</code>, <code class="mono">dns</code>, and <code class="mono">process</code> health checks, all refused by name at startup</li>
+        <li>One interoperability case needs a setting: Keepalived sends IPv6 <b>unicast</b> with a hop limit of 64 and rejects <code class="mono">hop_limit</code> in its own configuration, so a Highland backup needs <code class="mono">allow_unconforming_hop_limit = true</code>. Off by default, logged when on, and it relaxes nothing else. The <a href="user/migration.md">migration guide</a> has the cutover</li>
         <li>Changing a check list without restarting the instance</li>
         <li>Configurable hold-down and retry, and a <code class="mono">--yes</code> confirmation prompt</li>
         <li>An <code class="mono">sd_notify</code> readiness message, so the unit file uses <code class="mono">Type=simple</code></li>

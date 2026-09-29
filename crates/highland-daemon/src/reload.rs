@@ -161,6 +161,30 @@ pub fn classify(running: &InstanceConfig, candidate: &InstanceConfig) -> Change 
     if running.network.mode != candidate.network.mode {
         restart.push("network.mode".to_owned());
     }
+    // The rest of the network configuration is read once, when the socket is
+    // bound: the peer list is the `PeerSet` the transport was built with, the
+    // multicast group and TTL are socket options set at that moment, and
+    // `allow_unconforming_hop_limit` is a value passed into the bind. None of
+    // them can be changed underneath a running socket.
+    //
+    // They were not compared at all, so a change to any of them was classified
+    // as `Change::None`: the reload reported itself applied, the generation went
+    // up, the event history recorded a change, and the node kept using the
+    // values it had started with. The hop-limit flag is the sharpest case -- it
+    // is the one that relaxes TTL enforcement, so a file that says it is off and
+    // a running socket that has it on is a security-relevant divergence that
+    // nothing reports.
+    if running.network.peers != candidate.network.peers {
+        restart.push("network.peers".to_owned());
+    }
+    if running.network.multicast != candidate.network.multicast {
+        restart.push("network.multicast".to_owned());
+    }
+    if running.network.allow_unconforming_hop_limit
+        != candidate.network.allow_unconforming_hop_limit
+    {
+        restart.push("network.allow_unconforming_hop_limit".to_owned());
+    }
     if running.vip_addresses() != candidate.vip_addresses() {
         restart.push("vip".to_owned());
     }
@@ -259,15 +283,72 @@ address = "192.0.2.100/24"
         assert_eq!(plan.changes[0].1.fields(), ["priority"]);
     }
 
+    /// Every field the executor reads at bind time has to be compared, or a
+    /// change to it is a reload that reports success and changes nothing.
+    ///
+    /// The list here is the field list of `NetworkConfig` minus `mode`, which
+    /// already had a case. Deriving it would be better still; spelling it out
+    /// with a test that fails when a field is added is the next best thing, and
+    /// better than the state this replaces.
     #[test]
-    fn a_peer_change_is_reloadable() {
+    fn every_bound_network_field_is_compared() {
+        let cases: [(&str, &str, &str); 4] = [
+            (
+                "network.peers",
+                "peers = [\"192.0.2.11\"]",
+                "peers = [\"192.0.2.11\", \"192.0.2.12\"]",
+            ),
+            ("network.multicast", "", ""),
+            (
+                "network.allow_unconforming_hop_limit",
+                "mode = \"unicast\"",
+                "mode = \"unicast\"\nallow_unconforming_hop_limit = true",
+            ),
+            (
+                "network.multicast",
+                "mode = \"unicast\"",
+                "mode = \"multicast\"",
+            ),
+        ];
+
+        for (field, from, to) in cases {
+            let candidate = if from.is_empty() {
+                RUNNING.replace(
+                    "[[instance.vip]]",
+                    "[instance.network.multicast]\nttl = 100\n\n[[instance.vip]]",
+                )
+            } else {
+                RUNNING.replace(from, to)
+            };
+            let running = config(RUNNING);
+            let candidate_config = config(&candidate);
+            let change = classify(&running.instances[0], &candidate_config.instances[0]);
+            assert_ne!(
+                change,
+                Change::None,
+                "{field} is read when the socket binds, so a change to it must be seen"
+            );
+        }
+    }
+
+    #[test]
+    fn a_peer_change_is_seen_at_all() {
         let candidate = RUNNING.replace(
             "peers = [\"192.0.2.11\"]",
             "peers = [\"192.0.2.11\", \"192.0.2.12\"]",
         );
         let plan = plan(&config(RUNNING), &config(&candidate));
 
-        assert!(plan.is_applicable(), "peers are a reloadable field");
+        // This assertion used to be `assert!(plan.is_applicable(), "peers are a
+        // reloadable field")`, and it passed while the change was classified as
+        // `Change::None` -- because `None` is applicable. The field was never
+        // compared, so a peer change was invisible to the planner, and the test
+        // said so in a way that read like coverage.
+        assert_ne!(
+            plan.changes[0].1,
+            Change::None,
+            "adding a peer must be seen by the planner"
+        );
     }
 
     #[test]

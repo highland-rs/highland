@@ -213,6 +213,16 @@ pub enum ControlResponse {
         /// The sequence number of the newest event returned, which a client sends
         /// back as `since` on its next request.
         latest: u64,
+        /// How many events were dropped from the history before `since`, because
+        /// the ring overwrote them while the client was away.
+        ///
+        /// The history is bounded, so a client that is away long enough misses
+        /// events, and without this the history a client receives is
+        /// indistinguishable from a complete one. A client that sees a non-zero
+        /// count knows its view has a gap, and can say so rather than reporting a
+        /// quiet period that never happened.
+        #[serde(default)]
+        dropped: u64,
     },
     /// The request was refused.
     Error {

@@ -108,6 +108,29 @@ impl EventRing {
     pub fn dropped(&self) -> u64 {
         self.dropped
     }
+
+    /// Returns how many events were dropped at or before `sequence`.
+    ///
+    /// This is the number a *client* needs, and it is what `dropped` alone
+    /// cannot answer: a follower that reconnects with a cursor and finds the
+    /// total has gone up does not know whether the loss happened before or after
+    /// where it was. The count of events that fell off the front of the ring and
+    /// are numbered at or below `sequence` is exactly the gap that client cannot
+    /// see, because those events are no longer in the buffer to be counted.
+    ///
+    /// With no such event, zero.
+    #[must_use]
+    pub fn dropped_through(&self, sequence: u64) -> u64 {
+        self.events.front().map_or(self.dropped, |(oldest, _)| {
+            // The retained window starts at `oldest`, so everything numbered
+            // below it is gone. A client that has already seen up to `sequence`
+            // missed exactly the gone events numbered above `sequence`, which is
+            // `oldest - 1 - sequence`, bounded by everything ever dropped so a
+            // cursor past the end cannot inflate it.
+            let last_gone = oldest.saturating_sub(1);
+            last_gone.saturating_sub(sequence).min(self.dropped)
+        })
+    }
 }
 
 impl Default for EventRing {
@@ -247,5 +270,71 @@ mod sequence_tests {
         let ring = EventRing::with_capacity(4);
         assert_eq!(ring.latest(), 0);
         assert!(ring.since(0, 10).is_empty());
+    }
+
+    /// A client resuming from a cursor that has fallen off the front of the ring
+    /// must be able to learn that it missed something.
+    #[test]
+    fn dropped_through_reports_the_gap_a_client_cannot_see() {
+        let mut ring = EventRing::with_capacity(2);
+        ring.push(event("one")); // sequence 1
+        ring.push(event("two")); // sequence 2
+        ring.push(event("three")); // sequence 3, drops 1
+        ring.push(event("four")); // sequence 4, drops 2
+
+        assert_eq!(ring.dropped(), 2);
+        // Retained are 3 and 4. A client whose cursor is 2 has seen everything
+        // up to 2, and 3 and 4 are both still here, so it missed nothing.
+        assert_eq!(
+            ring.dropped_through(2),
+            0,
+            "a client inside the window missed nothing"
+        );
+        // A client at sequence 0 has lost everything before 3.
+        assert_eq!(
+            ring.dropped_through(0),
+            2,
+            "a client from the start missed the first two"
+        );
+        // A cursor past the end has already seen everything it could, so there is
+        // no gap to report -- and the count must not grow with the cursor.
+        assert_eq!(
+            ring.dropped_through(9_999),
+            0,
+            "a cursor past the end missed nothing"
+        );
+    }
+
+    /// Before anything is dropped there is no gap to report, whatever the cursor.
+    #[test]
+    fn dropped_through_is_zero_while_nothing_has_been_dropped() {
+        let mut ring = EventRing::with_capacity(8);
+        ring.push(event("one"));
+        ring.push(event("two"));
+        assert_eq!(ring.dropped_through(0), 0);
+        assert_eq!(ring.dropped_through(1), 0);
+        assert_eq!(ring.dropped_through(999), 0);
+    }
+
+    /// A cursor one below the oldest retained event has missed exactly the one
+    /// that was dropped, and one above it has missed nothing: the boundary.
+    #[test]
+    fn dropped_through_is_exact_at_the_boundary() {
+        let mut ring = EventRing::with_capacity(2);
+        for reason in ["one", "two", "three", "four"] {
+            ring.push(event(reason));
+        }
+        // Retained are 3 and 4; 1 and 2 are gone.
+        assert_eq!(ring.dropped_through(0), 2, "missed both");
+        assert_eq!(ring.dropped_through(1), 1, "missed one");
+        assert_eq!(ring.dropped_through(2), 0, "missed none");
+    }
+
+    /// An empty ring has dropped nothing, and must not report a gap.
+    #[test]
+    fn dropped_through_on_an_empty_ring_is_zero() {
+        let ring = EventRing::with_capacity(4);
+        assert_eq!(ring.dropped_through(0), 0);
+        assert_eq!(ring.dropped_through(42), 0);
     }
 }

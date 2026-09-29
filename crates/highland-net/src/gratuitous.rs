@@ -131,13 +131,23 @@ pub fn neighbour_advertisement(hardware: HardwareAddress, address: Ipv6Addr) -> 
     // The target address is the address being claimed.
     message.extend_from_slice(&address.octets());
 
-    // Flags: override set, solicited clear, router clear. The top four bits are
-    // reserved and zero.
-    message.push(0b1000_0000);
+    // Flags and reserved: a 32-bit field, of which 20 bits are reserved, then
+    // Override, then two reserved bits, then Router (RFC 4861 §4.4).
+    //
+    // Four bytes, not one. It used to be a single octet, which put the option
+    // type inside the flags word and left the message three octets short: 30
+    // bytes against the 32 this function reserves. A Neighbour Advertisement
+    // that does not parse is discarded by the kernel, so on an IPv6 takeover the
+    // neighbour cache was not updated and the announcement did nothing at all --
+    // silently, and only on IPv6.
+    message.extend_from_slice(&[0b1000_0000, 0, 0, 0]);
 
-    // Option type 2: target link-layer address, length one unit of 8 octets.
+    // Option type 2, target link-layer address. The length is a single octet
+    // counting 8-octet units, and a 6-octet hardware address is one unit, so the
+    // option is exactly 8 octets. It used to be written as a 16-bit length, which
+    // shifted the hardware address by an octet and made the option 9 octets long.
     message.push(2);
-    message.extend_from_slice(&1u16.to_be_bytes());
+    message.push(1);
     message.extend_from_slice(&hardware);
 
     message
@@ -428,38 +438,70 @@ mod tests {
         );
     }
 
+    /// The message is checked against RFC 4861 §4.4 field by field, from the
+    /// layout rather than from the code that builds it.
+    ///
+    /// The previous version of this test asserted what the builder happened to
+    /// write, including a one-octet flags field and a 16-bit option length, so it
+    /// confirmed the bug rather than catching it. A test that reads its
+    /// expectations out of the implementation cannot fail when the implementation
+    /// is wrong.
+    #[test]
+    fn a_neighbour_advertisement_is_the_size_rfc_4861_describes() {
+        let address = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 100);
+        let message = neighbour_advertisement(HARDWARE, address);
+
+        // 4 header + 16 target + 4 flags + 8 option. The option is 8 octets: one
+        // type, one length, and a 6-octet hardware address.
+        assert_eq!(
+            message.len(),
+            32,
+            "RFC 4861 §4.4: 4 + 16 + 4 + 8; a short message is discarded"
+        );
+    }
+
+    /// A Neighbour Advertisement that the kernel will accept.
     #[test]
     fn a_neighbour_advertisement_overrides_the_cache_and_asks_nothing() {
         let address = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 100);
         let message = neighbour_advertisement(HARDWARE, address);
 
-        assert_eq!(message[0], ICMPV6_NEIGHBOUR_ADVERTISEMENT);
+        assert_eq!(message[0], ICMPV6_NEIGHBOUR_ADVERTISEMENT, "type");
         assert_eq!(message[1], 0, "a neighbour advertisement has no code");
         assert_eq!(&message[2..4], &[0, 0], "the kernel writes the checksum");
+
+        // Target address, the 16 octets straight after the header.
         assert_eq!(
             &message[4..20],
             &address.octets(),
             "the target is the address claimed"
         );
+
+        // The flags word is four octets: Override, Solicited, Router, reserved.
+        let flags = &message[20..24];
         assert_eq!(
-            message[20] & 0b1000_0000,
+            flags[0] & 0b1000_0000,
             0b1000_0000,
-            "override, or the receiver would ignore the new claim"
+            "override, or the new claim is ignored"
         );
         assert_eq!(
-            message[20] & 0b0100_0000,
+            flags[0] & 0b0100_0000,
             0,
             "not solicited, because nobody asked"
         );
         assert_eq!(
-            message[20] & 0b0010_0000,
+            flags[0] & 0b0010_0000,
             0,
             "not a router, because it is not one"
         );
-        assert_eq!(message[21], 2, "the link-layer address option");
-        assert_eq!(&message[22..24], &[0, 1], "one 8-octet unit");
+        assert_eq!(&flags[1..], &[0, 0, 0], "the reserved bits are zero");
+
+        // The option: type 2, a one-octet length of one 8-octet unit, then the
+        // hardware address.
+        assert_eq!(message[24], 2, "the target link-layer address option");
+        assert_eq!(message[25], 1, "one 8-octet unit, as a single octet");
         assert_eq!(
-            &message[24..30],
+            &message[26..32],
             &HARDWARE,
             "the new neighbour's hardware address"
         );

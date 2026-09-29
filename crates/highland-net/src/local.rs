@@ -66,6 +66,49 @@ pub fn local_addresses() -> io::Result<Vec<IpAddr>> {
 /// answer the question `V-08` asks. Returning an error rather than an empty list
 /// keeps "unknown" distinguishable from "none configured", which is the
 /// distinction the caller needs in order to decide whether to enforce the check.
+/// Returns the name of every interface configured on this host.
+///
+/// A separate call from [`local_addresses`] rather than a tuple return, because
+/// the two answer different questions and callers need them separately: a
+/// `getifaddrs` entry with no address still names a real interface, and an
+/// interface with only a link-local address is still bindable.
+///
+/// # Errors
+///
+/// Returns an error if the kernel's interface list cannot be read, with the
+/// same meaning as [`local_addresses`]: the answer is unknown, not empty.
+#[cfg(unix)]
+pub fn interface_names() -> io::Result<Vec<String>> {
+    // `getifaddrs` yields one entry per configured address plus one for the
+    // hardware address, so an interface with four addresses appears four times.
+    // The callers ask whether a name exists, but a function that returns the
+    // name of every interface should not report the same one four times.
+    // A `for` loop rather than an iterator chain, because the two are not the
+    // same type: on Linux `getifaddrs` returns an iterator, and on macOS a
+    // `Vec`. `.into_iter()` is a no-op on one and required on the other, which
+    // clippy reports on the platform where it is redundant.
+    let mut names = Vec::new();
+    for entry in nix::ifaddrs::getifaddrs()? {
+        names.push(entry.interface_name);
+    }
+    names.sort_unstable();
+    names.dedup();
+    Ok(names)
+}
+
+/// Returns the name of every interface configured on this host.
+///
+/// # Errors
+///
+/// Always fails here, for the same reason as [`local_addresses`].
+#[cfg(not(unix))]
+pub fn interface_names() -> io::Result<Vec<String>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "enumerating local interfaces is not implemented on this platform",
+    ))
+}
+
 #[cfg(not(unix))]
 pub fn local_addresses() -> io::Result<Vec<IpAddr>> {
     Err(io::Error::new(
@@ -96,6 +139,38 @@ mod tests {
 
     /// The check is only useful if the answer changes with the host's
     /// configuration, and the cheapest witness is that the list is not empty.
+    /// The loopback interface exists on every host, and it is the interface a
+    /// test can name without knowing anything about the machine it runs on.
+    ///
+    /// The name is not the same everywhere: Linux calls it `lo`, macOS `lo0`.
+    #[test]
+    fn loopback_is_a_local_interface() {
+        let Ok(names) = super::interface_names() else {
+            return;
+        };
+        assert!(
+            names.iter().any(|name| name == "lo" || name == "lo0"),
+            "the loopback interface must be reported, got: {names:?}"
+        );
+    }
+
+    /// Each name appears once, however many addresses its interface has.
+    #[test]
+    fn every_interface_is_reported_once() {
+        let Ok(names) = super::interface_names() else {
+            return;
+        };
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        let before = sorted.len();
+        sorted.dedup();
+        assert_eq!(
+            before,
+            sorted.len(),
+            "duplicate interface names in {names:?}"
+        );
+    }
+
     #[test]
     fn the_list_is_not_empty_on_unix() {
         if !cfg!(unix) {

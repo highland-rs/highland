@@ -290,6 +290,7 @@ dependencies = [
  "clap",
  "highland-config",
  "highland-control",
+ "highland-net",
  "serde_json",
  "tokio",
 ]

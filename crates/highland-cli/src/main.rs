@@ -220,10 +220,66 @@ fn request_for(command: &Command) -> ControlRequest {
     }
 }
 
+/// Validates against this host.
+///
+/// `permissive()` answers "unknown" for everything the document cannot say: which
+/// addresses are local (`V-08`), which interfaces exist (`V-22`). That made
+/// `check-config` unable to reject either, while the documentation listed both
+/// as rejected. A pre-flight check that cannot catch the two misconfigurations a
+/// daemon will refuse to start on is not a pre-flight check.
+///
+/// The answer comes from the host `check-config` runs on, which is the host the
+/// file is meant for. Run on the wrong machine it will report an interface that
+/// does not exist here -- which is the correct answer to the question actually
+/// asked, and states which host it asked about.
+#[derive(Debug)]
+struct HostInterfaces {
+    names: Vec<String>,
+}
+
+impl highland_config::InterfaceProbe for HostInterfaces {
+    fn interface_exists(&self, name: &str) -> bool {
+        self.names.iter().any(|candidate| candidate == name)
+    }
+}
+
+/// What the host says about itself, owned so the borrows inside
+/// [`HostFacts::context`] can be tied to it.
+#[derive(Debug)]
+struct HostFacts {
+    addresses: Vec<std::net::IpAddr>,
+    interfaces: HostInterfaces,
+}
+
+impl HostFacts {
+    /// Reads the host's own answers to the questions a document cannot answer.
+    fn read() -> anyhow::Result<Self> {
+        let addresses = highland_net::local_addresses().with_context(
+            || "reading this host's addresses, which V-08 needs to reject self-peering",
+        )?;
+        let names = highland_net::interface_names()
+            .with_context(|| "reading this host's interfaces, which V-22 needs")?;
+        Ok(Self {
+            addresses,
+            interfaces: HostInterfaces { names },
+        })
+    }
+
+    /// Borrows the facts as the validation context that consumes them.
+    fn context(&self) -> ValidationContext<'_> {
+        ValidationContext {
+            local_addresses: &self.addresses,
+            interfaces: &self.interfaces,
+            ..ValidationContext::permissive()
+        }
+    }
+}
+
 fn check_config(path: &std::path::Path) -> anyhow::Result<()> {
     let text =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    let config = load_and_validate(&text, &ValidationContext::permissive())
+    let host = HostFacts::read()?;
+    let config = load_and_validate(&text, &host.context())
         .with_context(|| format!("validating {}", path.display()))?;
 
     println!(

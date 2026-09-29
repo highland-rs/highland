@@ -24,6 +24,10 @@ anyhow.workspace = true
 clap.workspace = true
 highland-config.workspace = true
 highland-control.workspace = true
+# For the host facts `check-config` validates against: which addresses are local
+# (`V-08`) and which interfaces exist (`V-22`). Without them those two rules are
+# unreached, because the only way to ask the question is to look at the host.
+highland-net.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 

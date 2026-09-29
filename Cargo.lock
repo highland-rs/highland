@@ -275,7 +275,7 @@ checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
 name = "highland-checks"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "highland-core",
  "thiserror",
@@ -284,7 +284,7 @@ dependencies = [
 
 [[package]]
 name = "highland-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "highland-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "highland-vrrp",
  "serde",
@@ -307,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "highland-control"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nix 0.31.3",
  "serde",
@@ -319,7 +319,7 @@ dependencies = [
 
 [[package]]
 name = "highland-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "thiserror",
@@ -327,7 +327,7 @@ dependencies = [
 
 [[package]]
 name = "highland-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "highland-checks",
@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "highland-net"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures-util",
  "highland-checks",
@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "highland-observe"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -372,7 +372,7 @@ dependencies = [
 
 [[package]]
 name = "highland-vrrp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
  "thiserror",

@@ -56,7 +56,7 @@ To confirm the installation before going further:
 
 ```console
 $ highland version
-highland 0.1.0
+highland 0.2.0
 $ highland check-config /etc/highland/config.toml
 /etc/highland/config.toml is valid: 1 instance(s), schema version 1
 ```

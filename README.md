@@ -3,7 +3,7 @@
 A memory-safe, observable, Linux-focused Rust implementation of high-availability
 virtual IP failover, built around VRRPv3.
 
-> **Status: 0.1.0.** Milestones 0–6 have landed. A whole failover — election,
+> **Status: 0.2.0.** Milestones 0–6 have landed. A whole failover — election,
 > ownership confirmed by kernel read-back, a takeover announced to the segment, and
 > the address moving — runs in the test suite between two real network
 > namespaces, over IPv4 and IPv6, unicast and multicast, with loss, reordering, a
@@ -30,7 +30,7 @@ without the daemon.
 
 | Tier | Contents |
 |---|---|
-| `0.1.0` (Milestones 0–6) | Linux, IPv4 and IPv6, VRRPv3, unicast and multicast peers, one family and one interface per instance, `tcp` / `http` / `unix` / `interface` checks |
+| `0.2.0` (Milestones 0–6) | Linux, IPv4 and IPv6, VRRPv3, unicast and multicast peers, one family and one interface per instance, `tcp` / `http` / `unix` / `interface` checks |
 | `1.0` (Milestones 7–9) | The operations interface, the full check set, Keepalived interoperability |
 | Post-1.0 | BFD, cloud adapters, IPVS, privilege separation, simulation |
 

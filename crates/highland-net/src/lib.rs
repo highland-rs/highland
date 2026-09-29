@@ -59,7 +59,7 @@ mod unsupported;
 
 pub use backend::NetworkBackend;
 pub use error::{NetError, Result};
-pub use local::local_addresses;
+pub use local::{interface_names, local_addresses};
 pub use testing::ScriptedBackend;
 pub use testing::{Call, Outcome};
 pub use types::{

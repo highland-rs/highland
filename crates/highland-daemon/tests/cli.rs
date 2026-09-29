@@ -246,6 +246,45 @@ fn cli(node: &Node, arguments: &[&str]) -> (bool, String) {
     )
 }
 
+/// Returns the event names currently in the history, in order.
+///
+/// Parsed rather than matched as text. A substring test on `"reload_accepted"`
+/// also matches the *reason* of the `daemon_lifecycle` event the signal path
+/// already published, which is how the first version of these tests passed while
+/// proving nothing.
+fn event_names(node: &Node) -> Vec<String> {
+    let (ok, text) = cli(node, &["events", "--json", "--limit", "200"]);
+    assert!(ok, "events failed: {text}");
+    // `events --json` is one JSON object per line, not a wrapper array, so the
+    // output is parsed line by line. Reading it as a single document fails on
+    // the second event, which is the same shape of mistake the substring
+    // assertion above was.
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line)
+                .unwrap_or_else(|error| panic!("an event line is JSON: {error}\n{line}"));
+            value["name"]
+                .as_str()
+                .unwrap_or_else(|| panic!("an event with no name: {value}"))
+                .to_owned()
+        })
+        .collect()
+}
+
+/// Waits until the history contains an event named `name`, or the deadline passes.
+fn wait_for_event(node: &Node, name: &str) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        if event_names(node).iter().any(|found| found == name) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
 /// Waits for the control socket to appear.
 fn wait_for_socket(node: &Node) -> bool {
     let started = Instant::now();
@@ -494,6 +533,50 @@ fn scrape_in_namespace(node: &Node, address: &str) -> (bool, String) {
 /// against a real node: a change every instance can absorb is applied in place
 /// without the address moving, and a change one instance cannot absorb is
 /// refused with nothing touched.
+/// A reload is the most consequential thing an operator can do to a running
+/// node, and `SPEC.md` lists it as destructive. `R-28` requires an audit event
+/// naming the peer credential, and the event names `ReloadAccepted` and
+/// `ReloadRejected` exist for exactly this. Neither was ever emitted: the reload
+/// wrote a `tracing::info!` line and nothing to the event history, so
+/// `highland events` -- the operator-facing audit trail -- showed role
+/// transitions and operator actions but never a reload, and the log line named
+/// no peer.
+#[test]
+fn a_reload_appears_in_the_event_history() {
+    let node = Node::start("reload-event");
+    assert!(wait_for_socket(&node), "no control socket:\n{}", node.log());
+
+    node.rewrite_config(|text| text.replace("priority = 150", "priority = 120"));
+    node.reload();
+
+    assert!(
+        wait_for_event(&node, "reload_accepted"),
+        "an accepted reload must appear in the event history; it did not: {:?}",
+        event_names(&node)
+    );
+}
+
+/// A refused reload is the more interesting half. An operator who reloads a
+/// broken file needs to know from the history that it was refused, because the
+/// refusal is otherwise only in a log line that has already scrolled away, and
+/// the node is still running the old configuration.
+#[test]
+fn a_refused_reload_appears_in_the_event_history() {
+    let node = Node::start("reload-refused-event");
+    assert!(wait_for_socket(&node), "no control socket:\n{}", node.log());
+
+    // A duplicate instance name is `V-05`, which validation refuses and which a
+    // reload rejects whole.
+    node.rewrite_config(|text| format!("{text}\n{text}"));
+    node.reload();
+
+    assert!(
+        wait_for_event(&node, "reload_rejected"),
+        "a refused reload must appear in the event history; it did not: {:?}",
+        event_names(&node)
+    );
+}
+
 #[test]
 fn a_reload_is_applied_in_place_or_refused_whole() {
     let node = Node::start("reload");

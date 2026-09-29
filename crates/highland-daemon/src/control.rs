@@ -256,7 +256,7 @@ impl Service for ControlService {
                 limit,
                 follow,
             } => self.events(since, limit, follow),
-            ControlRequest::Reload => self.reload(),
+            ControlRequest::Reload => self.reload(&peer),
             ControlRequest::Pause { instance } => self.send(&instance, Instruction::pause(), peer),
             ControlRequest::Resume { instance } => {
                 self.send(&instance, Instruction::resume(), peer)
@@ -309,11 +309,17 @@ impl ControlService {
     ///
     /// It calls the same handle the signal loop calls, so a `SIGHUP` and a
     /// `highland reload` cannot disagree about what a reload does.
-    fn reload(&self) -> ControlResponse {
+    /// Answers a reload request, naming the peer that asked.
+    ///
+    /// `R-28` requires an audit event naming the peer credential for every
+    /// destructive command, and reload is listed as one. `peer` is threaded in for
+    /// exactly that reason: without it the event says only that a reload
+    /// happened, which is what the generation counter already says.
+    fn reload(&self, peer: &PeerIdentity) -> ControlResponse {
         let Some(handle) = &self.reload else {
             return ControlResponse::error("not_implemented", "this build cannot reload");
         };
-        match handle.reload() {
+        match handle.reload_from(&peer.describe()) {
             crate::ReloadOutcome::Applied {
                 generation,
                 reloadable,

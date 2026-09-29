@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use highland_config::{Config, InstanceConfig, ValidationContext, load, validate};
 use highland_net::{IpCidr, PeerSet};
-use highland_observe::EventSink as _;
 use highland_vrrp::IpFamily;
 
 use crate::executor::Ownership;
@@ -110,6 +109,7 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
         std::collections::BTreeMap::new(),
         std::sync::Arc::clone(&metrics),
         daemon.options().local_addresses.clone(),
+        std::sync::Arc::clone(&event_log),
     ));
 
     let mut service = crate::ControlService::new(
@@ -149,9 +149,17 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
             _ = reload.recv() => {
                 // The same handle the control API holds, so a `SIGHUP` and a
                 // `highland reload` cannot disagree about what a reload does.
+                // The handle records the outcome as a `ReloadAccepted` or
+                // `ReloadRejected` event, naming the initiator, so both this path
+                // and the control socket produce the same event. The
+                // `announce(&daemon, "reload_accepted")` that used to sit here
+                // published a second event under `DaemonLifecycle` whose *reason*
+                // happened to be the string, which is why the event names
+                // `ReloadAccepted` and `ReloadRejected` existed and were never
+                // used, and why an operator filtering the history by event name
+                // could not find a reload.
                 match reload_handle.reload() {
                     ReloadOutcome::Applied { generation, reloadable, added, .. } => {
-                        announce(&daemon, "reload_accepted");
                         tracing::info!(
                             generation,
                             reconfigured = reloadable.len(),
@@ -160,7 +168,6 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
                         );
                     }
                     ReloadOutcome::Rejected { reason } => {
-                        announce(&daemon, "reload_rejected");
                         tracing::error!(reason = %reason, "reload rejected; the running configuration is unchanged");
                     }
                 }
@@ -554,11 +561,16 @@ pub enum ReloadOutcome {
 #[derive(Debug)]
 pub struct ReloadHandle {
     path: PathBuf,
+    /// The node name, so a recorded event names the node it happened on.
+    node: String,
     running: Mutex<Config>,
     registry: Arc<crate::StatusRegistry>,
     senders: Mutex<BTreeMap<String, crate::InstructionSender>>,
     metrics: Arc<crate::Metrics>,
     generation: AtomicU64,
+    /// The shared event history, so a reload appears in `highland events` the way
+    /// every other operator action does.
+    log: Arc<crate::EventLog>,
     /// The host's own addresses, so a reload can enforce `V-08` exactly as
     /// startup does.
     ///
@@ -580,15 +592,18 @@ impl ReloadHandle {
         senders: BTreeMap<String, crate::InstructionSender>,
         metrics: Arc<crate::Metrics>,
         local_addresses: Vec<IpAddr>,
+        log: Arc<crate::EventLog>,
     ) -> Self {
         Self {
             path,
+            node: running.node.name.clone(),
             running: Mutex::new(running.clone()),
             registry,
             senders: Mutex::new(senders),
             metrics,
             generation: AtomicU64::new(0),
             local_addresses,
+            log,
         }
     }
 
@@ -619,13 +634,23 @@ impl ReloadHandle {
     /// change. Applying bumps the generation, so a result still carrying the old
     /// one is discarded (`R-47`).
     pub fn reload(&self) -> ReloadOutcome {
+        self.reload_from("SIGHUP")
+    }
+
+    /// Reloads, recording `initiator` as the peer that asked.
+    ///
+    /// The event is recorded here rather than by the callers because a `SIGHUP`
+    /// and a `highland reload` must not be able to disagree about what happened,
+    /// and the caller is the thing that knows the peer.
+    pub fn reload_from(&self, initiator: &str) -> ReloadOutcome {
         let candidate = match load(&self.path, false) {
             Ok(candidate) => candidate,
             Err(error) => {
                 self.metrics.record_reload("rejected");
-                return ReloadOutcome::Rejected {
-                    reason: error.to_string(),
-                };
+                let reason = error.to_string();
+                self.log
+                    .record_reload(&self.node, false, None, &reason, initiator);
+                return ReloadOutcome::Rejected { reason };
             }
         };
         let context = ValidationContext {
@@ -639,6 +664,8 @@ impl ReloadHandle {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("; ");
+            self.log
+                .record_reload(&self.node, false, None, &reason, initiator);
             return ReloadOutcome::Rejected { reason };
         }
 
@@ -647,9 +674,10 @@ impl ReloadHandle {
         if !plan.is_applicable() {
             // Nothing has been touched at this point, and nothing will be.
             self.metrics.record_reload("rejected");
-            return ReloadOutcome::Rejected {
-                reason: plan.refusals().join("; "),
-            };
+            let reason = plan.refusals().join("; ");
+            self.log
+                .record_reload(&self.node, false, None, &reason, initiator);
+            return ReloadOutcome::Rejected { reason };
         }
 
         let generation = self.generation() + 1;
@@ -685,10 +713,26 @@ impl ReloadHandle {
         self.generation.store(generation, Ordering::Relaxed);
         self.registry.set_generation(generation);
         self.metrics.record_reload("accepted");
+        let added = plan
+            .added()
+            .into_iter()
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        self.log.record_reload(
+            &self.node,
+            true,
+            Some(generation),
+            &format!(
+                "reconfigured {} instance(s), started {}",
+                reloadable.len(),
+                added.len()
+            ),
+            initiator,
+        );
         ReloadOutcome::Applied {
             generation,
             reloadable,
-            added: plan.added().into_iter().map(ToOwned::to_owned).collect(),
+            added,
             config: Box::new(candidate),
         }
     }
@@ -765,19 +809,6 @@ fn ownership_family(addresses: &[highland_net::IpCidr]) -> Option<IpFamily> {
     addresses
         .first()
         .map(|address| IpFamily::of(&address.address()))
-}
-
-fn announce(daemon: &Daemon, reason: &'static str) {
-    let event = highland_observe::Event::new(
-        highland_observe::EventName::DaemonLifecycle,
-        highland_observe::EventLevel::Info,
-        daemon.config().node.name.clone(),
-        None,
-        reason,
-        highland_observe::now_timestamp(),
-    );
-    tracing::info!(event = %event.name, reason = %event.reason, "daemon event");
-    daemon.sink().publish(event);
 }
 
 /// The instance plans a configuration implies, in the order they appear.
@@ -1014,6 +1045,7 @@ address = "192.0.2.10/24"
             std::collections::BTreeMap::new(),
             metrics,
             Vec::new(),
+            std::sync::Arc::new(crate::EventLog::new()),
         );
 
         let outcome = handle.reload();
@@ -1038,6 +1070,7 @@ address = "192.0.2.10/24"
             std::collections::BTreeMap::new(),
             crate::Metrics::shared(),
             Vec::new(),
+            std::sync::Arc::new(crate::EventLog::new()),
         );
         assert_eq!(handle.generation(), 0);
     }
@@ -1084,6 +1117,7 @@ address = "192.0.2.10/24"
             std::collections::BTreeMap::new(),
             crate::Metrics::shared(),
             vec!["127.0.0.1".parse().expect("valid address")],
+            std::sync::Arc::new(crate::EventLog::new()),
         );
 
         match handle.reload() {
@@ -1128,6 +1162,7 @@ address = "192.0.2.10/24"
             std::collections::BTreeMap::new(),
             crate::Metrics::shared(),
             vec!["127.0.0.1".parse().expect("valid address")],
+            std::sync::Arc::new(crate::EventLog::new()),
         );
 
         // This may still be refused for an unrelated reason -- the interface and

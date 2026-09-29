@@ -66,6 +66,52 @@ impl EventLog {
         )
     }
 
+    /// Records the outcome of a reload, and who asked for it.
+    ///
+    /// A reload is the most consequential thing an operator can do to a running
+    /// node -- it can change priorities, start instances, and stop them -- and
+    /// `SPEC.md` §22.1 lists it as destructive, so `R-28` requires an audit event
+    /// naming the peer credential. `initiator` is the peer's description for a
+    /// request over the control socket, and `SIGHUP` for the signal, which has no
+    /// peer to name.
+    pub fn record_reload(
+        &self,
+        node: &str,
+        accepted: bool,
+        generation: Option<u64>,
+        summary: &str,
+        initiator: &str,
+    ) -> u64 {
+        let name = if accepted {
+            EventName::ReloadAccepted
+        } else {
+            EventName::ReloadRejected
+        };
+        let level = if accepted {
+            highland_observe::EventLevel::Info
+        } else {
+            // A refusal is not a routine outcome, and an operator reading the
+            // history should not have to compare sequence numbers to notice that
+            // their reload did nothing.
+            highland_observe::EventLevel::Warn
+        };
+        self.record(
+            Event::new(
+                name,
+                level,
+                node,
+                None,
+                summary,
+                highland_observe::now_timestamp(),
+            )
+            .with_field("peer", initiator)
+            .with_field(
+                "generation",
+                generation.map_or_else(|| "unchanged".to_owned(), |g| g.to_string()),
+            ),
+        )
+    }
+
     /// Records an event the machine emitted under a name of its own, mapping it
     /// onto the closed event set.
     pub fn record_named(

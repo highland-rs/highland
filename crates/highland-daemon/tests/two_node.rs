@@ -27,6 +27,7 @@
 
 mod support;
 
+use highland_core::state::skew_time;
 use std::time::Duration;
 
 use support::{
@@ -80,8 +81,40 @@ fn ipv6_pair_with_link_local_peers(
     (first, second)
 }
 
-/// `Master_Down_Interval` for a one-second interval at priority 150 (SPEC.md §13.3).
-const MASTER_DOWN_BUDGET: Duration = Duration::from_millis(3600);
+/// How long a test waits for a survivor to take a VIP after the master is killed.
+///
+/// RFC 5798 §6.1 puts the floor at `Master_Down_Interval`, and for this suite's
+/// one-second advertisement interval at priority 150 that is
+/// `3s + skew`, where `skew = (256 - 150) / 256` — so **3.414s** of protocol
+/// timing before the takeover may legitimately begin.
+///
+/// The old constant was a literal `3600ms`, which left **186ms** of margin over a
+/// delay the daemon is *required* to wait. A timer that fires a few hundred
+/// milliseconds late under a loaded CI runner therefore failed the suite, and it
+/// did so at a rate of roughly one run in three, with an assertion that read
+/// "the IPv6 multicast address did not move" — which blames the protocol code
+/// for the test's own arithmetic.
+///
+/// The slack is added to the protocol floor rather than guessed, and it is
+/// generous: three seconds is not a requirement, it is room for a container
+/// under load. The arithmetic is spelled out so a change to the advertisement
+/// interval or the priority cannot silently make this too tight again.
+const FAILOVER_SLACK: Duration = Duration::from_secs(3);
+
+/// The advertisement interval the suite configures.
+const ADVERT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// The priority the suite's nodes run at.
+const NODE_PRIORITY: u8 = 150;
+
+/// `Master_Down_Interval` for this suite's parameters: `3 × 1s + 0.414s`.
+fn master_down_interval() -> Duration {
+    let skew = skew_time(NODE_PRIORITY, ADVERT_INTERVAL);
+    ADVERT_INTERVAL
+        .saturating_mul(3)
+        .saturating_add(skew)
+        .saturating_add(FAILOVER_SLACK)
+}
 
 #[test]
 fn two_nodes_elect_one_master_and_the_vip_moves_when_it_dies() {
@@ -116,12 +149,15 @@ fn two_nodes_elect_one_master_and_the_vip_moves_when_it_dies() {
     // `Master_Down_Interval`, not eventually.
     if first_was_master {
         first.kill();
-        let moved = wait_for("the VIP moved to the survivor", MASTER_DOWN_BUDGET, || {
-            second.holds_vip()
-        });
+        let moved = wait_for(
+            "the VIP moved to the survivor",
+            master_down_interval(),
+            || second.holds_vip(),
+        );
         assert!(
             moved,
-            "the VIP did not move within {MASTER_DOWN_BUDGET:?}: a={:?} b={:?}",
+            "the VIP did not move within {:?}: a={:?} b={:?}",
+            master_down_interval(),
             first.addresses(),
             second.addresses()
         );
@@ -133,12 +169,15 @@ fn two_nodes_elect_one_master_and_the_vip_moves_when_it_dies() {
         // the opposite here would be asserting a guarantee VRRP does not make.
     } else {
         second.kill();
-        let moved = wait_for("the VIP moved to the survivor", MASTER_DOWN_BUDGET, || {
-            first.holds_vip()
-        });
+        let moved = wait_for(
+            "the VIP moved to the survivor",
+            master_down_interval(),
+            || first.holds_vip(),
+        );
         assert!(
             moved,
-            "the VIP did not move within {MASTER_DOWN_BUDGET:?}: a={:?} b={:?}",
+            "the VIP did not move within {:?}: a={:?} b={:?}",
+            master_down_interval(),
             first.addresses(),
             second.addresses()
         );
@@ -198,7 +237,9 @@ fn a_takeover_announces_the_address_to_the_segment() {
     );
 
     master.kill();
-    let moved = wait_for("the VIP moved", MASTER_DOWN_BUDGET, || other.holds_vip());
+    let moved = wait_for("the VIP moved", master_down_interval(), || {
+        other.holds_vip()
+    });
     assert!(
         moved,
         "the address did not move\n--- survivor ---\n{}",
@@ -325,7 +366,9 @@ fn two_nodes_in_ipv4_multicast_mode_elect_one_master_and_fail_over() {
         (&mut second, &first)
     };
     master.kill();
-    let moved = wait_for("the VIP moved", MASTER_DOWN_BUDGET, || survivor.holds_vip());
+    let moved = wait_for("the VIP moved", master_down_interval(), || {
+        survivor.holds_vip()
+    });
     assert!(
         moved,
         "multicast mode did not fail over\n--- survivor ---\n{}",
@@ -367,7 +410,7 @@ fn two_nodes_in_ipv6_unicast_mode_elect_one_master_and_fail_over() {
         (&mut second, &first)
     };
     master.kill();
-    let moved = wait_for("the IPv6 VIP moved", MASTER_DOWN_BUDGET, || {
+    let moved = wait_for("the IPv6 VIP moved", master_down_interval(), || {
         survivor.holds(VIRTUAL_ADDRESS6)
     });
     assert!(
@@ -414,7 +457,7 @@ fn two_nodes_in_ipv6_multicast_mode_elect_one_master_and_fail_over() {
         (&mut second, &first)
     };
     master.kill();
-    let moved = wait_for("the IPv6 VIP moved", MASTER_DOWN_BUDGET, || {
+    let moved = wait_for("the IPv6 VIP moved", master_down_interval(), || {
         survivor.holds(VIRTUAL_ADDRESS6)
     });
     assert!(

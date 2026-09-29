@@ -382,6 +382,25 @@ fn v23_rejects_a_check_missing_the_keys_its_type_requires() {
     assert_rule(&unknown, "V-23");
 }
 
+/// The types the daemon cannot run and the types the schema names must not
+/// drift apart, because the two tables answer the same question from two places.
+///
+/// A `dns` check is a *known* type -- `V-23` accepts the spelling and knows its
+/// keys -- and an unimplemented one. Those are different facts, and this test
+/// exists so that adding a type to one table and forgetting the other is a
+/// compile-and-test failure rather than a check that silently does not run.
+#[test]
+fn the_unimplemented_table_agrees_with_what_the_daemon_implements() {
+    for (kind, _) in highland_config::CHECK_KEY_TYPES {
+        let implemented = matches!(*kind, "tcp" | "http" | "unix" | "interface");
+        assert_eq!(
+            highland_config::unimplemented_check_reason(kind).is_none(),
+            implemented,
+            "{kind} disagrees between CHECK_KEY_TYPES and UNIMPLEMENTED_CHECK_TYPES"
+        );
+    }
+}
+
 #[test]
 fn v24_rejects_a_multicast_ttl_other_than_255() {
     let text = VALID.replace("mode = \"unicast\"", "mode = \"multicast\"")

@@ -48,28 +48,19 @@ pub(crate) enum ProbeKind {
 /// mistake worth reporting rather than guessing at.
 #[must_use]
 pub(crate) fn kind_of(configured: &str) -> ProbeKind {
+    // The reasons come from `highland_config`, which is the same table
+    // validation reads. A second copy of these strings here would be a second
+    // answer to "can this build run this check", and the two drifting apart is
+    // how a `check-config` that passes becomes a daemon that quietly ignores a
+    // health gate.
     match configured {
         "tcp" => ProbeKind::Tcp,
         "http" => ProbeKind::Http,
         "unix" => ProbeKind::Unix,
         "interface" => ProbeKind::Interface,
-        "https" => ProbeKind::Unsupported(
-            "an https check needs TLS, which this build does not implement; use a tcp check on \\
-             the same port rather than a check that cannot validate a certificate",
-        ),
-        "dns" => ProbeKind::Unsupported("a dns check is not implemented in this release"),
-        "process" => ProbeKind::Unsupported(
-            "a process check is not implemented; existence is a weak signal that says nothing \\
-             about readiness",
-        ),
-        "file" => ProbeKind::Unsupported("a file check is not implemented in this release"),
-        "composite" => {
-            ProbeKind::Unsupported("a composite check is not implemented in this release")
+        other => {
+            ProbeKind::Unsupported(highland_config::unimplemented_check_reason(other).unwrap_or(""))
         }
-        "command" => ProbeKind::Unsupported(
-            "command checks require the command-checks feature and an explicit allow-list",
-        ),
-        _ => ProbeKind::Unsupported(""),
     }
 }
 
@@ -77,6 +68,41 @@ pub(crate) fn kind_of(configured: &str) -> ProbeKind {
 ///
 /// `links` is how an interface check asks the kernel about a link; the caller
 /// supplies it so this module needs no platform code and a test needs no kernel.
+///
+/// # Errors
+///
+/// Returns [`CheckError`] when the plan's type is not implemented here, when a
+/// required key is missing, or when a target cannot be parsed. All three are
+/// configuration errors, and all three are reported before the daemon starts.
+/// Builds every probe a plan list describes, or says which one cannot be built.
+///
+/// The runner uses this as a gate *before* an instance is created, so an instance
+/// whose checks cannot run never participates rather than participating without
+/// them. Returning the probes also means the health task does not build them a
+/// second time, which is what keeps that gate and the running checks from
+/// disagreeing about which types work.
+///
+/// # Errors
+///
+/// Returns the first failure, naming the check and the reason, so the message an
+/// operator reads is the one that says what to change.
+pub(crate) fn build_all(
+    plans: &[CheckPlan],
+    links: &Arc<dyn LinkProbe>,
+) -> std::result::Result<Vec<Arc<dyn Check>>, String> {
+    let mut checks = Vec::with_capacity(plans.len());
+    for plan in plans {
+        match build(plan, Arc::clone(links)) {
+            Ok(check) => checks.push(check),
+            Err(error) => {
+                return Err(format!("check {} cannot be built: {error}", plan.name));
+            }
+        }
+    }
+    Ok(checks)
+}
+
+/// Builds a runnable check from a plan.
 ///
 /// # Errors
 ///

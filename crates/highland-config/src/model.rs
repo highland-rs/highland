@@ -17,6 +17,56 @@ use crate::duration::DurationSpec;
 /// The only schema version this release accepts (`V-28`).
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 
+/// Why a check type this release names cannot be run (`V-23`).
+///
+/// Every type below is a *known* type -- `V-23` accepts the spelling and knows
+/// which keys it needs -- and only four of them are implemented. The rest are
+/// declared so that a configuration using one is refused with a specific reason
+/// rather than an "unknown type", and so that the refusal happens at
+/// `check-config` instead of at run time.
+///
+/// The table lives here, beside `CHECK_KEY_TYPES`, and the daemon reads it
+/// through [`unimplemented_check_reason`]. That is deliberate: the runtime and
+/// the validator must not be able to disagree about which types work, because
+/// the failure mode of disagreeing is a node that starts, logs that a check
+/// cannot be built, and then takes its VIP without the check that was supposed
+/// to gate it.
+pub const UNIMPLEMENTED_CHECK_TYPES: &[(&str, &str)] = &[
+    (
+        "https",
+        "an https check needs TLS, which this build does not implement; use a tcp check on \
+         the same port rather than a check that cannot validate a certificate",
+    ),
+    ("dns", "a dns check is not implemented in this release"),
+    (
+        "process",
+        "a process check is not implemented; existence is a weak signal that says nothing \
+         about readiness",
+    ),
+    ("file", "a file check is not implemented in this release"),
+    (
+        "composite",
+        "a composite check is not implemented in this release",
+    ),
+    (
+        "command",
+        "command checks require the command-checks feature and an explicit allow-list",
+    ),
+];
+
+/// Returns why `kind` cannot be run by this build, or `None` if it can.
+///
+/// The single answer to "can this build run this check", shared by the validator
+/// and the daemon so that a configuration accepted by `check-config` is a
+/// configuration the daemon can actually run.
+#[must_use]
+pub fn unimplemented_check_reason(kind: &str) -> Option<&'static str> {
+    UNIMPLEMENTED_CHECK_TYPES
+        .iter()
+        .find(|(name, _)| *name == kind)
+        .map(|(_, reason)| *reason)
+}
+
 /// The configuration keys that each check type requires (`V-23`).
 pub const CHECK_KEY_TYPES: &[(&str, &[&str])] = &[
     ("tcp", &["address"]),

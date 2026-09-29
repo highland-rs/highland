@@ -56,7 +56,8 @@ pub use loader::{MAX_CONFIG_BYTES, load, load_and_validate, parse};
 pub use model::{
     CHECK_KEY_TYPES, CheckConfig, Config, ControlConfig, FailurePolicy, Family, HealthConfig,
     InstanceConfig, InstanceLimits, LoggingConfig, MetricsConfig, MulticastConfig, NetworkConfig,
-    NetworkMode, NodeConfig, SUPPORTED_SCHEMA_VERSION, SchemaVersion, VipConfig,
+    NetworkMode, NodeConfig, SUPPORTED_SCHEMA_VERSION, SchemaVersion, UNIMPLEMENTED_CHECK_TYPES,
+    VipConfig, unimplemented_check_reason,
 };
 pub use validation::{
     AnyInterface, InterfaceProbe, KnownInterfaces, MAX_ADVERTISEMENT_INTERVAL, MAX_INSTANCES,

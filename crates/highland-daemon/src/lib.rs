@@ -52,7 +52,7 @@ pub use vrrp_transport::{READER_INTERVAL, VrrpTransport};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use highland_config::{Config, ConfigError, ValidationContext, load, validate};
+use highland_config::{Config, ConfigError, ConfigViolation, ValidationContext, load, validate};
 use highland_core::state::Generation;
 use highland_observe::EventLevel;
 use highland_observe::{Event, EventName, EventRing, EventSink, RecordingSink};
@@ -75,12 +75,38 @@ impl Daemon {
     /// Returns [`DaemonError::Config`] when the file cannot be read, parsed, or
     /// validated. A failure here is fatal by design: Highland never starts with
     /// a configuration it could not fully validate (SPEC.md, `I-08`).
-    pub fn prepare(options: Options) -> Result<Self, DaemonError> {
+    pub fn prepare(mut options: Options) -> Result<Self, DaemonError> {
         let sink = RecordingSink::new();
         let config = load(&options.config_path, options.allow_insecure_config)
             .map_err(DaemonError::Config)?;
+        // The host's own addresses, so that `V-08` can reject self-peering.
+        //
+        // This is the answer the permissive context cannot supply, and supplying
+        // it here is what turns `V-08` from a documented rule into an enforced
+        // one. `local_addresses` comes from the kernel rather than the document
+        // because validation runs before anything is bound, so the configuration
+        // cannot be the source of truth about what is local.
+        let local_addresses = match highland_net::local_addresses() {
+            Ok(addresses) => addresses,
+            Err(error) => {
+                // "Unknown" is not "none". Proceeding with an empty list would
+                // silently skip the check, which is the failure this fixes, so a
+                // host whose addresses cannot be read does not start.
+                return Err(DaemonError::Config(ConfigError::Invalid {
+                    violations: vec![ConfigViolation {
+                        rule: "V-08",
+                        message: format!(
+                            "cannot enumerate this host's addresses ({error}), so an \
+                             instance cannot be checked for self-peering"
+                        ),
+                    }],
+                }));
+            }
+        };
+        options.local_addresses = local_addresses;
         let context = ValidationContext {
             command_checks_enabled: options.command_checks_enabled,
+            local_addresses: &options.local_addresses,
             ..ValidationContext::permissive()
         };
         validate(&config, &context)

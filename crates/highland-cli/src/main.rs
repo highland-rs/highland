@@ -359,7 +359,20 @@ async fn events(
         let response = ask(socket, &request).await?;
 
         match response {
-            ControlResponse::Events { events, latest } => {
+            ControlResponse::Events {
+                events,
+                latest,
+                dropped,
+            } => {
+                // The history is bounded, so a client that was away long enough
+                // has a gap in it. Saying so is the difference between a quiet
+                // daemon and a history that silently lost something.
+                if dropped > 0 {
+                    eprintln!(
+                        "highland: {dropped} event(s) before this point are no longer retained \
+                         and were not shown; the history is bounded"
+                    );
+                }
                 for event in events {
                     if json {
                         println!("{event}");

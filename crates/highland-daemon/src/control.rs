@@ -378,7 +378,16 @@ impl ControlService {
         // that disappeared mid-stream would leave a task waiting on a socket
         // forever.
         let _ = follow;
-        ControlResponse::Events { events, latest }
+        // The gap a client resuming from this cursor cannot see, so a bounded
+        // history that has overwritten something says so instead of looking
+        // quiet. `since` rather than the total, because the total cannot say
+        // whether the loss was before or after where the client was.
+        let dropped = log.dropped_since(since.unwrap_or(0));
+        ControlResponse::Events {
+            events,
+            latest,
+            dropped,
+        }
     }
 
     fn show(&self, instance: &str) -> ControlResponse {

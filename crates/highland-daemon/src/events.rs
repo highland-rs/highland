@@ -165,6 +165,19 @@ impl EventLog {
         self.lock().latest()
     }
 
+    /// Returns how many events a client resuming from `sequence` can no longer
+    /// see, because the ring has overwritten them.
+    ///
+    /// The history is bounded (`L-08`), so a follower that is away long enough
+    /// misses events. The ring knew how many it dropped and nothing ever read
+    /// that number: `dropped` was called from tests only. A client could detect
+    /// the gap by noticing a jump in sequence numbers, but nothing in the product
+    /// did, and a missed event is indistinguishable from a quiet daemon.
+    #[must_use]
+    pub fn dropped_since(&self, sequence: u64) -> u64 {
+        self.lock().dropped_through(sequence)
+    }
+
     /// Returns the number of entries retained.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -217,6 +230,46 @@ mod tests {
             log.record_transition("node-a", "api", "A", "B", &format!("event {index}"));
         }
         assert_eq!(log.len(), 4096, "L-08: the history is bounded");
+    }
+
+    /// The regression test for an invisible gap: the ring has always known how
+    /// many events it dropped, and nothing read the number.
+    #[test]
+    fn a_log_that_has_overwritten_events_reports_the_gap() {
+        let log = EventLog::new();
+        // Comfortably past the capacity. The bound is read from a log that has
+        // already overflowed, so a change to the capacity cannot silently stop
+        // this test from overflowing the ring.
+        let probe = EventLog::new();
+        for index in 0..10_000 {
+            probe.record_transition("node-a", "api", "A", "B", &format!("f{index}"));
+        }
+        let capacity = probe.len();
+        assert!(capacity > 0, "the ring retains something");
+
+        for index in 0..(capacity + 500) {
+            log.record_transition("node-a", "api", "A", "B", &format!("event {index}"));
+        }
+        assert_eq!(log.len(), capacity, "L-08: the history is bounded");
+        assert_eq!(
+            log.dropped_since(0),
+            500,
+            "a client from the start is told what it missed"
+        );
+        assert_eq!(
+            log.dropped_since(log.latest()),
+            0,
+            "a client that is current has missed nothing"
+        );
+    }
+
+    /// Before the ring is full there is nothing to report, whatever the cursor.
+    #[test]
+    fn a_log_that_has_dropped_nothing_reports_no_gap() {
+        let log = EventLog::new();
+        log.record_transition("node-a", "api", "A", "B", "startup");
+        assert_eq!(log.dropped_since(0), 0);
+        assert_eq!(log.dropped_since(999), 0);
     }
 
     #[test]

@@ -109,6 +109,7 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
         std::sync::Arc::clone(&registry),
         std::collections::BTreeMap::new(),
         std::sync::Arc::clone(&metrics),
+        daemon.options().local_addresses.clone(),
     ));
 
     let mut service = crate::ControlService::new(
@@ -558,6 +559,14 @@ pub struct ReloadHandle {
     senders: Mutex<BTreeMap<String, crate::InstructionSender>>,
     metrics: Arc<crate::Metrics>,
     generation: AtomicU64,
+    /// The host's own addresses, so a reload can enforce `V-08` exactly as
+    /// startup does.
+    ///
+    /// A reload that validated more loosely than startup would be a way to
+    /// reach a state the daemon refuses to boot into: the operator fixes the
+    /// peer list, reloads to pick it up, and the node unicasts to itself for as
+    /// long as the configuration stays in place.
+    local_addresses: Vec<IpAddr>,
 }
 
 impl ReloadHandle {
@@ -570,6 +579,7 @@ impl ReloadHandle {
         registry: Arc<crate::StatusRegistry>,
         senders: BTreeMap<String, crate::InstructionSender>,
         metrics: Arc<crate::Metrics>,
+        local_addresses: Vec<IpAddr>,
     ) -> Self {
         Self {
             path,
@@ -578,6 +588,7 @@ impl ReloadHandle {
             senders: Mutex::new(senders),
             metrics,
             generation: AtomicU64::new(0),
+            local_addresses,
         }
     }
 
@@ -617,7 +628,11 @@ impl ReloadHandle {
                 };
             }
         };
-        if let Err(violations) = validate(&candidate, &ValidationContext::permissive()) {
+        let context = ValidationContext {
+            local_addresses: &self.local_addresses,
+            ..ValidationContext::permissive()
+        };
+        if let Err(violations) = validate(&candidate, &context) {
             self.metrics.record_reload("rejected");
             let reason = violations
                 .iter()
@@ -998,6 +1013,7 @@ address = "192.0.2.10/24"
             std::sync::Arc::clone(&registry),
             std::collections::BTreeMap::new(),
             metrics,
+            Vec::new(),
         );
 
         let outcome = handle.reload();
@@ -1021,7 +1037,107 @@ address = "192.0.2.10/24"
             std::sync::Arc::new(crate::StatusRegistry::new("node-a")),
             std::collections::BTreeMap::new(),
             crate::Metrics::shared(),
+            Vec::new(),
         );
         assert_eq!(handle.generation(), 0);
+    }
+
+    /// Writes a document to a temporary file and returns the path a
+    /// [`ReloadHandle`] can be pointed at.
+    fn write_reload_source(name: &str, body: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("hl-reload-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, body).expect("write config");
+        path
+    }
+
+    /// A reload must not be a way to reach a configuration that startup would
+    /// have refused.
+    ///
+    /// It is a separate code path from `Daemon::prepare`, it is easy to leave
+    /// permissive, and the consequence is a node that unicast-advertises to
+    /// itself for as long as the file stays in place -- after a startup the
+    /// operator has already been told is clean.
+    #[test]
+    fn a_reload_that_peers_with_this_node_is_rejected() {
+        let path = write_reload_source(
+            "self-peer",
+            "schema_version = 1\n\
+             [node]\n\
+             name = \"node-a\"\n\
+             [[instance]]\n\
+             name = \"api\"\n\
+             interface = \"lo\"\n\
+             vrid = 42\n\
+             [instance.network]\n\
+             mode = \"unicast\"\n\
+             peers = [\"127.0.0.1\"]\n\
+             [[instance.vip]]\n\
+             address = \"192.0.2.10/24\"\n",
+        );
+        let registry = std::sync::Arc::new(crate::StatusRegistry::new("node-a"));
+        let handle = ReloadHandle::new(
+            path,
+            &empty_config(),
+            std::sync::Arc::clone(&registry),
+            std::collections::BTreeMap::new(),
+            crate::Metrics::shared(),
+            vec!["127.0.0.1".parse().expect("valid address")],
+        );
+
+        match handle.reload() {
+            ReloadOutcome::Rejected { reason } => assert!(
+                reason.contains("V-08"),
+                "the refusal must name the rule, got: {reason}"
+            ),
+            ReloadOutcome::Applied { .. } => {
+                panic!("a self-peering reload must be rejected")
+            }
+        }
+        assert_eq!(
+            handle.generation(),
+            0,
+            "a rejected reload must not advance the generation"
+        );
+    }
+
+    /// The other direction, so the test above cannot pass by refusing everything.
+    #[test]
+    fn a_reload_with_a_remote_peer_is_not_refused_by_the_local_address_check() {
+        let path = write_reload_source(
+            "remote-peer",
+            "schema_version = 1\n\
+             [node]\n\
+             name = \"node-a\"\n\
+             [[instance]]\n\
+             name = \"api\"\n\
+             interface = \"lo\"\n\
+             vrid = 42\n\
+             [instance.network]\n\
+             mode = \"unicast\"\n\
+             peers = [\"192.0.2.20\"]\n\
+             [[instance.vip]]\n\
+             address = \"192.0.2.10/24\"\n",
+        );
+        let registry = std::sync::Arc::new(crate::StatusRegistry::new("node-a"));
+        let handle = ReloadHandle::new(
+            path,
+            &empty_config(),
+            std::sync::Arc::clone(&registry),
+            std::collections::BTreeMap::new(),
+            crate::Metrics::shared(),
+            vec!["127.0.0.1".parse().expect("valid address")],
+        );
+
+        // This may still be refused for an unrelated reason -- the interface and
+        // the plan both have opinions -- so the assertion is that the refusal
+        // is not about a local address.
+        if let ReloadOutcome::Rejected { reason } = handle.reload() {
+            assert!(
+                !reason.contains("cannot be its own peer"),
+                "a remote peer must not be refused as self-peering, got: {reason}"
+            );
+        }
     }
 }

@@ -577,6 +577,57 @@ fn a_refused_reload_appears_in_the_event_history() {
     );
 }
 
+/// A reload that changes the peer list must be refused, not reported as applied.
+///
+/// The planner never compared the peer list, so the change classified as "no
+/// change", the reload returned `Applied`, the generation advanced and the event
+/// history recorded `reload_accepted` -- and the node went on unicasting to the
+/// peers it had started with. A file that names a different peer than the node
+/// actually talks to is a divergence nothing reported.
+#[test]
+fn a_reload_that_changes_the_peers_is_refused() {
+    let node = Node::start("reload-peers");
+    assert!(wait_for_socket(&node), "no control socket:\n{}", node.log());
+
+    // Take the address first, so the test would notice a node that stopped
+    // participating as well as one that kept the old peers.
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_secs(10) {
+        let (ok, text) = cli(&node, &["status", "--json"]);
+        if ok && text.contains("\"vips_owned\":true") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    node.rewrite_config(|text| {
+        text.replace(
+            "peers = [\"192.0.2.99\"]",
+            "peers = [\"192.0.2.99\", \"192.0.2.98\"]",
+        )
+    });
+    let (ok, text) = cli(&node, &["reload", "--yes"]);
+    assert!(
+        !ok,
+        "a peer change cannot be absorbed and must be refused: {text}"
+    );
+    assert!(
+        text.contains("network.peers"),
+        "the refusal must name the field, got: {text}"
+    );
+
+    // And the node is untouched: still master, still holding the address.
+    let (_, status) = cli(&node, &["status", "--json"]);
+    assert!(
+        status.contains("\"vips_owned\":true"),
+        "a refused reload must not cost the node its address: {status}"
+    );
+    assert!(
+        status.contains("\"generation\":0"),
+        "a refused reload must not advance the generation: {status}"
+    );
+}
+
 #[test]
 fn a_reload_is_applied_in_place_or_refused_whole() {
     let node = Node::start("reload");

@@ -190,6 +190,43 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
     Ok(())
 }
 
+/// Builds `plan`'s probes, or reports why the instance cannot be started.
+///
+/// A check this build cannot run must stop the *instance*, not merely be logged.
+/// The instance used to start anyway, with the health gate that was supposed to
+/// hold it down never running, and it took its VIP and reported itself `healthy`.
+/// A check that cannot be evaluated is not a passing check: it is an unknown one,
+/// and unknown has to fail closed.
+///
+/// The node keeps running and every other instance keeps participating, which is
+/// why this is not a refusal to start -- one unusable instance is not a reason to
+/// stop administering the rest.
+///
+/// The probes are built here and handed to the health task rather than built
+/// again inside it, so this gate and the running checks cannot disagree about
+/// which types work. Returns `None` when the instance must not start.
+#[cfg(target_os = "linux")]
+fn usable_checks(
+    plan: &crate::options::InstancePlan,
+    links: &std::sync::Arc<dyn highland_checks::LinkProbe>,
+    log: &std::sync::Arc<crate::EventLog>,
+    node: &str,
+) -> Option<Vec<std::sync::Arc<dyn highland_checks::Check>>> {
+    match crate::checks::build_all(&plan.checks, links) {
+        Ok(checks) => Some(checks),
+        Err(reason) => {
+            tracing::error!(instance = %plan.name, "{reason}");
+            log.record_named(
+                node,
+                &plan.name,
+                highland_observe::EventName::ActionFailed,
+                &reason,
+            );
+            None
+        }
+    }
+}
+
 /// A running instance and the task that drives it.
 type RunningInstance = (String, tokio::task::JoinHandle<()>);
 
@@ -216,6 +253,14 @@ async fn start_instances(
             highland_net::default_backend()
                 .map_err(|error| DaemonError::Runtime(format!("no network backend: {error}")))?,
         );
+
+        let health_links: std::sync::Arc<dyn highland_checks::LinkProbe> =
+            std::sync::Arc::clone(&backend) as _;
+        let Some(checks) = usable_checks(&plan, &health_links, log, &daemon.config().node.name)
+        else {
+            continue;
+        };
+
         let source = source_address(&plan, &ownership, backend.as_ref())
             .await
             .map_err(|error| DaemonError::Runtime(format!("instance {}: {error}", plan.name)))?;
@@ -278,11 +323,9 @@ async fn start_instances(
         //
         // It shares the backend, so an interface check and the daemon read the
         // same Netlink socket and cannot disagree about whether a link is up.
-        let health_links: std::sync::Arc<dyn highland_checks::LinkProbe> =
-            std::sync::Arc::clone(&backend) as _;
         let health_sender = sender.clone();
         let health_instance = plan.name.clone();
-        let health_plans = plan.checks.clone();
+        let health_checks = checks;
         let health_metrics = std::sync::Arc::clone(metrics);
         let health_watch = shutdown_signal.clone();
         let health = tokio::spawn(async move {
@@ -290,19 +333,13 @@ async fn start_instances(
             // instance that owns it (`I-41`).
             if let Err(reason) = crate::health_task::run(
                 &health_instance,
-                &health_plans,
-                health_links,
+                health_checks,
                 health_sender,
                 health_metrics,
                 health_watch,
             )
             .await
             {
-                // A check that cannot be built is a configuration error, and a
-                // node with checks it cannot run must not pretend to be
-                // participating: it is said out loud, because the alternative is
-                // a node advertising itself healthy while a check is failing to
-                // start on every interval.
                 tracing::error!(instance = %health_instance, "{reason}");
             }
         });

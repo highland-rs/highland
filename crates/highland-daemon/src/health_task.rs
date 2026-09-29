@@ -19,11 +19,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use highland_checks::{LinkProbe, Scheduler};
+use highland_checks::{Check, Scheduler};
 
 use crate::driver::{Instruction, InstructionSender};
 use crate::metrics::Metrics;
-use crate::options::CheckPlan;
 
 /// How long the task waits when nothing is due.
 ///
@@ -38,30 +37,19 @@ const IDLE: Duration = Duration::from_millis(200);
 /// Returns a message when a check cannot be built from its plan, which is a
 /// configuration error and stops the instance rather than starting a scheduler
 /// that can only fail.
+/// Runs the probes for one instance.
+///
+/// The probes arrive already built. The runner builds them *before* the instance
+/// is created, and refuses the instance if one cannot be built, so by the time
+/// this runs every probe is known to work. It used to be built here, and a
+/// failure was logged while the instance carried on without the check.
 pub(crate) async fn run(
     instance: &str,
-    plans: &[CheckPlan],
-    links: Arc<dyn LinkProbe>,
+    checks: Vec<Arc<dyn Check>>,
     sender: InstructionSender,
     metrics: Arc<Metrics>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
-    let mut checks = Vec::with_capacity(plans.len());
-    for plan in plans {
-        match crate::checks::build(plan, Arc::clone(&links)) {
-            Ok(check) => checks.push(check),
-            // A check that cannot be built would fail on every interval
-            // forever, so the instance is refused with the reason rather than
-            // started with a probe that cannot work.
-            Err(error) => {
-                return Err(format!(
-                    "instance {instance}: check {} cannot be built: {error}",
-                    plan.name
-                ));
-            }
-        }
-    }
-
     if checks.is_empty() {
         // Nothing to run. Waiting on the shutdown signal alone is the honest
         // thing: a task that woke to do nothing would be a wakeup per instance

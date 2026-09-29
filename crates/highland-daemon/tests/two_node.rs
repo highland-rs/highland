@@ -554,6 +554,62 @@ address = "192.0.2.99:9"
 /// The alternative — a check that fails on every interval forever — is a quieter
 /// way to take a node out of service than a refusal at startup, and the refusal
 /// is what an operator needs.
+/// The regression test for a health gate that did not exist.
+///
+/// The instance used to start anyway when one of its checks could not be built,
+/// take its VIP, and report itself `healthy` -- with the check that was supposed
+/// to hold it down never having run once. An unevaluable check is not a passing
+/// check; it is an unknown one, and unknown has to fail closed.
+///
+/// The node keeps running, which is the deliberate design the test above records:
+/// one unusable instance is not a reason to stop administering the others.
+#[test]
+fn an_instance_whose_check_cannot_run_never_takes_its_address() {
+    let bridge = bridge();
+    let name = bridge.name.clone();
+    let _bridge_guard = bridge;
+
+    let checks = r#"
+[[instance.check]]
+name = "secure"
+type = "https"
+weight = 50
+interval = "1s"
+timeout = "1s"
+failure_threshold = 1
+success_threshold = 1
+url = "https://192.0.2.10/health"
+expected_status = [200]
+"#;
+    let mut node = Node::create_with_checks(
+        "hccv",
+        A_ADDRESS,
+        &name,
+        false,
+        150,
+        VIRTUAL_ADDRESS,
+        24,
+        None,
+        checks,
+    );
+    node.start();
+
+    // Long enough for a healthy single node to have elected itself master and
+    // taken the address several times over.
+    std::thread::sleep(Duration::from_secs(5));
+
+    assert!(
+        !node.holds(VIRTUAL_ADDRESS),
+        "an instance that cannot evaluate its health gate must not own the address:\n{}",
+        node.log()
+    );
+    let log = node.log();
+    assert!(
+        log.contains("cannot be built"),
+        "and it must say why, rather than going quiet:\n{log}"
+    );
+}
+
 #[test]
 fn a_check_this_build_cannot_run_is_refused_by_name() {
     let bridge = bridge();

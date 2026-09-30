@@ -1038,9 +1038,25 @@ where
             Role::Disabled => self.pause(actions),
             Role::Fault => self.enter_fault(TransitionReason::OwnershipFailed, actions),
             Role::Init => {
-                self.timers.cancel_all();
+                // `I-14`: a forced return to `INIT` releases the addresses
+                // exactly as every other role change does. This arm used to set
+                // `owns_addresses = false` and clear `pending` on its own, which
+                // told the executor nothing: the advertisement timer was
+                // cancelled, so the node went silent, but the virtual address
+                // stayed on the interface. A peer then timed out, added the
+                // same address, and both nodes believed they owned it.
+                // `abandon_acquisition` covers the case where the instance was
+                // still acquiring, so a late add-success cannot leak either.
+                self.cancel(TimerId::Advertisement, actions);
+                if self.owns_addresses || self.pending.is_some() {
+                    actions.push(Action::RemoveVirtualAddresses);
+                }
                 self.owns_addresses = false;
-                self.pending = None;
+                self.advertise_failures = 0;
+                self.advertise_failure_since = None;
+                self.abandon_acquisition(actions);
+                self.timers.cancel_all();
+                self.preemption_armed_for = None;
                 self.transition(
                     Role::Init,
                     TransitionReason::OperatorForceTransition,

@@ -184,6 +184,35 @@ pub async fn run(options: Options) -> Result<(), DaemonError> {
         reason,
         instances.iter().map(|(name, _)| name.clone()).collect(),
     );
+
+    // Each actor now sends its priority-0 advertisement, asks the executor to
+    // remove the virtual addresses, and only then returns. Until these handles
+    // have been joined, `run` returns, the runtime drops them, and the process
+    // can exit while a master is still holding its VIP: the peer waits
+    // `Skew_Time`, finds the address still present, and the old kernel keeps
+    // answering ARP for it.
+    //
+    // `DEFAULT_SHUTDOWN_BUDGET` was defined and enforced nowhere, so a wedged
+    // instance used to be dropped instantly and now costs the documented budget
+    // before it is abandoned. Abandoning a task is not the same as having joined
+    // it, which is why that outcome is logged at error rather than passed over.
+    for (name, handle) in instances {
+        match tokio::time::timeout(plan.budget, handle).await {
+            Ok(Ok(())) => {}
+            // The actor panicked. The VIP may still be configured, so this is
+            // reported rather than swallowed, and shutdown continues.
+            Ok(Err(_)) => tracing::error!(
+                instance = %name,
+                "instance task ended abnormally; its addresses may still be configured"
+            ),
+            Err(_) => tracing::error!(
+                instance = %name,
+                seconds = plan.budget.as_secs(),
+                "instance did not relinquish within the shutdown budget"
+            ),
+        }
+    }
+
     for event in daemon.shutdown(plan) {
         tracing::info!(event = %event.name, reason = %event.reason, "highland stopped");
     }

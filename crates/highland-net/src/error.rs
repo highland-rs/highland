@@ -102,6 +102,23 @@ pub enum NetError {
         source: std::io::Error,
     },
 
+    /// A datagram arrived larger than the receive buffer and was cut short.
+    ///
+    /// The delivered prefix is not a valid VRRP advertisement: the checksum in
+    /// the sender's datagram covers the bytes it wrote and the kernel delivered
+    /// fewer, so validating the prefix checksums it against the wrong bytes. The
+    /// datagram is refused instead. This is the read side of `L-10`, the bound on
+    /// the advertisement the daemon accepts.
+    ///
+    /// The field is `from` rather than `source` because `thiserror` reserves
+    /// `source` for a cause that implements `std::error::Error`, and this is a
+    /// peer address.
+    #[error("datagram from {from} was truncated by the receive buffer")]
+    TruncatedDatagram {
+        /// The address the datagram appeared to come from.
+        from: std::net::IpAddr,
+    },
+
     /// An advertisement could not be encoded for the wire.
     #[error("could not encode an {family} advertisement: {reason}")]
     Encode {

@@ -491,6 +491,13 @@ impl VrrpSocket {
                     Ok(outcome) => {
                         let length = outcome.bytes;
                         let source = address_v4(outcome.address)?;
+                        // `outcome.bytes` is the number of bytes copied *into*
+                        // the buffer and never exceeds it, so the `min` below
+                        // never clipped anything. This flag is the only signal
+                        // that the datagram was longer than the buffer.
+                        if outcome.flags.contains(MsgFlags::MSG_TRUNC) {
+                            return Err(NetError::TruncatedDatagram { source });
+                        }
                         let ttl = hop_limit_v4(&outcome).unwrap_or(0);
                         let destination = received_destination_v4(&outcome);
                         (length, source, ttl, destination)
@@ -509,6 +516,9 @@ impl VrrpSocket {
                     Ok(outcome) => {
                         let length = outcome.bytes;
                         let source = address_v6(outcome.address)?;
+                        if outcome.flags.contains(MsgFlags::MSG_TRUNC) {
+                            return Err(NetError::TruncatedDatagram { source });
+                        }
                         let ttl = hop_limit_v6(&outcome).unwrap_or(0);
                         let destination = received_destination_v6(&outcome);
                         (length, source, ttl, destination)
@@ -525,6 +535,9 @@ impl VrrpSocket {
             }
         };
 
+        // `outcome.bytes` is the count the kernel copied in, so this is a
+        // belt-and-braces bound rather than the truncation check, which the
+        // `MSG_TRUNC` tests above already made.
         let length = length.min(buffer.len());
         Ok(Some(strip_header(
             &buffer[..length],

@@ -69,10 +69,14 @@ use crate::state::{
 use crate::timer::TimerSet;
 
 /// The number of consecutive advertisement failures that fault an instance,
-/// within [`ADVERTISE_FAILURE_WINDOW`].
+/// The streak is cleared by a successful advertisement, a role change, or an
+/// ownership confirmation, so this counts consecutive failures and not a total.
 pub const ADVERTISE_FAILURE_LIMIT: u32 = 3;
 
-/// The window over which advertisement failures are counted.
+/// How long the advertisement-failure path would allow a streak to span.
+///
+/// The path deliberately does not consult this; see
+/// `on_advertisement_failure` for why a rolling window is not kept.
 pub const ADVERTISE_FAILURE_WINDOW: Duration = Duration::from_secs(10);
 
 /// An ownership operation awaiting the executor's confirmation.
@@ -119,7 +123,6 @@ pub struct InstanceStateMachine<C> {
     owns_addresses: bool,
     retry_attempt: u32,
     advertise_failures: u32,
-    advertise_failure_since: Option<Duration>,
     preemption_armed_for: Option<u8>,
     deferred_advertisement: Option<PeerAdvertisement>,
     shutting_down: bool,
@@ -151,7 +154,6 @@ where
             owns_addresses: false,
             retry_attempt: 0,
             advertise_failures: 0,
-            advertise_failure_since: None,
             preemption_armed_for: None,
             deferred_advertisement: None,
             shutting_down: false,
@@ -727,10 +729,7 @@ where
         match kind {
             ActionKind::AddAddresses => self.on_ownership_confirmed(actions),
             ActionKind::RemoveAddresses => self.on_release_confirmed(actions),
-            ActionKind::Advertisement => {
-                self.advertise_failures = 0;
-                self.advertise_failure_since = None;
-            }
+            ActionKind::Advertisement => self.advertise_failures = 0,
             _ => {}
         }
     }
@@ -773,15 +772,22 @@ where
     }
 
     fn on_advertisement_failure(&mut self, actions: &mut Vec<Action>) {
-        let now = self.clock.now();
-        let since = *self.advertise_failure_since.get_or_insert(now);
         self.advertise_failures = self.advertise_failures.saturating_add(1);
-
-        if self.advertise_failures >= ADVERTISE_FAILURE_LIMIT
-            && now.saturating_sub(since) <= ADVERTISE_FAILURE_WINDOW
-        {
-            self.request_release(TransitionReason::OwnershipFailed, Role::Fault, actions);
+        if self.advertise_failures < ADVERTISE_FAILURE_LIMIT {
+            return;
         }
+
+        // `ADVERTISE_FAILURE_LIMIT` failures, however far apart, are enough.
+        // The streak counter is only cleared by a success, a role change, or
+        // an ownership confirmation, so it cannot reach the limit again while
+        // this call keeps returning. Counting failures "within
+        // ADVERTISE_FAILURE_WINDOW", as the constant's doc comment says, would
+        // need a rolling window this struct does not keep, and the previous
+        // attempt at one anchored on the first failure of the streak: once
+        // that instant aged past the window the guard was permanently false,
+        // so a master that kept failing to advertise stayed master forever,
+        // advertising into a black hole.
+        self.request_release(TransitionReason::OwnershipFailed, Role::Fault, actions);
     }
 
     // ----- ownership -------------------------------------------------------
@@ -855,7 +861,6 @@ where
         self.owns_addresses = true;
         self.retry_attempt = 0;
         self.advertise_failures = 0;
-        self.advertise_failure_since = None;
 
         actions.push(Action::SendGratuitousUpdates);
         self.transition(Role::Master, reason, actions);
@@ -894,7 +899,6 @@ where
         self.owns_addresses = false;
         self.pending = None;
         self.advertise_failures = 0;
-        self.advertise_failure_since = None;
 
         if next == Role::Fault {
             self.enter_fault(reason, actions);
@@ -1053,7 +1057,6 @@ where
                 }
                 self.owns_addresses = false;
                 self.advertise_failures = 0;
-                self.advertise_failure_since = None;
                 self.abandon_acquisition(actions);
                 self.timers.cancel_all();
                 self.preemption_armed_for = None;

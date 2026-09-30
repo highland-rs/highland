@@ -6,6 +6,21 @@ All notable changes to Highland are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A forced return to `INIT` released nothing** (`I-14`). The `Role::Init` arm of
+  `force_transition` set `owns_addresses = false` and cleared `pending` on its
+  own, and never asked the executor to remove the addresses. `highland
+  force-transition --role init --confirm` on a master therefore cancelled the
+  advertisement timer and left the virtual address on the interface. The node
+  went silent but kept forwarding for the VIP. A peer that then timed out on its
+  master-down timer added the same address, and both nodes believed they owned
+  it — the split brain `I-14` exists to prevent. Every other role arm already
+  released through `request_release`; this one now does too, and a forced `INIT`
+  during an in-flight acquisition still owes the best-effort removal that
+  `abandon_acquisition` performs elsewhere.
+
+
 ## [0.2.0] - 2026-09-29
 
 Seven defects, all found by auditing the product against its own specification

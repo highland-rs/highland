@@ -879,6 +879,69 @@ fn r10_a_forced_transition_is_audited_and_goes_through_the_executor() {
     );
 }
 
+// A forced return to `INIT` used to leave the virtual address on the
+// interface: the node stopped advertising but kept the VIP, and a peer that
+// timed out added the same address. That is the split brain `I-14` exists to
+// prevent.
+#[test]
+fn a_forced_init_releases_the_virtual_addresses() {
+    let mut machine = machine_with(config());
+    startup(&mut machine);
+    promote(&mut machine);
+    assert!(machine.owns_virtual_addresses());
+
+    let actions = machine.handle(Event::OperatorForceTransitionRequested {
+        target: Role::Init,
+        reason: "operator asked".to_owned(),
+    });
+    assert!(
+        actions.contains(&Action::RemoveVirtualAddresses),
+        "a master forced to INIT must give the address back, not drop it silently"
+    );
+    assert_eq!(machine.role(), Role::Init);
+    assert!(!machine.owns_virtual_addresses());
+}
+
+// The instance may be forced to `INIT` while an acquisition is still in
+// flight. The outstanding add is abandoned, and the addresses the executor
+// may already have added are still removed.
+#[test]
+fn a_forced_init_while_acquiring_still_removes_addresses() {
+    let mut machine = machine_with(config());
+    startup(&mut machine);
+
+    // The master-down timer emits the add; the confirmation has not arrived.
+    let actions = machine.handle(Event::TimerExpired(TimerId::MasterDown));
+    assert!(actions.contains(&Action::AddVirtualAddresses));
+    assert_ne!(machine.pending(), PendingOwnership::None);
+
+    let actions = machine.handle(Event::OperatorForceTransitionRequested {
+        target: Role::Init,
+        reason: "operator asked".to_owned(),
+    });
+    assert!(
+        actions.contains(&Action::RemoveVirtualAddresses),
+        "an in-flight acquisition is owed a best-effort removal"
+    );
+    assert_eq!(machine.pending(), PendingOwnership::None);
+    assert_eq!(machine.role(), Role::Init);
+}
+
+// A forced `INIT` on an instance that never owned anything must not ask the
+// executor to remove addresses it never added.
+#[test]
+fn a_forced_init_without_ownership_asks_for_no_removal() {
+    let mut machine = machine_with(config());
+    startup(&mut machine);
+
+    let actions = machine.handle(Event::OperatorForceTransitionRequested {
+        target: Role::Init,
+        reason: "operator asked".to_owned(),
+    });
+    assert!(!actions.contains(&Action::RemoveVirtualAddresses));
+    assert_eq!(machine.role(), Role::Init);
+}
+
 // ----- I-12, I-11: generations ------------------------------------------
 
 #[test]

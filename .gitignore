@@ -6,3 +6,4 @@ fuzz/target
 repomix-output.txt
 **/*.rs.bk
 *.pdb
+.fastembed_cache/

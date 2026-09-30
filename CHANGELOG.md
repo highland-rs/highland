@@ -6,6 +6,118 @@ All notable changes to Highland are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-29
+
+Seven defects, all found by auditing the product against its own specification
+rather than by testing what already worked. Four of them changed behaviour in a
+way an operator can observe, which is why this is 0.2.0 and not 0.1.1: a
+configuration that started cleanly on 0.1.0 can now be refused, and a reload
+that reported success can now be refused instead.
+
+Nothing here is an API break, and nothing here was found by a fuzzer. The fuzzer
+found nothing; it is worth saying plainly that a clean fuzz campaign is weak
+evidence, and that what actually paid was asking the running binary to reject
+things the documentation said it rejected.
+
+### Behaviour changes
+
+An operator upgrading from 0.1.0 should read these four.
+
+- **An instance may no longer peer with this node** (`V-08`). The rule was
+  documented, unit-tested, and enforced nowhere: `Options.local_addresses` was
+  documented as "used to reject self-peering", defaulted to an empty list, and was
+  never read. A node could name its own address as a peer, `check-config` would
+  call the file valid, the daemon would start, and the node would unicast its own
+  advertisements to itself. Both the startup path and the reload path now supply
+  the host's addresses, and the daemon refuses to start if they cannot be read —
+  "unknown" is not "none".
+- **`check-config` validates against the host it runs on.** It used to answer
+  "unknown" for everything a document cannot say, so it could not catch `V-08` or
+  `V-22` at all. A missing interface is now refused up front, naming the rule and
+  the way out (`defer_interface_binding`), instead of after loading the
+  configuration and reaching the bind with a raw netlink error.
+- **An instance whose health check cannot run no longer takes its VIP.** A check
+  type this build does not implement — `https`, `dns`, `process`, `file`,
+  `composite`, `command` — was logged as an error and the instance started
+  anyway, then elected itself master and reported itself `healthy`, with the check
+  that was supposed to hold it down never having run. The instance is now refused
+  before it is created. The node keeps running and other instances keep
+  participating, because one unusable instance is not a reason to stop
+  administering the rest.
+- **A reload that changes the peer list, the multicast settings, or
+  `allow_unconforming_hop_limit` is now refused.** None of the three was compared
+  by the reload planner, so a change to any of them classified as "no change": the
+  reload reported `Applied`, the generation advanced, the event history recorded
+  `reload_accepted`, and the node carried on using the values it had started with.
+  The third is the sharpest — it is the switch that relaxes TTL and hop-limit
+  enforcement, so a file saying it is off while the running socket had it on was a
+  security-relevant divergence that nothing reported.
+
+### Fixes
+
+- **The IPv6 Neighbour Advertisement was malformed and was discarded by the
+  kernel.** `gratuitous::neighbour_advertisement` built a 30-octet message against
+  the 32 it reserves: the flags field was one octet where RFC 4861 §4.4 has four,
+  and the option length was two octets where it has one. On an IPv6 takeover the
+  announcement was sent and dropped, the neighbour cache kept pointing at the dead
+  node, and traffic blackholed until that entry aged out. IPv4 is unaffected;
+  gratuitous ARP is a separate encoder.
+- **A reload produced no audit event and named no peer.** `SPEC.md` §22.1 lists
+  `reload` as destructive, so `R-28` requires an audit event naming the peer
+  credential. `EventName::ReloadAccepted` and `EventName::ReloadRejected` existed
+  for exactly this and had zero uses. The outcome *was* in the history, under
+  `EventName::DaemonLifecycle`, with `reload_accepted` as its reason — so an
+  operator filtering by event name could not find it. It is now its own event,
+  naming the peer, recorded where both entry points already meet so a `SIGHUP` and
+  a control-socket reload cannot disagree.
+- **The event history lost events silently.** The ring is bounded at 4096 and has
+  always known how many it dropped; `dropped()` was called from tests only. A
+  follower that was away long enough received a history with a hole in it and no
+  way to know. A bounded history now reports how many events before the client's
+  cursor are gone.
+
+### Testing
+
+- **A new fuzz target for the encoder.** All six existing targets called `decode`;
+  nothing called the encoder. Producing bytes that `decode_verified` accepts needs a
+  correct version, type, VRID, a count that agrees with the length, and a verifying
+  checksum — 307 million executions of `fuzz_vrrp_ipv4_packet` never entered it.
+  `fuzz_vrrp_round_trip` constructs a valid advertisement from arbitrary fields
+  and asserts that encode-then-decode preserves every field, that re-encoding is
+  the identity, and that the checksum depends on the RFC 2460 pseudo-header. The
+  last property guards a defect this project shipped once and that no decode-side
+  check can see.
+- **The minimized corpus is checked in.** It is 19MB on disk and about 580KB in
+  the repository, so the original "too large to commit" objection held of the
+  working tree and not of the repo. CI's 60 seconds now starts from real coverage
+  and gets stronger over time instead of resetting every run; the packet targets
+  went from 29 inputs to 10 million executions in 20 seconds.
+- **`scripts/audit-rules.py`** asks a real binary to reject one configuration per
+  documented rule. It found `V-08` and `V-22` in the published 0.1.0 binary, and is
+  the regression net for both.
+- **A two-node failover budget was 186ms tight.** `Master_Down_Interval` for a
+  1s interval at priority 150 is 3.414s by RFC 5798 §6.1, and the test allowed
+  3.6s — so a loaded runner failed a test whose assertion blamed the protocol code
+  for the test's own arithmetic. The budget is now derived from `skew_time`.
+
+### Known gaps
+
+Stated here rather than left to be found:
+
+- **There is still no test that proves a kernel accepts Highland's Neighbour
+  Advertisement and moves a real neighbour cache.** The IPv4 twin of that test
+  exists; the IPv6 one does not, and that gap is where the malformed message lived.
+  The fix is verified against RFC 4861 §4.4 byte by byte, not against a kernel.
+- **`check-config` still reports an unimplemented check type as valid.** The
+  refusal is at run time, where the instance is stopped, because refusing in
+  validation stops the whole daemon and one bad instance should not take down the
+  others.
+- **CI was, for one run, green in the only sense available: nobody had pressed the
+  button.** The `ci` workflow had two runs in its history before this release, and
+  three separate failures in the first of them were in jobs that had never
+  executed.
+
+
 ## [0.1.0] - 2026-09-28
 
 The first public release. Milestones 0 through 6 have landed, which is more than
@@ -24,34 +136,40 @@ can tell it otherwise. See the [split-brain notes](docs/user/compatibility.md).
 
 ### Release procedure
 
-The nine crates must be published in dependency order, because a crate that
-depends on a sibling cannot be published before it:
+`publish.sh` does the publishing, and it is tracked in the repository because a
+procedure that lives in one person's shell history is a procedure the next
+person retypes from memory:
 
 ```console
-$ for c in highland-core highland-vrrp highland-observe highland-control \
-           highland-config highland-checks highland-net \
-           highland-daemon highland-cli; do cargo publish -p $c; done
+$ ./publish.sh --dry-run   # prints the order, and what is already published
+$ ./publish.sh
 ```
 
-The order is not alphabetical and not the crate table's: it is the dependency
-graph. `highland-config` needs `highland-vrrp`, `highland-checks` needs
-`highland-core`, `highland-net` needs both, and the daemon needs everything.
+The order is the dependency graph, not the alphabet and not the directory order.
+It is written into the script, and `--dry-run` re-derives it, so a crate added
+without a case fails visibly instead of publishing into a hole.
 
-Before publishing, once:
+Two things about publishing that cost time on 0.1.0 and are now handled:
 
-- `publish` is `true` in `[workspace.package]`. It was `false` until now, and it
-  is the first thing `cargo publish` checks.
-- Every crate directory carries `LICENSE-MIT`, `LICENSE-APACHE`, and `README.md`
-  as symlinks to the repository root. Cargo follows them, and without them every
-  crate publishes with neither a licence file nor a readme in its tarball —
-  which is exactly the sort of thing nobody notices until a crate page renders
-  blank.
-- The CLI's binary is `highland`, not `highland-cli`. The systemd unit and the
-  installation guide already said `/usr/bin/highland`; the build disagreed with
-  them.
+- **The script waits for the index rather than sleeping.** crates.io propagates a
+  new release asynchronously, and publishing a dependent before the dependency is
+  visible fails with a "no matching package" error that reads like a broken
+  version requirement and invites the expensive wrong response of bumping a
+  version. The first 0.1.0 attempt stopped at `highland-checks` for exactly this
+  reason.
+- **A partial run is resumable.** Each crate is checked against the registry and
+  skipped if already published, so finishing a failed run is a re-run rather than
+  a re-derivation of what is left.
 
-`cargo package` succeeds only for crates with no unpublished sibling, so a local
-sweep proves packaging for the leaves and the rest are proven by publishing.
+After publishing, confirm from outside the workspace — a registry-only consumer
+proves the packaging, which is where the symlinked licences and readmes either
+worked or did not:
+
+```console
+$ cargo install highland-cli --version 0.2.0
+$ highland version
+highland 0.2.0
+```
 
 ### Historical notes
 

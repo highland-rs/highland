@@ -73,7 +73,7 @@ Instances that the change does not affect are never interrupted.
 
 ## Current state
 
-Highland is at 0.2.0, and not finished. The state machine, the VRRPv3
+Highland is at 0.2.1, and not finished. The state machine, the VRRPv3
 codec, the configuration layer, the Linux netlink backend, the raw VRRP socket,
 the control socket, the metrics endpoint, the event history, and the
 transactional reload are all implemented and tested, and a whole failover —

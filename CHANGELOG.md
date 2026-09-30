@@ -6,6 +6,24 @@ All notable changes to Highland are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-30
+
+Three defects, all in the ownership path, all found by auditing the product
+against its own specification rather than by testing what already worked.
+
+Every one of the three is a way for a node to believe it is master while it is
+not — or while a peer is. Two produce a split brain, the condition `I-14` exists
+to prevent, and the third leaves a master advertising into a black hole. There
+are no behaviour changes for an operator to plan around and no API breaks, which
+is why this is 0.2.1 rather than 0.3.0: an operator who does nothing is no worse
+off than on 0.2.0, and an operator who runs `force-transition`, stops the daemon
+under load, or loses the ability to send advertisements is better off.
+
+Two of the three were found because the code did not do what the rule beside it
+said. A window that could never fire and a shutdown path that documented a
+budget it never enforced are the same failure: the specification was right, the
+implementation was silent about the difference, and nothing tested the gap.
+
 ### Fixed
 
 - **A forced return to `INIT` released nothing** (`I-14`). The `Role::Init` arm of
@@ -19,6 +37,42 @@ All notable changes to Highland are recorded here. The format follows
   released through `request_release`; this one now does too, and a forced `INIT`
   during an in-flight acquisition still owes the best-effort removal that
   `abandon_acquisition` performs elsewhere.
+
+
+- **A master that could not advertise stayed master** (`I-24`).
+  `on_advertisement_failure` anchored its failure window on the *first* failure
+  of a streak and never moved it, then required the current time to fall inside
+  that window to fault. Once the opening failure aged past
+  `ADVERTISE_FAILURE_WINDOW` — ten seconds — the condition was permanently false.
+  A node whose first advertisement send failed and then went on failing
+  intermittently incremented a counter that could no longer trigger anything: it
+  kept `MASTER`, kept the virtual address, and kept advertising into a black hole
+  while peers that had timed out contested it. The limit is now counted over
+  consecutive failures, which the streak already resets on any success, a role
+  change, or an ownership confirmation. The constant's own doc comment said
+  failures were counted "within" the window, so the code did not match its
+  documented intent.
+
+- **The daemon could exit before it had given the address back.** On `SIGTERM` the
+  run loop sent the shutdown signal, built a `ShutdownPlan`, logged each step of
+  the daemon's own sequence, and returned — the instance `JoinHandle`s were
+  dropped without a single `await`, and `DEFAULT_SHUTDOWN_BUDGET` was defined and
+  enforced nowhere. Each actor still had to observe the signal, send its
+  priority-0 advertisement, and have the executor's `RemoveVirtualAddresses`
+  netlink call return. The process could exit mid-handshake, leaving the
+  relinquishing node's kernel answering ARP for a VIP the peer had already taken
+  over after waiting `Skew_Time`. The handles are now joined within the plan's
+  own budget, and a task that overruns it or has panicked is reported rather than
+  dropped in silence.
+
+### Testing
+
+The first and second fixes are covered by tests that fail against 0.2.0. The
+third is not: `run` needs a live signal, a valid configuration, and a real
+backend, and the handles are not reachable from a test. The ordering it restores
+is covered at the machine level by `I-14` and `I-32`, but nothing yet verifies
+end to end that a real master removed its address before the process went away.
+That gap is recorded rather than papered over.
 
 
 ## [0.2.0] - 2026-09-29

@@ -16,7 +16,7 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
@@ -32,13 +32,13 @@ keywords = ["vrrp", "high-availability", "failover", "networking"]
 publish = true
 
 [workspace.dependencies]
-highland-core = { path = "crates/highland-core", version = "0.2.0" }
-highland-vrrp = { path = "crates/highland-vrrp", version = "0.2.0" }
-highland-net = { path = "crates/highland-net", version = "0.2.0" }
-highland-checks = { path = "crates/highland-checks", version = "0.2.0" }
-highland-config = { path = "crates/highland-config", version = "0.2.0" }
-highland-observe = { path = "crates/highland-observe", version = "0.2.0" }
-highland-control = { path = "crates/highland-control", version = "0.2.0" }
+highland-core = { path = "crates/highland-core", version = "0.2.1" }
+highland-vrrp = { path = "crates/highland-vrrp", version = "0.2.1" }
+highland-net = { path = "crates/highland-net", version = "0.2.1" }
+highland-checks = { path = "crates/highland-checks", version = "0.2.1" }
+highland-config = { path = "crates/highland-config", version = "0.2.1" }
+highland-observe = { path = "crates/highland-observe", version = "0.2.1" }
+highland-control = { path = "crates/highland-control", version = "0.2.1" }
 
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }

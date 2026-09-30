@@ -79,7 +79,7 @@ wait_for_index() {
 	deadline=$((SECONDS + index_timeout))
 
 	printf 'waiting for %s %s to reach the index\n' "$name" "$version"
-	while ! is_published "$name"; do
+	while ! is_published "$name" "$version"; do
 		if ((SECONDS >= deadline)); then
 			printf 'timed out after %ds waiting for %s %s\n' \
 				"$index_timeout" "$name" "$version" >&2

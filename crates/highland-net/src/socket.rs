@@ -496,7 +496,7 @@ impl VrrpSocket {
                         // never clipped anything. This flag is the only signal
                         // that the datagram was longer than the buffer.
                         if outcome.flags.contains(MsgFlags::MSG_TRUNC) {
-                            return Err(NetError::TruncatedDatagram { source });
+                            return Err(NetError::TruncatedDatagram { from: source });
                         }
                         let ttl = hop_limit_v4(&outcome).unwrap_or(0);
                         let destination = received_destination_v4(&outcome);
@@ -517,7 +517,7 @@ impl VrrpSocket {
                         let length = outcome.bytes;
                         let source = address_v6(outcome.address)?;
                         if outcome.flags.contains(MsgFlags::MSG_TRUNC) {
-                            return Err(NetError::TruncatedDatagram { source });
+                            return Err(NetError::TruncatedDatagram { from: source });
                         }
                         let ttl = hop_limit_v6(&outcome).unwrap_or(0);
                         let destination = received_destination_v6(&outcome);

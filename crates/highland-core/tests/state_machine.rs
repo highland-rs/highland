@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use highland_core::clock::ManualClock;
 use highland_core::health::{HealthPolicy, HealthPolicyConfig, HealthSummary};
-use highland_core::machine::{InstanceStateMachine, PendingOwnership};
+use highland_core::machine::{ADVERTISE_FAILURE_WINDOW, InstanceStateMachine, PendingOwnership};
 use highland_core::state::{
     Action, ActionKind, Event, Generation, InstanceConfig, PeerAdvertisement, Role, TimerId,
     TransitionReason,
@@ -1127,6 +1127,59 @@ fn a_successful_advertisement_resets_the_failure_streak() {
         machine.role(),
         Role::Master,
         "the streak was reset by a success"
+    );
+}
+
+#[test]
+fn failures_far_apart_in_time_still_fault_the_instance() {
+    let mut machine = machine_with(config());
+    startup(&mut machine);
+    promote(&mut machine);
+
+    // The opening failure, then two more separated by more than
+    // `ADVERTISE_FAILURE_WINDOW`, which is what a long-lived intermittent send
+    // failure looks like. The old guard compared the current time against the
+    // instant of the *first* failure, so once that instant aged past the window
+    // the guard was permanently false and the counter could climb forever.
+    let far = ADVERTISE_FAILURE_WINDOW + Duration::from_secs(1);
+    let _ = machine.handle(Event::ActionFailed {
+        kind: ActionKind::Advertisement,
+        error: "EPERM".to_owned(),
+    });
+    machine.clock().advance(far);
+    let _ = machine.handle(Event::ActionFailed {
+        kind: ActionKind::Advertisement,
+        error: "EPERM".to_owned(),
+    });
+
+    assert_eq!(
+        machine.role(),
+        Role::Master,
+        "two failures have not yet reached the limit"
+    );
+
+    machine.clock().advance(far);
+    let actions = machine.handle(Event::ActionFailed {
+        kind: ActionKind::Advertisement,
+        error: "EPERM".to_owned(),
+    });
+
+    // `I-14`: an instance that owns addresses cannot be `FAULT`, so reaching
+    // the limit requests the release, and the fault is entered once the
+    // executor confirms the removal. The old code never got this far.
+    assert!(
+        actions.contains(&Action::RemoveVirtualAddresses),
+        "reaching the limit asks the executor to release the addresses"
+    );
+
+    let _ = machine.handle(Event::ActionSucceeded {
+        kind: ActionKind::RemoveAddresses,
+    });
+
+    assert_eq!(
+        machine.role(),
+        Role::Fault,
+        "three consecutive failures fault the instance however far apart they are"
     );
 }
 

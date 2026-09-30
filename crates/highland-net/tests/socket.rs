@@ -441,9 +441,9 @@ async fn a_datagram_larger_than_the_buffer_is_refused_rather_than_truncated() {
         .send_to(&oversized, address)
         .expect("the oversized datagram is written to the socket");
 
-    let arrival = receiver
-        .receive_timeout(Duration::from_secs(2))
-        .expect("the read does not fail");
+    // The refusal is the `Err` of the outer `Result`, not a value: a truncated
+    // datagram is a read error, not an arrival that happened to be rejected.
+    let arrival = receiver.receive_timeout(Duration::from_secs(2));
 
     assert!(
         matches!(arrival, Err(NetError::TruncatedDatagram { .. })),

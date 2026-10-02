@@ -6,6 +6,19 @@ All notable changes to Highland are recorded here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **An oversized datagram was silently cut short and then validated.** `receive`
+  read `outcome.bytes`, the number of bytes the kernel copied into the buffer,
+  and never read `outcome.flags`. On Linux that count never exceeds the buffer,
+  so the `min` against `buffer.len()` could not clip anything and `MSG_TRUNC` was
+  the only signal that the datagram had been truncated — a signal nothing was
+  reading. A peer that sent more than the receive buffer got its first 4096 bytes
+  handed to `strip_header` and then to `validate`, where the checksum in the
+  datagram covers bytes the receiver never saw. Both family arms now refuse a
+  truncated datagram with `NetError::TruncatedDatagram`, which is the read side
+  of `L-10`.
+
 ## [0.2.1] - 2026-09-30
 
 Three defects, all in the ownership path, all found by auditing the product

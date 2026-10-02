@@ -423,3 +423,30 @@ async fn an_ipv6_datagram_arrives_with_its_hop_limit() {
         "the hop limit is read from ancillary data, and it is what was sent"
     );
 }
+
+#[tokio::test]
+async fn a_datagram_larger_than_the_buffer_is_refused_rather_than_truncated() {
+    let address = loopback(25);
+    let sender =
+        highland_net::VrrpSocket::bind(IpFamily::V4, "lo", address).expect("the sender binds");
+    let receiver =
+        highland_net::VrrpSocket::bind(IpFamily::V4, "lo", address).expect("the receiver binds");
+
+    // Larger than `MAX_DATAGRAM`, so the kernel sets `MSG_TRUNC` and delivers
+    // only the prefix. That prefix is not a valid advertisement: the checksum in
+    // the datagram covers bytes the receiver never saw. Before the flag was
+    // checked, the prefix went on to `strip_header` and then to `validate`.
+    let oversized = vec![0x41u8; highland_net::MAX_DATAGRAM + 512];
+    sender
+        .send_to(&oversized, address)
+        .expect("the oversized datagram is written to the socket");
+
+    // The refusal is the `Err` of the outer `Result`, not a value: a truncated
+    // datagram is a read error, not an arrival that happened to be rejected.
+    let arrival = receiver.receive_timeout(Duration::from_secs(2));
+
+    assert!(
+        matches!(arrival, Err(NetError::TruncatedDatagram { .. })),
+        "an oversized datagram is refused, got {arrival:?}"
+    );
+}

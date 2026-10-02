@@ -855,7 +855,7 @@ mod tests {
     #[test]
     fn an_empty_datagram_is_handled() {
         let received = strip_header(&[], "192.0.2.11".parse().expect("valid"), 255, None);
-        assert!(received.payload.is_empty());
+        assert_eq!(received.payload, Vec::new());
         assert!(!received.header_attached);
     }
 }

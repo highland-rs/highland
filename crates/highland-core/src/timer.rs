@@ -175,7 +175,7 @@ mod tests {
     #[test]
     fn arming_records_a_deadline_and_cancelling_removes_it() {
         let mut timers = TimerSet::new();
-        assert!(timers.is_empty());
+        assert!(timers.is_empty(), "no timer is armed yet");
 
         timers.arm(TimerId::MasterDown, Duration::from_secs(3));
         assert!(timers.is_armed(TimerId::MasterDown));
@@ -194,7 +194,7 @@ mod tests {
         let mut timers = TimerSet::new();
         timers.cancel(TimerId::Advertisement);
         timers.cancel(TimerId::Advertisement);
-        assert!(timers.is_empty());
+        assert!(timers.is_empty(), "cancelling empties the set");
     }
 
     #[test]
@@ -257,8 +257,8 @@ mod tests {
         timers.arm(TimerId::MasterDown, Duration::from_secs(1));
         timers.arm(TimerId::HoldDown, Duration::from_secs(2));
         timers.cancel_all();
-        assert!(timers.is_empty());
-        assert!(timers.due(Duration::from_secs(100)).is_empty());
+        assert!(timers.is_empty(), "cancel_all leaves nothing armed");
+        assert_eq!(timers.due(Duration::from_secs(100)), Vec::new());
     }
 
     #[test]

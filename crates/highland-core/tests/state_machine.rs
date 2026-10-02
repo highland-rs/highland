@@ -789,7 +789,7 @@ fn i30_a_cancelled_timer_does_not_fire_after_a_reload() {
     startup(&mut machine);
     let _ = machine.handle(Event::OperatorPauseRequested);
     assert_eq!(machine.role(), Role::Disabled);
-    assert!(machine.timers().is_empty());
+    assert!(machine.timers().is_empty(), "no timer remains armed");
 
     let actions = machine.handle(Event::TimerExpired(TimerId::MasterDown));
     assert!(!actions.contains(&Action::AddVirtualAddresses));
@@ -844,7 +844,7 @@ fn r09_pausing_a_master_releases_ownership_before_disabling() {
         kind: ActionKind::RemoveAddresses,
     });
     assert_eq!(machine.role(), Role::Disabled);
-    assert!(machine.timers().is_empty());
+    assert!(machine.timers().is_empty(), "a pause arms nothing");
 }
 
 #[test]
@@ -1027,7 +1027,7 @@ fn i31_a_second_shutdown_request_is_idempotent() {
     let first = machine.role();
     let _ = machine.handle(Event::ShutdownRequested);
     assert_eq!(machine.role(), first);
-    assert!(machine.timers().is_empty());
+    assert!(machine.timers().is_empty(), "no timer remains armed");
 }
 
 #[test]

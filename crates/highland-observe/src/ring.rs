@@ -269,7 +269,7 @@ mod sequence_tests {
     fn an_empty_ring_reports_nothing_new() {
         let ring = EventRing::with_capacity(4);
         assert_eq!(ring.latest(), 0);
-        assert!(ring.since(0, 10).is_empty());
+        assert_eq!(ring.since(0, 10), Vec::new(), "nothing is retained yet");
     }
 
     /// A client resuming from a cursor that has fallen off the front of the ring

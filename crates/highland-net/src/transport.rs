@@ -194,7 +194,20 @@ impl SocketTransport {
                 }
             };
             match self.socket.send_to(&bytes, *peer) {
-                Ok(_) => delivered += 1,
+                // A short write is not a delivery. The kernel can accept fewer
+                // bytes than were offered when the destination MTU cannot hold
+                // the message, and the peer receives a frame whose checksum does
+                // not cover what this node believes it sent.
+                Ok(wrote) if wrote == bytes.len() => delivered += 1,
+                Ok(wrote) => {
+                    if first_failure.is_none() {
+                        first_failure = Some(NetError::ShortWrite {
+                            wrote,
+                            expected: bytes.len(),
+                            to: *peer,
+                        });
+                    }
+                }
                 Err(error) => {
                     if first_failure.is_none() {
                         first_failure = Some(error);

@@ -8,6 +8,18 @@ All notable changes to Highland are recorded here. The format follows
 
 ### Fixed
 
+- **A short write counted as a delivered advertisement.** `send` matched
+  `Ok(_) => delivered += 1`, discarding the byte count the socket returned. A raw
+  or packet socket can accept fewer bytes than were offered when the destination
+  MTU cannot hold the message and the datagram is not fragmented; the remainder is
+  discarded rather than queued. The peer then receives a frame whose checksum does
+  not cover what this node believes it sent, and the node counts the write as
+  delivered — so the advertisement-failure streak never advances and a master
+  keeps sending frames no peer can validate. All three send paths, the VRRP
+  advertisement and both gratuitous announcements, now compare the returned count
+  with the length offered and refuse a partial write. This is the write side of
+  `L-10`.
+
 - **An oversized datagram was silently cut short and then validated.** `receive`
   read `outcome.bytes`, the number of bytes the kernel copied into the buffer,
   and never read `outcome.flags`. On Linux that count never exceeds the buffer,

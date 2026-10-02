@@ -181,9 +181,16 @@ pub fn send_gratuitous_arp(
 ) -> io::Result<()> {
     let frame = gratuitous_arp_frame(hardware, address);
     let socket = packet_socket(interface, ETHERTYPE_ARP)?;
-    socket
-        .send_to(&frame, &link_layer_address(interface, ETHERTYPE_ARP))
-        .map(|_| ())
+    let wrote = socket.send_to(&frame, &link_layer_address(interface, ETHERTYPE_ARP))?;
+    // A short write leaves a truncated ARP frame on the wire. The peer would
+    // fail to parse it, and this node would believe the takeover was announced.
+    if wrote != frame.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            format!("short write: {wrote} of {} bytes of ARP frame", frame.len()),
+        ));
+    }
+    Ok(())
 }
 
 /// Sends an unsolicited Neighbor Advertisement for `address` out of `interface`.
@@ -238,9 +245,20 @@ pub fn send_neighbour_advertisement(
         0,
         u32::try_from(interface.get()).unwrap_or(0),
     ));
-    socket
-        .send_to(&neighbour_advertisement(hardware, address), &destination)
-        .map(|_| ())
+    let frame = neighbour_advertisement(hardware, address);
+    let wrote = socket.send_to(&frame, &destination)?;
+    // A short write leaves a truncated neighbour advertisement on the wire,
+    // and the address appears to have been announced when it was not.
+    if wrote != frame.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            format!(
+                "short write: {wrote} of {} bytes of neighbour advertisement",
+                frame.len()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Returns an `AF_PACKET` socket bound for sending on `interface`.

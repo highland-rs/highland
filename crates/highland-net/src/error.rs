@@ -102,6 +102,27 @@ pub enum NetError {
         source: std::io::Error,
     },
 
+    /// A datagram or link-layer frame was only partly written.
+    ///
+    /// A short write is not a success. On a raw or packet socket the kernel can
+    /// accept fewer bytes than were offered when the destination MTU cannot hold
+    /// the message and the datagram is not fragmented, and the remainder is
+    /// discarded rather than queued. The peer then receives a frame whose
+    /// checksum does not cover what was sent, and this node would otherwise
+    /// count the write as delivered.
+    ///
+    /// The fields are named `wrote` and `expected` rather than using `source`,
+    /// which `thiserror` reserves for a cause implementing `std::error::Error`.
+    #[error("short write: {wrote} of {expected} bytes reached {to}")]
+    ShortWrite {
+        /// How many bytes the kernel accepted.
+        wrote: usize,
+        /// How many bytes were offered.
+        expected: usize,
+        /// Where the datagram was going, for the operator reading the log.
+        to: std::net::IpAddr,
+    },
+
     /// A datagram arrived larger than the receive buffer and was cut short.
     ///
     /// The delivered prefix is not a valid VRRP advertisement: the checksum in

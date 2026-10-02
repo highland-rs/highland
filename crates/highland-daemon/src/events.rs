@@ -277,7 +277,7 @@ mod tests {
         let log = EventLog::new();
         assert!(log.is_empty());
         assert_eq!(log.latest(), 0);
-        assert!(log.since(0, 10).is_empty());
+        assert_eq!(log.since(0, 10), Vec::new(), "nothing is retained yet");
     }
 
     #[test]

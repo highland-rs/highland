@@ -6,6 +6,8 @@ All notable changes to Highland are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-12
+
 ### Fixed
 
 - **Updated Tokio and rustix to address I/O safety advisories.** The lockfile

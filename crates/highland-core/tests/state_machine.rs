@@ -383,7 +383,7 @@ fn i45_a_failure_for_an_unknown_action_is_still_handled() {
         Role::Backup,
         "a failed event write is not fatal"
     );
-    assert!(!actions.is_empty());
+    assert_ne!(actions, []);
 }
 
 #[test]
@@ -1306,7 +1306,7 @@ fn i37_every_role_transition_carries_a_reason() {
         })
         .expect("a role change always carries a reason");
     assert_eq!(reason, TransitionReason::MasterDownTimeout);
-    assert!(!reason.to_string().is_empty());
+    assert_ne!(reason.to_string(), "");
 }
 
 // ----- I-40: repeated failures stay bounded ------------------------------

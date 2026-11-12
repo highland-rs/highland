@@ -8,6 +8,10 @@ All notable changes to Highland are recorded here. The format follows
 
 ### Fixed
 
+- **Tokio updated to address an I/O safety advisory.** The lockfile now selects
+  Tokio 1.53.3, which fixes the unsound `AsyncFd` constructors reported in
+  RUSTSEC-2026-0386.
+
 - **`highland-observe` no longer builds on a current stable.** `Counter::add` and
   `Counter::sub` used `Atomic::fetch_update`, which the standard library renamed to
   `Atomic::try_update` for consistency with the other `try_*` methods. The rename

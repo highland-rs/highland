@@ -8,9 +8,10 @@ All notable changes to Highland are recorded here. The format follows
 
 ### Fixed
 
-- **Tokio updated to address an I/O safety advisory.** The lockfile now selects
-  Tokio 1.53.3, which fixes the unsound `AsyncFd` constructors reported in
-  RUSTSEC-2026-0386.
+- **Updated Tokio and rustix to address I/O safety advisories.** The lockfile
+  now selects Tokio 1.53.3 and rustix 1.1.6, fixing the unsound `AsyncFd`
+  constructors and xattr buffer handling reported in RUSTSEC-2026-0386 and
+  RUSTSEC-2026-0486.
 
 - **`highland-observe` no longer builds on a current stable.** `Counter::add` and
   `Counter::sub` used `Atomic::fetch_update`, which the standard library renamed to

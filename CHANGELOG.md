@@ -8,6 +8,11 @@ All notable changes to Highland are recorded here. The format follows
 
 ### Fixed
 
+- **Updated Tokio and rustix to address I/O safety advisories.** The lockfile
+  now selects Tokio 1.53.3 and rustix 1.1.6, fixing the unsound `AsyncFd`
+  constructors and xattr buffer handling reported in RUSTSEC-2026-0386 and
+  RUSTSEC-2026-0486.
+
 - **`highland-observe` no longer builds on a current stable.** `Counter::add` and
   `Counter::sub` used `Atomic::fetch_update`, which the standard library renamed to
   `Atomic::try_update` for consistency with the other `try_*` methods. The rename
@@ -21,7 +26,17 @@ All notable changes to Highland are recorded here. The format follows
   operation, is available on the MSRV, and is not deprecated. No behaviour
   changed: the update is still saturating, and still retried on a lost race.
 
-
+- **A short write counted as a delivered advertisement.** `send` matched
+  `Ok(_) => delivered += 1`, discarding the byte count the socket returned. A raw
+  or packet socket can accept fewer bytes than were offered when the destination
+  MTU cannot hold the message and the datagram is not fragmented; the remainder is
+  discarded rather than queued. The peer then receives a frame whose checksum does
+  not cover what this node believes it sent, and the node counts the write as
+  delivered — so the advertisement-failure streak never advances and a master
+  keeps sending frames no peer can validate. All three send paths, the VRRP
+  advertisement and both gratuitous announcements, now compare the returned count
+  with the length offered and refuse a partial write. This is the write side of
+  `L-10`.
 - **An oversized datagram was silently cut short and then validated.** `receive`
   read `outcome.bytes`, the number of bytes the kernel copied into the buffer,
   and never read `outcome.flags`. On Linux that count never exceeds the buffer,

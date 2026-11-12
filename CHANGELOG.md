@@ -8,6 +8,20 @@ All notable changes to Highland are recorded here. The format follows
 
 ### Fixed
 
+- **`highland-observe` no longer builds on a current stable.** `Counter::add` and
+  `Counter::sub` used `Atomic::fetch_update`, which the standard library renamed to
+  `Atomic::try_update` for consistency with the other `try_*` methods. The rename
+  is a deprecation, and CI compiles with `-D warnings`, so every Linux and macOS
+  job failed on every branch, including `main`.
+
+  The obvious fix does not work here. `Atomic::try_update` is only stable from
+  1.95 and this workspace's MSRV is 1.85, so renaming the call trades a
+  deprecation for `clippy::incompatible-msrv` and breaks the MSRV job instead.
+  Both methods now use a `compare_exchange_weak` loop, which is the same
+  operation, is available on the MSRV, and is not deprecated. No behaviour
+  changed: the update is still saturating, and still retried on a lost race.
+
+
 - **An oversized datagram was silently cut short and then validated.** `receive`
   read `outcome.bytes`, the number of bytes the kernel copied into the buffer,
   and never read `outcome.flags`. On Linux that count never exceeds the buffer,

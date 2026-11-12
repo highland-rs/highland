@@ -269,7 +269,7 @@ address = "192.0.2.100/24"
         let plan = plan(&config(RUNNING), &config(RUNNING));
 
         assert!(plan.is_applicable());
-        assert!(plan.reloadable().is_empty());
+        assert!(plan.reloadable().is_empty(), "nothing needs restarting");
         assert_eq!(plan.changes, [("api".to_owned(), Change::None)]);
     }
 

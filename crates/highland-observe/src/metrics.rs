@@ -58,20 +58,35 @@ impl Gauge {
 
     /// Adds `amount`, saturating at zero.
     pub fn add(&self, amount: u64) {
-        let _ = self
-            .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_add(amount))
-            });
+        self.updated(|current| current.saturating_add(amount));
     }
 
     /// Subtracts `amount`, saturating at zero.
     pub fn sub(&self, amount: u64) {
-        let _ = self
-            .0
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current.saturating_sub(amount))
-            });
+        self.updated(|current| current.saturating_sub(amount));
+    }
+    /// Replaces the current value with `f` applied to it, until stored.
+    ///
+    /// `Atomic::fetch_update` was renamed to `Atomic::try_update`, but
+    /// `try_update` is only stable from 1.95 and this workspace's MSRV is 1.85,
+    /// so neither spelling satisfies both toolchains. This loop is the same
+    /// operation, is available on the MSRV, and is not deprecated.
+    ///
+    /// `f` always returns a value, so the loop retries only when another thread
+    /// won the race; each pass observes a newer value and tries again.
+    fn updated(&self, f: impl Fn(u64) -> u64) {
+        let mut current = self.0.load(Ordering::Relaxed);
+        loop {
+            match self.0.compare_exchange_weak(
+                current,
+                f(current),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
     }
 
     /// Returns the current value.
